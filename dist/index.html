@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Agent Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #07070f;
+      --surface:  #0d0d1a;
+      --card:     #111120;
+      --border:   #1c1c35;
+      --text:     #e2e8f0;
+      --muted:    #4a5568;
+      --accent:   #818cf8;
+      --success:  #4ade80;
+      --error:    #f87171;
+      --warning:  #fb923c;
+      --purple:   #c084fc;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 28px 24px 48px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* ── header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 36px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    header h1 .dot { color: var(--accent); }
+    .header-meta { text-align: right; }
+    .header-meta .ts { font-size: 0.72rem; color: var(--muted); display: block; }
+    .live-badge {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #4ade8020;
+      color: var(--success);
+      border: 1px solid #4ade8040;
+      margin-bottom: 6px;
+    }
+
+    /* ── stat cards ── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+    .stat-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 14px;
+      background: var(--glow, transparent);
+      pointer-events: none;
+    }
+    .stat-card.c-accent  { --glow: radial-gradient(ellipse at top left, #818cf810, transparent 60%); }
+    .stat-card.c-success { --glow: radial-gradient(ellipse at top left, #4ade8010, transparent 60%); }
+    .stat-card.c-warning { --glow: radial-gradient(ellipse at top left, #fb923c10, transparent 60%); }
+    .stat-card.c-error   { --glow: radial-gradient(ellipse at top left, #f8717110, transparent 60%); }
+    .stat-card.c-purple  { --glow: radial-gradient(ellipse at top left, #c084fc10, transparent 60%); }
+    .stat-card .label {
+      font-size: 0.68rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .stat-card .value {
+      font-size: 2.1rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+    .stat-card .sub {
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .c-accent  .value { color: var(--accent); }
+    .c-success .value { color: var(--success); }
+    .c-warning .value { color: var(--warning); }
+    .c-error   .value { color: var(--error); }
+    .c-purple  .value { color: var(--purple); }
+
+    /* ── charts grid ── */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    .chart-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 22px 22px;
+    }
+    .chart-card h2 {
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 18px;
+    }
+    .chart-wrap {
+      position: relative;
+      height: 230px;
+    }
+    .no-data {
+      height: 230px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.8rem;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+    }
+
+    /* ── footer ── */
+    footer {
+      margin-top: 36px;
+      text-align: center;
+      font-size: 0.7rem;
+      color: var(--muted);
+      letter-spacing: 0.03em;
+    }
+
+    /* ── responsive ── */
+    @media (max-width: 1100px) {
+      .charts-grid { grid-template-columns: repeat(2, 1fr); }
+      .stats-grid  { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 700px) {
+      .charts-grid { grid-template-columns: 1fr; }
+      .stats-grid  { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+  <meta http-equiv="refresh" content="5">
+</head>
+<body>
+
+  <header>
+    <h1>Multi<span class="dot">·</span>Agent Dashboard</h1>
+    <div class="header-meta">
+      <span class="live-badge">● live</span>
+      <span class="ts" id="ts"></span>
+    </div>
+  </header>
+
+  <div class="stats-grid">
+    <div class="stat-card c-accent">
+      <div class="label">Total Requests</div>
+      <div class="value" id="s-total">—</div>
+      <div class="sub">sesiones registradas</div>
+    </div>
+    <div class="stat-card c-success">
+      <div class="label">Success Rate</div>
+      <div class="value" id="s-rate">—</div>
+      <div class="sub" id="s-abs"></div>
+    </div>
+    <div class="stat-card c-warning">
+      <div class="label">Blocked</div>
+      <div class="value" id="s-blocked">—</div>
+      <div class="sub">por guardrail</div>
+    </div>
+    <div class="stat-card c-error">
+      <div class="label">Errors</div>
+      <div class="value" id="s-errors">—</div>
+      <div class="sub">error + low_conf</div>
+    </div>
+    <div class="stat-card c-purple">
+      <div class="label">Avg Regret</div>
+      <div class="value" id="s-regret">—</div>
+      <div class="sub">best − actual delta</div>
+    </div>
+  </div>
+
+  <div class="charts-grid">
+    <div class="chart-card">
+      <h2>Latencia por Estrategia</h2>
+      <div id="w-lat-strat"><div class="chart-wrap"><canvas id="c-lat-strat"></canvas></div></div>
+    </div>
+    <div class="chart-card">
+      <h2>Success Rate por Categoría</h2>
+      <div id="w-success-cat"><div class="chart-wrap"><canvas id="c-success-cat"></canvas></div></div>
+    </div>
+    <div class="chart-card">
+      <h2>Regret en el Tiempo</h2>
+      <div id="w-regret"><div class="chart-wrap"><canvas id="c-regret"></canvas></div></div>
+    </div>
+    <div class="chart-card">
+      <h2>Latencia por Agente</h2>
+      <div id="w-lat-agent"><div class="chart-wrap"><canvas id="c-lat-agent"></canvas></div></div>
+    </div>
+    <div class="chart-card">
+      <h2>Costo por Modelo</h2>
+      <div id="w-cost"><div class="chart-wrap"><canvas id="c-cost"></canvas></div></div>
+    </div>
+    <div class="chart-card">
+      <h2>Eficiencia · tokens / ms</h2>
+      <div id="w-eff"><div class="chart-wrap"><canvas id="c-eff"></canvas></div></div>
+    </div>
+  </div>
+
+  <footer>Multi-Agent Observability · generado con build_dashboard.py</footer>
+
+  <script>
+    const DATA = {"generated_at": "2026-03-27 12:58 UTC", "total": 27, "success": 27, "blocked": 0, "errors": 0, "avg_regret": 0.0336, "latency_by_strategy": {"api_price": {"median": 4983, "p95": 15660, "avg": 7709, "min": 1581, "max": 15823, "n": 8}, "free": {"median": 14862, "p95": 27158, "avg": 16090, "min": 7185, "max": 33185, "n": 18}, "prefer_search": {"median": 13777, "p95": 13777, "avg": 13777, "min": 13777, "max": 13777, "n": 1}}, "latency_by_agent": {"web_scraping_agent": {"median": 13756, "p95": 25697, "avg": 13521, "min": 1581, "max": 33185, "n": 27}}, "cost": {"gpt-4o-mini": 0.0071169}, "outcomes_by_agent": {"web_scraping_agent": {"success": 27}}, "success_by_category": {"crypto_price": {"success": 8}, "news": {"success": 19}}, "efficiency": {"web_scraping_agent": {"mean": 0.1286, "std": 0.0336, "n": 20}}, "regret_series": [[1, 0.0], [2, 0.0], [3, 0.0], [4, 0.0], [5, 0.0], [6, 0.0], [7, 0.0], [8, 0.0], [9, 0.0], [10, 0.0], [11, 0.0], [12, 0.01], [13, 0.065], [14, 0.0], [15, 0.062], [16, 0.0], [17, 0.0], [18, 0.0], [19, 0.339], [20, 0.189], [21, 0.239], [22, 0.0], [23, 0.002], [24, 0.0], [25, 0.0], [26, 0.0], [27, 0.0]]};
+
+    // ── Chart.js defaults ────────────────────────────────────────────────────
+    Chart.defaults.color          = '#4a5568';
+    Chart.defaults.borderColor    = '#1c1c35';
+    Chart.defaults.font.family    = "'Inter', system-ui, sans-serif";
+    Chart.defaults.font.size      = 11;
+    Chart.defaults.plugins.legend.labels.usePointStyle = true;
+    Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
+
+    const C = ['#818cf8','#4ade80','#fb923c','#f87171','#c084fc','#38bdf8','#fbbf24','#f472b6'];
+    const OUTCOME_COLOR = {
+      success: '#4ade80', blocked: '#f87171', error: '#f87171',
+      retry: '#fb923c', low_confidence: '#c084fc'
+    };
+
+    function oc(o) { return OUTCOME_COLOR[o] || '#818cf8'; }
+
+    function noData(wrapId, msg = 'Sin datos suficientes') {
+      document.getElementById(wrapId).innerHTML =
+        `<div class="no-data">${msg}</div>`;
+    }
+
+    const gridColor = '#1c1c35';
+    const baseScales = {
+      x: { grid: { color: gridColor } },
+      y: { grid: { color: gridColor } },
+    };
+
+    // ── Stats ────────────────────────────────────────────────────────────────
+    document.getElementById('ts').textContent = 'Actualizado: ' + DATA.generated_at;
+    document.getElementById('s-total').textContent   = DATA.total;
+    document.getElementById('s-blocked').textContent = DATA.blocked;
+    document.getElementById('s-errors').textContent  = DATA.errors;
+    document.getElementById('s-regret').textContent  =
+      DATA.avg_regret != null ? DATA.avg_regret.toFixed(3) : '—';
+
+    const sr = DATA.total > 0 ? Math.round(DATA.success / DATA.total * 100) : 0;
+    document.getElementById('s-rate').textContent = sr + '%';
+    document.getElementById('s-abs').textContent  = `${DATA.success} de ${DATA.total}`;
+
+    // ── 1. Latencia por estrategia (P50 + P95 grouped bars) ──────────────────
+    (function () {
+      const lats = DATA.latency_by_strategy;
+      const keys = Object.keys(lats).filter(k => lats[k]).sort(
+        (a, b) => (lats[a]?.median || 0) - (lats[b]?.median || 0)
+      );
+      if (!keys.length) { noData('w-lat-strat'); return; }
+
+      new Chart(document.getElementById('c-lat-strat'), {
+        type: 'bar',
+        data: {
+          labels: keys,
+          datasets: [
+            {
+              label: 'P50',
+              data: keys.map(k => lats[k]?.median || 0),
+              backgroundColor: '#818cf8aa',
+              borderColor: '#818cf8',
+              borderWidth: 1,
+              borderRadius: 5,
+            },
+            {
+              label: 'P95',
+              data: keys.map(k => lats[k]?.p95 || 0),
+              backgroundColor: '#fb923c55',
+              borderColor: '#fb923c',
+              borderWidth: 1,
+              borderRadius: 5,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { position: 'top' },
+            tooltip: {
+              callbacks: {
+                afterBody: (items) => {
+                  const k = keys[items[0].dataIndex];
+                  const d = lats[k];
+                  return d ? [`n=${d.n}  avg=${d.avg}ms`] : [];
+                },
+              },
+            },
+          },
+          scales: {
+            ...baseScales,
+            y: { ...baseScales.y, title: { display: true, text: 'ms' } },
+            x: { ...baseScales.x, ticks: { maxRotation: 20 } },
+          },
+        },
+      });
+    })();
+
+    // ── 2. Success rate por categoría (stacked %) ────────────────────────────
+    (function () {
+      const cats = DATA.success_by_category;
+      const keys = Object.keys(cats).sort();
+      if (!keys.length) { noData('w-success-cat'); return; }
+
+      const allOut = new Set(keys.flatMap(k => Object.keys(cats[k])));
+      const ORDER  = ['success', 'retry', 'low_confidence', 'blocked', 'error'];
+      const outcomes = [
+        ...ORDER.filter(o => allOut.has(o)),
+        ...[...allOut].filter(o => !ORDER.includes(o)),
+      ];
+
+      new Chart(document.getElementById('c-success-cat'), {
+        type: 'bar',
+        data: {
+          labels: keys,
+          datasets: outcomes.map(o => ({
+            label: o,
+            data: keys.map(k => {
+              const total = Object.values(cats[k]).reduce((a, b) => a + b, 0);
+              return total ? Math.round((cats[k][o] || 0) / total * 100) : 0;
+            }),
+            backgroundColor: oc(o) + 'bb',
+            borderColor:     oc(o),
+            borderWidth: 1,
+            borderRadius: 3,
+          })),
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { position: 'top' },
+            tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw}%` } },
+          },
+          scales: {
+            x: { ...baseScales.x, stacked: true, ticks: { maxRotation: 20 } },
+            y: { ...baseScales.y, stacked: true, max: 100, title: { display: true, text: '%' } },
+          },
+        },
+      });
+    })();
+
+    // ── 3. Regret en el tiempo ───────────────────────────────────────────────
+    (function () {
+      const series = DATA.regret_series;
+      if (!series.length) { noData('w-regret', 'Sin datos de regret'); return; }
+
+      const xs = series.map(p => p[0]);
+      const ys = series.map(p => p[1]);
+      const win = Math.min(5, ys.length);
+      const rolling = [], rollingXs = [];
+      for (let i = win - 1; i < ys.length; i++) {
+        const sl = ys.slice(i - win + 1, i + 1);
+        rolling.push(sl.reduce((a, b) => a + b, 0) / win);
+        rollingXs.push(xs[i]);
+      }
+
+      new Chart(document.getElementById('c-regret'), {
+        type: 'scatter',
+        data: {
+          datasets: [
+            {
+              label: 'Regret',
+              data: xs.map((x, i) => ({ x, y: ys[i] })),
+              backgroundColor: '#818cf855',
+              borderColor:     '#818cf8',
+              pointRadius: 4,
+              pointHoverRadius: 6,
+            },
+            {
+              label: `Rolling avg (${win})`,
+              type: 'line',
+              data: rollingXs.map((x, i) => ({ x, y: rolling[i] })),
+              borderColor: '#fb923c',
+              borderWidth: 2,
+              pointRadius: 0,
+              fill: false,
+              tension: 0.35,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { position: 'top' } },
+          scales: {
+            x: { ...baseScales.x, type: 'linear', title: { display: true, text: 'Run #' } },
+            y: { ...baseScales.y, title: { display: true, text: 'Regret' } },
+          },
+        },
+      });
+    })();
+
+    // ── 4. Latencia por agente ───────────────────────────────────────────────
+    (function () {
+      const lats = DATA.latency_by_agent;
+      const keys = Object.keys(lats).filter(k => lats[k]).sort(
+        (a, b) => (lats[a]?.median || 0) - (lats[b]?.median || 0)
+      );
+      if (!keys.length) { noData('w-lat-agent'); return; }
+      const labels = keys.map(k => k.replace('_agent', ''));
+
+      new Chart(document.getElementById('c-lat-agent'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'P50 (ms)',
+            data: keys.map(k => lats[k]?.median || 0),
+            backgroundColor: keys.map((_, i) => C[i % C.length] + 'aa'),
+            borderColor:     keys.map((_, i) => C[i % C.length]),
+            borderWidth: 1,
+            borderRadius: 5,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                afterBody: items => {
+                  const k = keys[items[0].dataIndex];
+                  const d = lats[k];
+                  return d ? [`P95: ${d.p95}ms  n=${d.n}`] : [];
+                },
+              },
+            },
+          },
+          scales: {
+            ...baseScales,
+            y: { ...baseScales.y, title: { display: true, text: 'ms' } },
+          },
+        },
+      });
+    })();
+
+    // ── 5. Costo por modelo (doughnut) ───────────────────────────────────────
+    (function () {
+      const cost = DATA.cost;
+      const keys = Object.keys(cost).filter(k => cost[k] > 0);
+      if (!keys.length) { noData('w-cost', 'Sin datos de costo'); return; }
+
+      new Chart(document.getElementById('c-cost'), {
+        type: 'doughnut',
+        data: {
+          labels: keys,
+          datasets: [{
+            data: keys.map(k => cost[k]),
+            backgroundColor: C.map(c => c + 'bb'),
+            borderColor:     C,
+            borderWidth: 1,
+            hoverOffset: 6,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { position: 'right' },
+            tooltip: { callbacks: { label: ctx => `${ctx.label}: $${ctx.raw.toFixed(6)}` } },
+          },
+          cutout: '62%',
+        },
+      });
+    })();
+
+    // ── 6. Eficiencia ────────────────────────────────────────────────────────
+    (function () {
+      const eff  = DATA.efficiency;
+      const keys = Object.keys(eff).filter(k => eff[k]).sort(
+        (a, b) => (eff[b]?.mean || 0) - (eff[a]?.mean || 0)
+      );
+      if (!keys.length) { noData('w-eff', 'Sin datos de tokens'); return; }
+      const labels = keys.map(k => k.replace('_agent', ''));
+
+      new Chart(document.getElementById('c-eff'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'tokens/ms',
+            data: keys.map(k => eff[k]?.mean || 0),
+            backgroundColor: keys.map((_, i) => C[i % C.length] + 'aa'),
+            borderColor:     keys.map((_, i) => C[i % C.length]),
+            borderWidth: 1,
+            borderRadius: 5,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                afterBody: items => {
+                  const k = keys[items[0].dataIndex];
+                  const d = eff[k];
+                  return d ? [`±${d.std}  n=${d.n}`] : [];
+                },
+              },
+            },
+          },
+          scales: {
+            ...baseScales,
+            y: { ...baseScales.y, title: { display: true, text: 'tok/ms' } },
+          },
+        },
+      });
+    })();
+  </script>
+</body>
+</html>

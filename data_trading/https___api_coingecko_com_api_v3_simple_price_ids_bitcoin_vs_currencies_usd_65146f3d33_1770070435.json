@@ -1,0 +1,18 @@
+{
+  "page_url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+  "captured_at": "2026-02-02T22:13:55.668683Z",
+  "responses": [
+    {
+      "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "data": {
+        "bitcoin": {
+          "usd": 78726
+        }
+      }
+    }
+  ]
+}

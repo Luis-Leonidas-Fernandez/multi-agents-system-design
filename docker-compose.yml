@@ -1,0 +1,15 @@
+services:
+  multi-agents:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: multi-agents-app
+    env_file:
+      - .env
+    # Para modo interactivo (si main.py espera input)
+    stdin_open: true
+    tty: true
+    # Montar carpeta data_trading para persistir JSONs capturados
+    volumes:
+      - ./data_trading:/app/data_trading
+    restart: unless-stopped

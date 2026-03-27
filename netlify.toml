@@ -1,0 +1,12 @@
+[build]
+  command = "pip install -r requirements.txt && python build_dashboard.py"
+  publish = "dist"
+
+[build.environment]
+  PYTHON_VERSION = "3.11"
+
+# Redirige todo al index (SPA-style, por si agregás rutas en el futuro)
+[[redirects]]
+  from = "/*"
+  to   = "/index.html"
+  status = 200
