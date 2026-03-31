@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from supervisor import create_supervisor_graph
+from graph import create_supervisor_graph
 from memory import distill_memory, load_memory_context
 import persistence
 
