@@ -8,7 +8,7 @@ al grafo LangGraph — los módulos de nodos son puros (sin estado global).
 import uuid
 
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables.config import RunnableConfig
 
@@ -111,8 +111,15 @@ async def supervisor_node(state: AgentState) -> AgentState:
         )
         return {"next_agent": decision.agent}
     except Exception as e:
-        print(f"[supervisor] routing falló ({type(e).__name__}: {e}), usando fallback math_agent")
-        return {"next_agent": "math_agent"}
+        err_type = type(e).__name__
+        print(f"[supervisor] routing falló ({err_type}: {e})")
+        return {
+            "messages": [AIMessage(content=(
+                f"No pude procesar tu solicitud en este momento ({err_type}). "
+                "Por favor, reintentá tu consulta."
+            ))],
+            "next_agent": "__error__",
+        }
 
 
 # ==================== ROUTER ====================
@@ -131,6 +138,8 @@ def route_agent(state: AgentState) -> str:
         return "code_agent"
     if next_agent == "web_scraping_agent":
         return "web_scraping_agent"
+    if next_agent == "__error__":
+        return END
     return "supervisor"
 
 
@@ -185,6 +194,7 @@ def create_supervisor_graph():
             "code_agent":         "code_agent",
             "web_scraping_agent": "web_scraping_agent",
             "supervisor":         "supervisor",
+            "__error__":          END,
             END:                  END,
         },
     )
