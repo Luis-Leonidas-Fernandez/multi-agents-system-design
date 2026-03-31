@@ -130,7 +130,7 @@ async def input_guard_node(state: AgentState) -> AgentState:
     blocked = input_guard(state)
     if blocked:
         return {**blocked, "request_id": rid}
-    return {**state, "request_id": rid}
+    return {"request_id": rid}
 
 
 def route_after_guard(state: AgentState) -> str:
