@@ -194,7 +194,6 @@ def create_supervisor_graph():
             "code_agent":         "code_agent",
             "web_scraping_agent": "web_scraping_agent",
             "supervisor":         "supervisor",
-            "__error__":          END,
             END:                  END,
         },
     )
