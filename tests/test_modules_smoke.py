@@ -180,7 +180,7 @@ def test_inv10_eval_only_in_agents():
     new_modules = [
         "state.py", "audit.py", "scrape_tracker.py",
         "security.py", "agentdog.py", "price_helpers.py",
-        "graph.py",
+        "graph.py", "agents.py",
     ]
     root = pathlib.Path(__file__).parent.parent
     for fname in new_modules:
