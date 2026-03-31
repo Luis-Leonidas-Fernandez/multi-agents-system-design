@@ -126,7 +126,11 @@ def make_web_scraping_node(
                 coin     = _detect_coin_from_query(last_message)
                 api_json: Optional[str] = None
                 try:
-                    api_json = _get_crypto_price_fn(coin=coin, vs_currency="usd")
+                    import asyncio
+                    loop     = asyncio.get_event_loop()
+                    api_json = await loop.run_in_executor(
+                        None, lambda: _get_crypto_price_fn(coin=coin, vs_currency="usd")
+                    )
                 except Exception:
                     pass  # fallback al agente normal
 

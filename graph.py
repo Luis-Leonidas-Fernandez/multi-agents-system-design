@@ -47,6 +47,35 @@ code_node         = make_code_node(code_agent)
 web_scraping_node = make_web_scraping_node(web_scraping_agent, get_llm)
 
 
+# ==================== SUPERVISOR — recursos cacheados ====================
+# El chain se construye una sola vez en el primer turno (lazy init) y se
+# reutiliza en turnos posteriores. El prompt es estático y se crea al importar.
+# Tests pueden resetear _supervisor_chain = None para forzar reconstrucción
+# con un get_llm() mockeado.
+
+_supervisor_prompt = ChatPromptTemplate.from_messages([
+    ("system", (
+        "Eres un supervisor que coordina un equipo de agentes especializados.\n\n"
+        "Tienes acceso a cuatro agentes:\n"
+        "- math_agent: problemas matemáticos, cálculos, álgebra, estadística numérica\n"
+        "- analysis_agent: análisis de datos, insights, reportes, patrones en datasets\n"
+        "- code_agent: escribir código, programación, desarrollo de software\n"
+        "- web_scraping_agent: extraer información de URLs, scraping, obtener datos de páginas web\n\n"
+        "Elige el agente más adecuado para la solicitud. "
+        "Si no estás seguro, elige el que mejor se ajuste."
+    )),
+    ("user", "{input}"),
+])
+_supervisor_chain = None  # construido en el primer turno via _get_supervisor_chain()
+
+
+def _get_supervisor_chain():
+    global _supervisor_chain
+    if _supervisor_chain is None:
+        _supervisor_chain = _supervisor_prompt | get_llm().with_structured_output(RoutingDecision)
+    return _supervisor_chain
+
+
 # ==================== SUPERVISOR NODE ====================
 
 async def supervisor_node(state: AgentState) -> AgentState:
@@ -66,24 +95,7 @@ async def supervisor_node(state: AgentState) -> AgentState:
     ):
         return {"next_agent": "web_scraping_agent"}
 
-    llm            = get_llm()
-    llm_structured = llm.with_structured_output(RoutingDecision)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", (
-            "Eres un supervisor que coordina un equipo de agentes especializados.\n\n"
-            "Tienes acceso a cuatro agentes:\n"
-            "- math_agent: problemas matemáticos, cálculos, álgebra, estadística numérica\n"
-            "- analysis_agent: análisis de datos, insights, reportes, patrones en datasets\n"
-            "- code_agent: escribir código, programación, desarrollo de software\n"
-            "- web_scraping_agent: extraer información de URLs, scraping, obtener datos de páginas web\n\n"
-            "Elige el agente más adecuado para la solicitud. "
-            "Si no estás seguro, elige el que mejor se ajuste."
-        )),
-        ("user", "{input}"),
-    ])
-
-    chain = prompt | llm_structured
+    chain = _get_supervisor_chain()
     try:
         decision: RoutingDecision = await chain.ainvoke(
             {"input": last_message},

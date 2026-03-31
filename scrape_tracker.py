@@ -5,6 +5,7 @@ Solo usa stdlib de Python — sin dependencias externas.
 La política de runtime (policy.json) se carga de forma lazy para evitar
 I/O en el momento del import.
 """
+import copy
 import json
 import math
 import os
@@ -125,6 +126,7 @@ def _load_runtime_policy() -> dict:
 
             delta_t    = time.time() - generated_ts
             time_decay = math.exp(-delta_t / _POLICY_DECAY_TAU)
+            categories = copy.deepcopy(categories)
             for cat_data in categories.values():
                 for p in cat_data.get("promoted", []):
                     if isinstance(p, dict):

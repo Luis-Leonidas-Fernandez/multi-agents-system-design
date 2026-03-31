@@ -354,6 +354,7 @@ def get_crypto_price(
 
 
 _CACHE_TTL_SECONDS = 60
+_SCRAPE_CACHE_MAX  = 256
 _SCRAPE_CACHE: Dict[str, Tuple[float, str]] = {}
 _PLAYWRIGHT = None
 _BROWSER = None
@@ -416,6 +417,10 @@ def _get_cache(key: str) -> Optional[str]:
 
 
 def _set_cache(key: str, value: str) -> None:
+    if len(_SCRAPE_CACHE) >= _SCRAPE_CACHE_MAX:
+        # Evictar la entrada más antigua (primer item insertado en el dict)
+        oldest_key = next(iter(_SCRAPE_CACHE))
+        _SCRAPE_CACHE.pop(oldest_key, None)
     _SCRAPE_CACHE[key] = (time.time(), value)
 
 
@@ -487,8 +492,10 @@ def _build_result(url: str, text: Optional[str], links: Optional[str], total_lin
 def _get_playwright():
     global _PLAYWRIGHT
     if _PLAYWRIGHT is None:
+        import atexit
         from playwright.sync_api import sync_playwright  # pyright: ignore[reportMissingImports]
         _PLAYWRIGHT = sync_playwright().start()
+        atexit.register(_shutdown_playwright)
     return _PLAYWRIGHT
 
 
@@ -497,6 +504,23 @@ def _get_browser():
     if _BROWSER is None:
         _BROWSER = _get_playwright().chromium.launch(headless=True)
     return _BROWSER
+
+
+def _shutdown_playwright() -> None:
+    """Cierra browser y playwright al terminar el proceso (registrado via atexit)."""
+    global _BROWSER, _PLAYWRIGHT
+    try:
+        if _BROWSER is not None:
+            _BROWSER.close()
+            _BROWSER = None
+    except Exception:
+        pass
+    try:
+        if _PLAYWRIGHT is not None:
+            _PLAYWRIGHT.stop()
+            _PLAYWRIGHT = None
+    except Exception:
+        pass
 
 
 def _configure_page(page, block_resources: bool = True) -> None:
