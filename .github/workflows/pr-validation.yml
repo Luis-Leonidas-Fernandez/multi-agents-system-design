@@ -1,0 +1,68 @@
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, labeled, unlabeled]
+
+jobs:
+  check-issue-reference:
+    name: Check Issue Reference
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify PR body links an issue
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if echo "$PR_BODY" | grep -iE '(closes|fixes|resolves) #[0-9]+' > /dev/null; then
+            echo "Issue reference found."
+          else
+            echo "ERROR: PR body must contain 'Closes #N', 'Fixes #N', or 'Resolves #N'."
+            exit 1
+          fi
+
+  check-issue-approved:
+    name: Check Issue Has status:approved
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract issue number and verify status:approved label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -iEo '(closes|fixes|resolves) #[0-9]+' | grep -Eo '[0-9]+' | head -1)
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "ERROR: Could not extract issue number from PR body."
+            exit 1
+          fi
+          echo "Checking issue #$ISSUE_NUMBER for status:approved label..."
+          LABELS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+          if echo "$LABELS" | grep -q "status:approved"; then
+            echo "Issue #$ISSUE_NUMBER has status:approved."
+          else
+            echo "ERROR: Issue #$ISSUE_NUMBER does not have the 'status:approved' label."
+            echo "A maintainer must approve the issue before a PR can be opened."
+            exit 1
+          fi
+
+  check-type-label:
+    name: Check PR Has type:* Label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify exactly one type:* label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+          TYPE_LABELS=$(echo "$LABELS" | grep -c '^type:' || true)
+          if [ "$TYPE_LABELS" -eq 0 ]; then
+            echo "ERROR: PR must have exactly one 'type:*' label (e.g. type:refactor, type:feature)."
+            exit 1
+          elif [ "$TYPE_LABELS" -gt 1 ]; then
+            echo "ERROR: PR has $TYPE_LABELS 'type:*' labels. Must have exactly one."
+            exit 1
+          else
+            echo "PR has exactly one type:* label."
+          fi

@@ -1,0 +1,101 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug", "status:needs-review"]
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight Checks
+      options:
+        - label: I have searched existing issues and this is not a duplicate
+          required: true
+        - label: I understand this issue needs `status:approved` before a PR can be opened
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Numbered steps to reproduce the behavior.
+      placeholder: |
+        1. Run `python main.py`
+        2. Enter query "..."
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What happened instead. Include errors or logs.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Ubuntu
+        - Debian
+        - Arch Linux
+        - Windows
+        - WSL
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM Provider
+      options:
+        - openai
+        - azure
+        - ollama
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shell
+    attributes:
+      label: Shell
+      options:
+        - bash
+        - zsh
+        - fish
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste relevant log output here.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Screenshots, workarounds, or extra info.
