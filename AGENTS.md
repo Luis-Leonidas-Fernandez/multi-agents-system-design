@@ -3,7 +3,7 @@
 ## Security
 
 - `eval()` is only allowed in `agents.py:calculate()` within the math namespace (`safe_dict` with `"__builtins__": {}`). Any other use of `eval()` or `exec()` must be flagged as critical.
-- The `input_guard` middleware in `supervisor.py` must always run before any LLM call. Changes that bypass or reorder this step must be rejected.
+- The `input_guard` middleware (defined in `security.py`, wired as the graph entry point in `graph.py`) must always run before any LLM call. Changes that bypass or reorder this step must be rejected.
 - No API keys, tokens, or secrets may be hardcoded. All must come from `os.getenv()` or `.env` via `dotenv`.
 - URL and domain validation for web scraping tools must remain in place. Additions to `allowed_domains` require justification.
 - Prompt injection patterns in `_BLOCKED_PATTERNS` and `_RISK_SIGNALS` must not be weakened or removed.
@@ -13,7 +13,7 @@
 - `AgentState.messages` reducer must remain append-only (`lambda x, y: x + y`). Replacing it with a non-append reducer breaks replay and tracing.
 - `supervisor_node` must always route via `llm.with_structured_output(RoutingDecision)`. Inline string parsing of routing decisions is not acceptable.
 - New agents must be added to `AgentName` (Literal) and registered in `route_agent()`. Skipping either step causes silent routing failures.
-- `create_react_agent` from `langgraph.prebuilt` is the correct factory for all specialized agents. Do not replace with `langchain.agents.create_agent` — the signatures differ.
+- `create_react_agent` from `langgraph.prebuilt` is the correct factory for all specialized agents. LangGraph emits a deprecation warning pointing to `langchain.agents.create_agent`, but that function has a different signature and does not return a `CompiledStateGraph`. Do not migrate until there is a drop-in replacement with equivalent behavior and passing end-to-end tests.
 - Agent system prompts must be loaded via `load_agent_prompt()` from `agents/{name}.md`. Hardcoded prompts inside agent factory functions must be flagged.
 
 ## HITL (Human-in-the-Loop)
