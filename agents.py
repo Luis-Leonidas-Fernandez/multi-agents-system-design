@@ -136,10 +136,102 @@ def calculate(
 
 @tool
 def analyze_data(
-    data_description: Annotated[str, Field(description="Descripción detallada de los datos a analizar, incluyendo estructura, tipos y contexto")],
+    data: Annotated[str, Field(
+        description=(
+            "Datos a analizar. Puede ser: "
+            "(1) JSON array de números, ej: [10, 20, 30], "
+            "(2) JSON array de objetos, ej: [{\"ventas\": 100, \"mes\": \"ene\"}, ...], "
+            "(3) CSV con encabezado, ej: 'mes,ventas\\nene,100\\nfeb,200', "
+            "(4) descripción textual si no hay datos estructurados."
+        )
+    )],
 ) -> str:
-    """Analiza datos y genera insights y recomendaciones."""
-    return f"Análisis de datos: {data_description}\n\nInsights:\n- Los datos muestran patrones interesantes\n- Se recomienda realizar análisis estadístico adicional\n- Considerar visualización de los datos"
+    """
+    Analiza datos estructurados (JSON, CSV) y retorna estadísticas reales.
+    Si los datos no son estructurados, retorna un framework de análisis.
+    """
+    import json
+    import statistics
+    import csv
+    import io
+
+    # --- Intento 1: JSON array de números ---
+    try:
+        parsed = json.loads(data)
+        if isinstance(parsed, list) and parsed and all(isinstance(x, (int, float)) for x in parsed):
+            n = len(parsed)
+            mean = statistics.mean(parsed)
+            return (
+                f"Análisis estadístico — {n} valores numéricos:\n"
+                f"- Mínimo:              {min(parsed)}\n"
+                f"- Máximo:              {max(parsed)}\n"
+                f"- Media:               {mean:.4f}\n"
+                f"- Mediana:             {statistics.median(parsed):.4f}\n"
+                f"- Desviación estándar: {statistics.stdev(parsed):.4f}\n"
+                f"- Suma:                {sum(parsed)}\n"
+                f"- Rango:               {max(parsed) - min(parsed)}"
+            )
+    except (json.JSONDecodeError, TypeError, statistics.StatisticsError):
+        pass
+
+    # --- Intento 2: JSON array de objetos (tabla) ---
+    try:
+        parsed = json.loads(data)
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            columns = list(parsed[0].keys())
+            lines = [f"Dataset tabular: {len(parsed)} filas × {len(columns)} columnas", ""]
+            for col in columns:
+                values = [row[col] for row in parsed if isinstance(row.get(col), (int, float))]
+                if len(values) >= 2:
+                    lines.append(
+                        f"  {col}: min={min(values):.2f}, max={max(values):.2f}, "
+                        f"media={statistics.mean(values):.2f}, std={statistics.stdev(values):.2f}"
+                    )
+                elif values:
+                    lines.append(f"  {col}: valor único = {values[0]}")
+                else:
+                    unique = list({str(row.get(col)) for row in parsed if row.get(col) is not None})
+                    lines.append(f"  {col} (categórico): {len(unique)} valores únicos → {unique[:5]}")
+            return "\n".join(lines)
+    except (json.JSONDecodeError, TypeError, KeyError, statistics.StatisticsError):
+        pass
+
+    # --- Intento 3: CSV ---
+    try:
+        reader = csv.DictReader(io.StringIO(data.strip()))
+        rows = list(reader)
+        if rows:
+            columns = list(rows[0].keys())
+            lines = [f"Dataset CSV: {len(rows)} filas × {len(columns)} columnas", ""]
+            for col in columns:
+                values = []
+                for row in rows:
+                    try:
+                        values.append(float(row[col]))
+                    except (ValueError, KeyError):
+                        pass
+                if len(values) >= 2:
+                    lines.append(
+                        f"  {col}: min={min(values):.2f}, max={max(values):.2f}, "
+                        f"media={statistics.mean(values):.2f}"
+                    )
+                else:
+                    unique = list({row.get(col, "") for row in rows})
+                    lines.append(f"  {col} (texto): {len(unique)} valores únicos")
+            return "\n".join(lines)
+    except Exception:
+        pass
+
+    # --- Fallback: descripción textual ---
+    return (
+        f"Datos recibidos (formato no estructurado):\n{data}\n\n"
+        f"Para un análisis completo, considera:\n"
+        f"1. Distribución y estadísticas descriptivas\n"
+        f"2. Valores atípicos y datos faltantes\n"
+        f"3. Correlaciones entre variables\n"
+        f"4. Tendencias temporales (si aplica)\n"
+        f"5. Segmentación por categorías clave"
+    )
 
 
 @tool
@@ -147,8 +239,52 @@ def write_code(
     task: Annotated[str, Field(description="Descripción clara de la funcionalidad a implementar")],
     language: Annotated[str, Field(description="Lenguaje de programación, ej: 'python', 'javascript', 'typescript'")] = "python",
 ) -> str:
-    """Escribe código para una tarea específica en el lenguaje indicado."""
-    return f"Código {language} para: {task}\n\n```{language}\n# Implementación de {task}\ndef solution():\n    # Tu código aquí\n    pass\n```"
+    """
+    Genera un esqueleto de código válido para la tarea indicada.
+    Para Python: valida sintaxis con compile(). Retorna código listo para completar.
+    """
+    import re
+    import textwrap
+
+    # Generar nombre de función a partir de la tarea
+    slug   = re.sub(r"[^a-z0-9]+", "_", task.lower())[:40].strip("_") or "solution"
+
+    if language.lower() == "python":
+        code = textwrap.dedent(f"""
+            def {slug}(*args, **kwargs):
+                \"\"\"
+                {task}
+
+                Args:
+                    Definir parámetros según los requerimientos.
+
+                Returns:
+                    Resultado de la implementación.
+
+                Raises:
+                    NotImplementedError: hasta que se complete la implementación.
+                \"\"\"
+                # TODO: implementar lógica de '{task}'
+                raise NotImplementedError("Implementación pendiente")
+        """).strip()
+
+        try:
+            compile(code, "<generated>", "exec")
+            validation = "✅ Sintaxis Python validada."
+        except SyntaxError as e:
+            validation = f"⚠️ Error de sintaxis detectado: {e}"
+
+        return f"```python\n{code}\n```\n\n{validation}"
+
+    # Otros lenguajes: skeleton genérico
+    templates = {
+        "javascript": f"function {slug}() {{\n  // TODO: {task}\n  throw new Error('Not implemented');\n}}",
+        "typescript": f"function {slug}(): void {{\n  // TODO: {task}\n  throw new Error('Not implemented');\n}}",
+        "java":       f"public static void {slug}() {{\n    // TODO: {task}\n    throw new UnsupportedOperationException();\n}}",
+        "go":         f"func {slug}() {{\n\t// TODO: {task}\n\tpanic(\"not implemented\")\n}}",
+    }
+    template = templates.get(language.lower(), f"// {task}\n// Implementar en {language}")
+    return f"```{language}\n{template}\n```"
 
 
 @tool
