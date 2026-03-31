@@ -20,11 +20,6 @@ from audit import _emit_guard_audit, _truncate_text, _truncate_raw_response
 
 HIGH_RISK_NODES = frozenset({"code_node", "web_scraping_node"})
 
-_MAX_OBSERVATION_CHARS  = 2000
-_TRUNC_HEAD_CHARS       = 1200
-_TRUNC_TAIL_CHARS       = 800
-_RAW_RESPONSE_MAX_CHARS = 500
-
 
 # ==================== HELPERS ====================
 
