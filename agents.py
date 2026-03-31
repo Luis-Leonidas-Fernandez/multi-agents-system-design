@@ -850,3 +850,8 @@ def create_web_scraping_agent():
         prompt=system_prompt,
         name="web_scraping_agent"
     )
+
+
+# Alias explícito para acceder a la función subyacente sin overhead del tool wrapper.
+# Usado por price_helpers.py para el fast path de API price.
+_get_crypto_price_fn = get_crypto_price.func
