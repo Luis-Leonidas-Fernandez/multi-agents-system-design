@@ -4,7 +4,6 @@ Memoria destilada por sesión.
 Mueve distill_memory() y load_memory_context() fuera de main.py
 para que puedan ser reutilizadas por gateway.py y otros módulos.
 """
-import asyncio
 from pathlib import Path
 
 from config import get_llm
@@ -55,9 +54,7 @@ async def distill_memory(state: dict, session_id: str) -> None:
 
     try:
         llm = get_llm()
-        response = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: llm.invoke(prompt)
-        )
+        response = await llm.ainvoke(prompt)
         content = response.content.strip() if hasattr(response, "content") else str(response).strip()
 
         memory_dir = Path("sessions") / session_id
