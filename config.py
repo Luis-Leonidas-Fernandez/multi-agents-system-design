@@ -20,6 +20,34 @@ if os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true":
     print(f"[observabilidad] LangSmith activo → proyecto: {project}")
 
 
+_VALID_AGENTDOG_POLICIES   = {"fail_open", "fail_closed", "fail_soft"}
+_VALID_AGENTDOG_EVAL_MODES = {"all_nodes", "high_risk_only", "final_only"}
+
+
+def validate_env() -> None:
+    """
+    Valida variables de entorno críticas al startup.
+    Imprime advertencias para valores desconocidos que fallarían silenciosamente.
+    """
+    provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+    if provider not in ("openai", "azure", "ollama"):
+        print(f"[config] WARNING: LLM_PROVIDER='{provider}' no reconocido. "
+              f"Valores válidos: openai, azure, ollama. Se usará openai.")
+
+    policy = os.getenv("AGENTDOG_POLICY", "fail_open").strip().lower()
+    if policy not in _VALID_AGENTDOG_POLICIES:
+        print(f"[config] WARNING: AGENTDOG_POLICY='{policy}' no reconocido. "
+              f"Valores válidos: {_VALID_AGENTDOG_POLICIES}. Se usará fail_open.")
+
+    eval_mode = os.getenv("AGENTDOG_EVAL_MODE", "high_risk_only").strip().lower()
+    if eval_mode not in _VALID_AGENTDOG_EVAL_MODES:
+        print(f"[config] WARNING: AGENTDOG_EVAL_MODE='{eval_mode}' no reconocido. "
+              f"Valores válidos: {_VALID_AGENTDOG_EVAL_MODES}. Se usará high_risk_only.")
+
+    if not os.getenv("AGENTDOG_AUDIT_LOG"):
+        print("[config] INFO: AGENTDOG_AUDIT_LOG no configurado — audit log irá a stdout.")
+
+
 def get_llm():
     """Crea y retorna una instancia del LLM según LLM_PROVIDER."""
     provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()

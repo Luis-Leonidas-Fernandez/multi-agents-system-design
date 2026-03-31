@@ -66,6 +66,7 @@ def _emit_block(trajectory_id: str, pattern: str, source: str, approx_chars: int
         "guard_status":         "blocked_by_middleware",
         "verdict_source":       source,
         "node_name":            "input",
+        "risk_level":           "low",
         "raw_response":         pattern,
         "model":                "middleware",
         "latency_ms":           0,
@@ -160,11 +161,4 @@ async def _ask_confirmation(prompt: str) -> bool:
 
 __all__ = [
     "input_guard",
-    "_ask_confirmation",
-    "_HITL_ENABLED",
-    "_get_human_history",
-    "_BLOCKED_PATTERNS",
-    "_RISK_SIGNALS",
-    "_extract_msg_text",
-    "_check_patterns",
 ]

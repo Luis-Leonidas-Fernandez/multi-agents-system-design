@@ -6,6 +6,7 @@ import os
 import threading
 import uuid
 
+from config import validate_env
 from gateway import AgentGateway
 import persistence
 
@@ -31,6 +32,7 @@ def _start_dashboard_watcher():
 
 async def main():
     """Función principal asíncrona"""
+    validate_env()
     print("=" * 60)
     print("Sistema Multi-Agentes con LangGraph (Async)")
     print("=" * 60)

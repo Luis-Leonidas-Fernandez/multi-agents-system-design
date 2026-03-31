@@ -470,18 +470,4 @@ def _update_scrape_tracker(
 __all__ = [
     "get_runtime_policy",
     "reset_runtime_policy_cache",
-    "_update_scrape_tracker",
-    "_get_strategy",
-    "_get_category_score",
-    "_detect_query_category",
-    "_exploration_rate",
-    "_scrape_reliability",
-    "_score_to_policy_band",
-    "_score_to_reliability",
-    "_compute_delta",
-    "_STRATEGY_HINTS",
-    "_RETRY_ON_RELIABILITY",
-    "_STRUCTURED_SOURCE_STRATEGIES",
-    "_API_VALIDATION_EPSILON",
-    "_STRUCTURED_LATENCY_DISCOUNT",
 ]

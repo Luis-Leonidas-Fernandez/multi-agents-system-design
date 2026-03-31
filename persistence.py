@@ -33,7 +33,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 # USE_SQLITE=false → fallback a JSONL (útil para debug o si SQLite no está disponible)
 _USE_SQLITE: bool = os.environ.get("USE_SQLITE", "true").lower() != "false"
 
-_SESSIONS_DIR = Path("sessions")
+_SESSIONS_DIR = Path(__file__).parent / "sessions"
 _DB_PATH      = _SESSIONS_DIR / "sessions.db"
 
 # ==================== SCHEMA ====================

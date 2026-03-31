@@ -360,7 +360,7 @@ _PLAYWRIGHT = None
 _BROWSER = None
 
 # ==================== DATA TRADING HELPERS ====================
-DATA_TRADING_DIR = Path("data_trading")
+DATA_TRADING_DIR = Path(__file__).parent / "data_trading"
 
 
 def _ensure_data_trading_dir() -> Path:

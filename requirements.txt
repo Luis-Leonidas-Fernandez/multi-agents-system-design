@@ -18,6 +18,9 @@ lxml>=5.0.0
 playwright==1.57.0
 ddgs>=9.0.0
 
+# Opcional: modelos locales vía Ollama (LLM_PROVIDER=ollama)
+langchain-ollama>=0.2.0
+
 # Opcional: para visualización
 matplotlib>=3.10.8
 

@@ -362,8 +362,4 @@ __all__ = [
     "is_high_risk",
     "evaluate_trajectory_safe",
     "build_trajectory_from_messages",
-    "_is_allowed_public_price_request",
-    "_resolve_guard_policy",
-    "_should_evaluate_guard",
-    "_flatten_messages_text",
 ]
