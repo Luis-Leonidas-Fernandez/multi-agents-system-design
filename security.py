@@ -7,6 +7,7 @@ Contiene:
 - HITL: confirmación humana antes de nodos de alto riesgo
 """
 import os
+import unicodedata
 import uuid
 from typing import Optional
 
@@ -44,8 +45,10 @@ _RISK_SIGNALS = [
 # ==================== HELPERS INTERNOS ====================
 
 def _extract_msg_text(msg) -> str:
-    """Extrae el texto en minúsculas de un mensaje LangChain."""
-    return msg.content.lower() if hasattr(msg, "content") and isinstance(msg.content, str) else ""
+    """Extrae el texto normalizado (NFKC) en minúsculas de un mensaje LangChain."""
+    if hasattr(msg, "content") and isinstance(msg.content, str):
+        return unicodedata.normalize("NFKC", msg.content).lower()
+    return ""
 
 
 def _check_patterns(text: str, patterns: list) -> Optional[str]:

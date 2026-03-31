@@ -172,6 +172,7 @@ def create_supervisor_graph():
             "analysis_agent":     "analysis_agent",
             "code_agent":         "code_agent",
             "web_scraping_agent": "web_scraping_agent",
+            "supervisor":         "supervisor",
             END:                  END,
         },
     )

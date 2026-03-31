@@ -251,6 +251,9 @@ async def evaluate_trajectory_safe(state: Any, node_name: str) -> Tuple[bool, Di
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    def _scrub(text: str) -> str:
+        return text.replace(api_key, "[REDACTED]") if api_key else text
+
     try:
         start = time.time()
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -329,7 +332,7 @@ async def evaluate_trajectory_safe(state: Any, node_name: str) -> Tuple[bool, Di
             "verdict_source":         "error",
             "node_name":              node_name,
             "risk_level":             "high" if high_risk else "low",
-            "raw_response":           _truncate_raw_response(str(e)),
+            "raw_response":           _truncate_raw_response(_scrub(str(e))),
             "model":                  os.getenv("AGENTDOG_MODEL", "AgentDoG-Qwen3-4B"),
             "latency_ms":             None,
             "policy":                 policy,
@@ -341,7 +344,7 @@ async def evaluate_trajectory_safe(state: Any, node_name: str) -> Tuple[bool, Di
             "trajectory_id": trajectory_id,
             "verdict_source": "error",
             "label":          "error",
-            "error":          str(e),
+            "error":          _scrub(str(e)),
         }
 
         if policy == "fail_closed":

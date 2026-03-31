@@ -111,23 +111,25 @@ def calculate(
 ) -> str:
     """Evalúa una expresión matemática y retorna el resultado."""
     try:
-        # Importar funciones matemáticas
         import math
-        # Crear un namespace seguro para eval
-        safe_dict = {
-            "__builtins__": {},
-            "math": math,
-            "sqrt": math.sqrt,
-            "sin": math.sin,
-            "cos": math.cos,
-            "tan": math.tan,
-            "log": math.log,
-            "exp": math.exp,
-            "pi": math.pi,
-            "e": math.e,
-        }
-        result = eval(expression, safe_dict)
+        from simpleeval import simple_eval, FeatureNotAvailable, InvalidExpression
+        result = simple_eval(
+            expression,
+            names={"pi": math.pi, "e": math.e},
+            functions={
+                "sqrt": math.sqrt,
+                "sin":  math.sin,
+                "cos":  math.cos,
+                "tan":  math.tan,
+                "log":  math.log,
+                "exp":  math.exp,
+                "abs":  abs,
+                "round": round,
+            },
+        )
         return f"Resultado: {result}"
+    except (FeatureNotAvailable, InvalidExpression) as e:
+        return f"Expresión no permitida: {str(e)}"
     except Exception as e:
         return f"Error al calcular: {str(e)}"
 

@@ -9,6 +9,7 @@ langchain-community>=0.4.0
 python-dotenv>=1.0.0
 typing-extensions>=4.8.0
 httpx>=0.27.0
+simpleeval>=1.0.0
 
 # Web Scraping
 requests>=2.31.0
