@@ -123,8 +123,8 @@ class LaneQueue:
 
             try:
                 await handler(combined)
-            except Exception:
-                pass
+            except Exception as e:
+                _log(session_key, f"followup_turn_error msgs={n_msgs} error={e}")
 
             async with lane.lock:
                 if lane.generation != my_gen:

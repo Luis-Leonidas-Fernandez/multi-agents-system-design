@@ -42,7 +42,7 @@ async def main():
     if sessions:
         print(f"\nSesiones guardadas: {', '.join(sessions)}")
         print("Escribe un ID para continuar una sesión, o Enter para nueva sesión:")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         session_input = await loop.run_in_executor(None, lambda: input("  Session ID: ").strip())
         session_id = session_input if session_input in sessions else str(uuid.uuid4())[:8]
     else:
@@ -66,7 +66,7 @@ async def main():
 
     _start_dashboard_watcher()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     while True:
         user_input = await loop.run_in_executor(None, lambda: input("\nTu pregunta: ").strip())

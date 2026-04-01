@@ -4,9 +4,12 @@ Memoria destilada por sesión.
 Mueve distill_memory() y load_memory_context() fuera de main.py
 para que puedan ser reutilizadas por gateway.py y otros módulos.
 """
+import logging
 from pathlib import Path
 
 from config import get_llm
+
+_log = logging.getLogger(__name__)
 
 
 def load_memory_context(session_id: str) -> str:
@@ -61,4 +64,4 @@ async def distill_memory(state: dict, session_id: str) -> None:
         memory_dir.mkdir(parents=True, exist_ok=True)
         (memory_dir / "MEMORY.md").write_text(content, encoding="utf-8")
     except Exception:
-        pass  # Fallas del LLM no interrumpen la salida
+        _log.warning("distill_memory failed for session %s", session_id, exc_info=True)

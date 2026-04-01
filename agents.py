@@ -13,6 +13,8 @@ que pueden usar herramientas de forma autónoma siguiendo el patrón ReAct.
 #   - exista soporte equivalente para CompiledStateGraph con la misma firma
 #   - haya tests de comportamiento end-to-end que validen parity de routing
 #   Tracking: buscar "create_react_agent" en este archivo para localizar todos los call sites.
+import threading
+
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
 from config import get_llm
@@ -494,6 +496,7 @@ _SCRAPE_CACHE_MAX  = 256
 _SCRAPE_CACHE: Dict[str, Tuple[float, str]] = {}
 _PLAYWRIGHT = None
 _BROWSER = None
+_PLAYWRIGHT_LOCK: threading.RLock = threading.RLock()
 
 # ==================== DATA TRADING HELPERS ====================
 DATA_TRADING_DIR = Path(__file__).parent / "data_trading"
@@ -558,6 +561,43 @@ def _set_cache(key: str, value: str) -> None:
         oldest_key = next(iter(_SCRAPE_CACHE))
         _SCRAPE_CACHE.pop(oldest_key, None)
     _SCRAPE_CACHE[key] = (time.time(), value)
+
+
+def _validate_url(url: str) -> Optional[str]:
+    """
+    Valida que la URL sea segura para scraping.
+    Retorna None si es válida, o un mensaje de error si no lo es.
+
+    Previene:
+    - Esquemas no-HTTP (file://, ftp://, javascript:, etc.)
+    - SSRF: localhost, 127.x, 0.0.0.0, IPv6 loopback, IPs privadas RFC-1918
+    """
+    from urllib.parse import urlparse
+    import ipaddress
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "URL inválida"
+
+    if parsed.scheme not in ("http", "https"):
+        return f"Esquema no permitido: {parsed.scheme!r}. Solo se permiten http y https."
+
+    hostname = parsed.hostname or ""
+
+    # Bloquear hosts internos/peligrosos
+    blocked_hostnames = {"localhost", "0.0.0.0", "::1", "metadata.google.internal"}
+    if hostname.lower() in blocked_hostnames:
+        return f"Host no permitido: {hostname!r}"
+
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+            return f"Dirección IP privada/reservada no permitida: {hostname!r}"
+    except ValueError:
+        pass  # hostname es un nombre de dominio, no una IP
+
+    return None
 
 
 def _build_headers() -> Dict[str, str]:
@@ -627,18 +667,20 @@ def _build_result(url: str, text: Optional[str], links: Optional[str], total_lin
 
 def _get_playwright():
     global _PLAYWRIGHT
-    if _PLAYWRIGHT is None:
-        import atexit
-        from playwright.sync_api import sync_playwright  # pyright: ignore[reportMissingImports]
-        _PLAYWRIGHT = sync_playwright().start()
-        atexit.register(_shutdown_playwright)
+    with _PLAYWRIGHT_LOCK:
+        if _PLAYWRIGHT is None:
+            import atexit
+            from playwright.sync_api import sync_playwright  # pyright: ignore[reportMissingImports]
+            _PLAYWRIGHT = sync_playwright().start()
+            atexit.register(_shutdown_playwright)
     return _PLAYWRIGHT
 
 
 def _get_browser():
     global _BROWSER
-    if _BROWSER is None:
-        _BROWSER = _get_playwright().chromium.launch(headless=True)
+    with _PLAYWRIGHT_LOCK:
+        if _BROWSER is None:
+            _BROWSER = _get_playwright().chromium.launch(headless=True)
     return _BROWSER
 
 
@@ -681,6 +723,9 @@ def scrape_website_simple(
     max_chars: Annotated[int, Field(description="Límite de caracteres del texto extraído", ge=100, le=10000)] = 2000,
 ) -> str:
     """Extrae información de una página web estática usando requests + BeautifulSoup. Rápida, sin JavaScript."""
+    url_error = _validate_url(url)
+    if url_error:
+        return f"URL rechazada: {url_error}"
     try:
         from bs4 import BeautifulSoup
 
@@ -713,6 +758,9 @@ def scrape_website_dynamic(
     use_cache: Annotated[bool, Field(description="Si True, usa caché de 60s por URL para evitar requests repetidos")] = True,
 ) -> str:
     """Extrae información de páginas web con JavaScript usando Playwright (sync). Sin captura de JSON de APIs."""
+    url_error = _validate_url(url)
+    if url_error:
+        return f"URL rechazada: {url_error}"
     cache_params = {
         "wait_for_selector": wait_for_selector,
         "extract_selector": extract_selector,
@@ -906,6 +954,9 @@ async def scrape_website_with_json_capture(
     capture_json: Annotated[bool, Field(description="Si True, intercepta y guarda respuestas JSON de APIs en data_trading/")] = True,
 ) -> str:
     """Extrae información de páginas web con JavaScript y captura endpoints JSON automáticamente en data_trading/."""
+    url_error = _validate_url(url)
+    if url_error:
+        return f"URL rechazada: {url_error}"
     try:
         result = await _scrape_dynamic_async(
             url=url,

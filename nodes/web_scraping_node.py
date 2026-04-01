@@ -220,7 +220,7 @@ def make_web_scraping_node(
                 api_json: Optional[str] = None
                 try:
                     import asyncio
-                    loop     = asyncio.get_event_loop()
+                    loop     = asyncio.get_running_loop()
                     api_json = await loop.run_in_executor(
                         None, lambda: _get_crypto_price_fn(coin=coin, vs_currency="usd")
                     )

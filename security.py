@@ -154,7 +154,7 @@ _HITL_ENABLED = os.getenv("HITL_ENABLED", "true").strip().lower() == "true"
 async def _ask_confirmation(prompt: str) -> bool:
     """Solicita confirmación al usuario de forma async (no bloquea el event loop)."""
     import asyncio
-    loop   = asyncio.get_event_loop()
+    loop   = asyncio.get_running_loop()
     answer = await loop.run_in_executor(None, lambda: input(prompt).strip().lower())
     return answer in ("s", "si", "sí", "y", "yes")
 
