@@ -49,6 +49,121 @@ from price_helpers import (
 from state import AgentState
 
 
+# ==================== HELPERS ====================
+
+def _select_strategy_context(state: AgentState, last_message: str) -> dict:
+    """Selecciona la estrategia de scraping y retorna el contexto completo."""
+    tracker    = state.get("scrape_tracker") or {}
+    turn_count = (tracker.get("_turn_count") or 0) + 1
+    category   = _detect_query_category(last_message)
+    prior_score       = _get_category_score(tracker, category, turn_count)
+    prior_reliability = _score_to_reliability(prior_score)
+
+    _rt           = get_runtime_policy().get(category, {})
+    _top_promoted = (_rt.get("promoted") or [None])[0]
+    ml_recommended: Optional[str] = (
+        _top_promoted.get("strategy") if isinstance(_top_promoted, dict) else _top_promoted
+    )
+
+    if category == "crypto_price":
+        if random.random() < _API_VALIDATION_EPSILON:
+            strategy, exploring = "force_search", True
+        else:
+            strategy, exploring = "api_price", False
+        exp_rate = _API_VALIDATION_EPSILON
+    else:
+        exp_rate  = _exploration_rate(prior_score)
+        exploring = random.random() < exp_rate
+        strategy  = _get_strategy(tracker, category, prior_score, exploring=exploring)
+
+    prediction_match: Optional[bool] = (
+        (strategy == ml_recommended) if ml_recommended is not None else None
+    )
+
+    return {
+        "tracker": tracker, "turn_count": turn_count, "category": category,
+        "prior_score": prior_score, "prior_reliability": prior_reliability,
+        "ml_recommended": ml_recommended, "strategy": strategy,
+        "exploring": exploring, "exp_rate": exp_rate, "prediction_match": prediction_match,
+    }
+
+
+async def _summarize_if_long(
+    text: str, rid: str, get_llm_fn: Callable, *, is_retry: bool = False
+) -> str:
+    """Retorna un resumen de ≤200 palabras si el texto lo supera; si no, lo retorna sin cambios."""
+    if len(text.split()) <= 200:
+        return text
+    tags = ["web_scraping", "context_quarantine", "summary"]
+    if is_retry:
+        tags.append("retry")
+    llm = get_llm_fn()
+    summary_response = await llm.ainvoke(
+        [HumanMessage(content=(
+            "Resume el siguiente texto en máximo 200 palabras, "
+            f"conservando los datos más importantes:\n\n{text[:4000]}"
+        ))],
+        config=RunnableConfig(
+            tags=tags,
+            metadata={
+                "node":              "web_scraping_node",
+                "request_id":        rid,
+                "raw_words":         len(text.split()),
+                "summary_triggered": True,
+            },
+        ),
+    )
+    return summary_response.content
+
+
+async def _run_retry_agent(
+    agent,
+    last_message: str,
+    rid: str,
+    get_llm_fn: Callable,
+) -> tuple:
+    """
+    Reintenta la invocación del agente con estrategia force_search.
+    Retorna (summary, words, tokens, quality) con los datos del retry,
+    o (None, None, None, None) si el retry no produjo texto.
+    """
+    retry_hint = (
+        f"[Sistema | auto-retry por bajo rendimiento | estrategia=force_search]\n"
+        + _STRATEGY_HINTS["force_search"]
+    )
+    retry_result = await agent.ainvoke(
+        {"messages": [HumanMessage(content=retry_hint + last_message)]},
+        config=RunnableConfig(
+            tags=["web_scraping", "agent", "high_risk", "context_quarantine", "retry"],
+            metadata={
+                "node":       "web_scraping_node",
+                "agent":      "web_scraping_agent",
+                "request_id": rid,
+                "retry":      True,
+            },
+        ),
+    )
+
+    retry_text = ""
+    for msg in reversed(retry_result.get("messages", [])):
+        if isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
+            retry_text = msg.content
+            break
+
+    if not retry_text:
+        return None, None, None, None
+
+    summary = await _summarize_if_long(retry_text, rid, get_llm_fn, is_retry=True)
+    return (
+        summary,
+        retry_text.split(),
+        _extract_tokens(retry_result),
+        _extract_quality(retry_result),
+    )
+
+
+# ==================== FACTORY ====================
+
 def make_web_scraping_node(
     agent,
     get_llm_fn: Callable,
@@ -84,39 +199,17 @@ def make_web_scraping_node(
                 return {"messages": [AIMessage(content="Operación cancelada por el usuario.")]}
 
         try:
-            # --- Policy-driven strategy selection con exploration dinámica ---
-            tracker           = state.get("scrape_tracker") or {}
-            turn_count        = (tracker.get("_turn_count") or 0) + 1
-            category          = _detect_query_category(last_message)
-            prior_score       = _get_category_score(tracker, category, turn_count)
-            prior_reliability = _score_to_reliability(prior_score)
-
-            # ML recommendation: top promoted strategy del policy.json (si existe).
-            # Se captura ANTES de que el bandit pueda sobrescribirla.
-            _rt           = get_runtime_policy().get(category, {})
-            _top_promoted = (_rt.get("promoted") or [None])[0]
-            ml_recommended: Optional[str] = (
-                _top_promoted.get("strategy") if isinstance(_top_promoted, dict)
-                else _top_promoted
-            )
-
-            # crypto_price → API directa en el 98% de los casos.
-            if category == "crypto_price":
-                if random.random() < _API_VALIDATION_EPSILON:
-                    strategy  = "force_search"
-                    exploring = True
-                else:
-                    strategy  = "api_price"
-                    exploring = False
-                exp_rate = _API_VALIDATION_EPSILON
-            else:
-                exp_rate  = _exploration_rate(prior_score)
-                exploring = random.random() < exp_rate
-                strategy  = _get_strategy(tracker, category, prior_score, exploring=exploring)
-
-            prediction_match: Optional[bool] = (
-                (strategy == ml_recommended) if ml_recommended is not None else None
-            )
+            ctx = _select_strategy_context(state, last_message)
+            tracker          = ctx["tracker"]
+            turn_count       = ctx["turn_count"]
+            category         = ctx["category"]
+            prior_score      = ctx["prior_score"]
+            prior_reliability = ctx["prior_reliability"]
+            ml_recommended   = ctx["ml_recommended"]
+            strategy         = ctx["strategy"]
+            exploring        = ctx["exploring"]
+            exp_rate         = ctx["exp_rate"]
+            prediction_match = ctx["prediction_match"]
 
             # ================================================================
             # FAST PATH: api_price → llamada directa sin overhead de LLM.
@@ -195,11 +288,11 @@ def make_web_scraping_node(
                 config=RunnableConfig(
                     tags=["web_scraping", "agent", "high_risk", "context_quarantine"],
                     metadata={
-                        "node":               "web_scraping_node",
-                        "agent":              "web_scraping_agent",
-                        "request_id":         rid,
-                        "input_chars":        len(last_message),
-                        "prior_reliability":  prior_reliability,
+                        "node":              "web_scraping_node",
+                        "agent":             "web_scraping_agent",
+                        "request_id":        rid,
+                        "input_chars":       len(last_message),
+                        "prior_reliability": prior_reliability,
                     },
                 ),
             )
@@ -249,29 +342,9 @@ def make_web_scraping_node(
                 return {"messages": [AIMessage(content="No se pudo extraer información de la página.")]}
 
             # --- Fase 3: resumir a ≤200 palabras ---
+            summary           = await _summarize_if_long(raw_text, rid, get_llm_fn)
             words             = raw_text.split()
             summary_triggered = len(words) > 200
-            if summary_triggered:
-                llm = get_llm_fn()
-                summary_response = await llm.ainvoke(
-                    [HumanMessage(content=(
-                        f"Resume el siguiente texto en máximo 200 palabras, "
-                        f"conservando los datos más importantes:\n\n{raw_text[:4000]}"
-                    ))],
-                    config=RunnableConfig(
-                        tags=["web_scraping", "context_quarantine", "summary"],
-                        metadata={
-                            "node":              "web_scraping_node",
-                            "agent":             "web_scraping_agent",
-                            "request_id":        rid,
-                            "raw_words":         len(words),
-                            "summary_triggered": True,
-                        },
-                    ),
-                )
-                summary = summary_response.content
-            else:
-                summary = raw_text
 
             duration_ms = int((time.time() - t0) * 1000)
             reliability = _scrape_reliability(len(words))
@@ -305,49 +378,15 @@ def make_web_scraping_node(
                     scrape_reliability=reliability, strategy=strategy,
                     source_type=source_type, category=category, **tokens, **_node_meta(),
                 )
-                retry_hint = (
-                    f"[Sistema | auto-retry por {reliability} | estrategia=force_search]\n"
-                    + _STRATEGY_HINTS["force_search"]
+                retry_summary, retry_words, retry_tokens, retry_quality = await _run_retry_agent(
+                    agent, last_message, rid, get_llm_fn,
                 )
-                retry_result = await agent.ainvoke(
-                    {"messages": [HumanMessage(content=retry_hint + last_message)]},
-                    config=RunnableConfig(
-                        tags=["web_scraping", "agent", "high_risk", "context_quarantine", "retry"],
-                        metadata={
-                            "node":        "web_scraping_node",
-                            "agent":       "web_scraping_agent",
-                            "request_id":  rid,
-                            "retry":       True,
-                        },
-                    ),
-                )
-                retry_text = ""
-                for msg in reversed(retry_result.get("messages", [])):
-                    if isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
-                        retry_text = msg.content
-                        break
-
-                if retry_text:
-                    retry_words       = retry_text.split()
-                    summary_triggered = len(retry_words) > 200
-                    if summary_triggered:
-                        llm = get_llm_fn()
-                        summary_response = await llm.ainvoke(
-                            [HumanMessage(content=(
-                                f"Resume el siguiente texto en máximo 200 palabras, "
-                                f"conservando los datos más importantes:\n\n{retry_text[:4000]}"
-                            ))],
-                            config=RunnableConfig(
-                                tags=["web_scraping", "context_quarantine", "summary", "retry"],
-                                metadata={"node": "web_scraping_node", "request_id": rid},
-                            ),
-                        )
-                        summary = summary_response.content
-                    else:
-                        summary = retry_text
-                    words   = retry_words
-                    tokens  = _extract_tokens(retry_result)
-                    quality = _extract_quality(retry_result)
+                if retry_summary is not None:
+                    summary           = retry_summary
+                    words             = retry_words
+                    summary_triggered = len(words) > 200
+                    tokens            = retry_tokens
+                    quality           = retry_quality
 
                 strategy    = "force_search"
                 reliability = _scrape_reliability(len(words))
@@ -391,7 +430,7 @@ def make_web_scraping_node(
                 followup = {"followup_likely": True}
 
             quality_target_val = analytics.get("quality_target", 0)
-            ml_would_succeed: Optional[bool] = (
+            ml_would_succeed = (
                 bool(quality_target_val) if prediction_match is True else None
             )
 
