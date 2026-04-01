@@ -122,8 +122,7 @@ def _validate_url(url: str) -> Optional[str]:
         return f"Host no permitido: {hostname!r}"
 
     try:
-        import ipaddress as _ipaddress
-        ip = _ipaddress.ip_address(hostname)
+        ip = ipaddress.ip_address(hostname)
         if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
             return f"Dirección IP privada/reservada no permitida: {hostname!r}"
     except ValueError:
