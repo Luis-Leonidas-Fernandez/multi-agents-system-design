@@ -159,7 +159,9 @@ async def evaluate_trajectory_safe(state: Any, node_name: str) -> Tuple[bool, Di
     # 1) Allowlist: bypass del guard y log como SAFE
     if _is_allowed_public_price_request(messages, node_name):
         _emit_guard_audit({
+            "event_type":             "guard_eval",
             "trajectory_id":          trajectory_id,
+            "request_id":             trajectory_id,
             "guard_label":            "safe",
             "guard_status":           "ok",
             "verdict_source":         "allowlist_public_price",
@@ -181,7 +183,9 @@ async def evaluate_trajectory_safe(state: Any, node_name: str) -> Tuple[bool, Di
     # 2) Guard deshabilitado → aplicar policy
     if not guard_url:
         _emit_guard_audit({
+            "event_type":             "guard_eval",
             "trajectory_id":          trajectory_id,
+            "request_id":             trajectory_id,
             "guard_label":            "disabled",
             "guard_status":           "disabled",
             "verdict_source":         "disabled",
@@ -288,7 +292,9 @@ async def evaluate_trajectory_safe(state: Any, node_name: str) -> Tuple[bool, Di
         guard_status = "ok" if label in {"safe", "unsafe"} else "unknown"
 
         _emit_guard_audit({
+            "event_type":             "guard_eval",
             "trajectory_id":          trajectory_id,
+            "request_id":             trajectory_id,
             "guard_label":            label,
             "guard_status":           guard_status,
             "verdict_source":         verdict_source,
@@ -321,7 +327,9 @@ async def evaluate_trajectory_safe(state: Any, node_name: str) -> Tuple[bool, Di
 
     except Exception as e:
         _emit_guard_audit({
+            "event_type":             "guard_eval",
             "trajectory_id":          trajectory_id,
+            "request_id":             trajectory_id,
             "guard_label":            "error",
             "guard_status":           "error",
             "verdict_source":         "error",

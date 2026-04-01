@@ -61,6 +61,7 @@ def _check_patterns(text: str, patterns: list) -> Optional[str]:
 
 def _emit_block(trajectory_id: str, pattern: str, source: str, approx_chars: int) -> None:
     _emit_guard_audit({
+        "event_type":           "input_block",
         "trajectory_id":        trajectory_id,
         "guard_label":          "blocked",
         "guard_status":         "blocked_by_middleware",

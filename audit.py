@@ -70,7 +70,8 @@ def _emit_node_outcome(request_id: str, node: str, outcome: Outcome, phase: str 
     Extra: cualquier metadata adicional (agent, duration_ms, prompt_tokens, etc.)
     """
     _emit_guard_audit({
-        "request_id": request_id,
+        "event_type":  "node_outcome",
+        "request_id":  request_id,
         "node":        node,
         "outcome":     outcome,
         "phase":       phase,

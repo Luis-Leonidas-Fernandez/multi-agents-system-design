@@ -14,6 +14,7 @@ AgentGateway:
 Referencia: OpenClaw src/process/command-queue.ts
 """
 import asyncio
+import logging
 import os
 import time
 import uuid
@@ -25,12 +26,13 @@ from graph import create_supervisor_graph
 from memory import distill_memory, load_memory_context
 import persistence
 
+_log_gateway = logging.getLogger("gateway")
+
 
 # ==================== DEBUG LOG ====================
 
 def _log(session_key: str, msg: str) -> None:
-    if os.getenv("DEBUG_GATEWAY", "false").lower() == "true":
-        print(f"[gateway] session={session_key} {msg}")
+    _log_gateway.debug("session=%s %s", session_key, msg)
 
 
 # ==================== LANE QUEUE ====================

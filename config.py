@@ -6,10 +6,20 @@ Proveedores soportados via LLM_PROVIDER:
   azure   → AzureChatOpenAI
   ollama  → ChatOllama (modelos locales, sin API key)
 """
+import logging
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ==================== LOGGING ====================
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "WARNING").upper(),
+    format="%(levelname)s %(name)s %(message)s",
+)
+
+_log = logging.getLogger(__name__)
 
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 
@@ -17,7 +27,7 @@ TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 # No requiere código adicional — LangChain detecta las env vars al importar
 if os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true":
     project = os.getenv("LANGCHAIN_PROJECT", "multi-agents")
-    print(f"[observabilidad] LangSmith activo → proyecto: {project}")
+    _log.info("LangSmith activo → proyecto: %s", project)
 
 
 _VALID_AGENTDOG_POLICIES   = {"fail_open", "fail_closed", "fail_soft"}
@@ -31,21 +41,18 @@ def validate_env() -> None:
     """
     provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
     if provider not in ("openai", "azure", "ollama"):
-        print(f"[config] WARNING: LLM_PROVIDER='{provider}' no reconocido. "
-              f"Valores válidos: openai, azure, ollama. Se usará openai.")
+        _log.warning("LLM_PROVIDER='%s' no reconocido. Valores válidos: openai, azure, ollama. Se usará openai.", provider)
 
     policy = os.getenv("AGENTDOG_POLICY", "fail_open").strip().lower()
     if policy not in _VALID_AGENTDOG_POLICIES:
-        print(f"[config] WARNING: AGENTDOG_POLICY='{policy}' no reconocido. "
-              f"Valores válidos: {_VALID_AGENTDOG_POLICIES}. Se usará fail_open.")
+        _log.warning("AGENTDOG_POLICY='%s' no reconocido. Valores válidos: %s. Se usará fail_open.", policy, _VALID_AGENTDOG_POLICIES)
 
     eval_mode = os.getenv("AGENTDOG_EVAL_MODE", "high_risk_only").strip().lower()
     if eval_mode not in _VALID_AGENTDOG_EVAL_MODES:
-        print(f"[config] WARNING: AGENTDOG_EVAL_MODE='{eval_mode}' no reconocido. "
-              f"Valores válidos: {_VALID_AGENTDOG_EVAL_MODES}. Se usará high_risk_only.")
+        _log.warning("AGENTDOG_EVAL_MODE='%s' no reconocido. Valores válidos: %s. Se usará high_risk_only.", eval_mode, _VALID_AGENTDOG_EVAL_MODES)
 
     if not os.getenv("AGENTDOG_AUDIT_LOG"):
-        print("[config] INFO: AGENTDOG_AUDIT_LOG no configurado — audit log irá a stdout.")
+        _log.info("AGENTDOG_AUDIT_LOG no configurado — audit log irá a stdout.")
 
 
 def get_llm():
