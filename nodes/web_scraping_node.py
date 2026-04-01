@@ -24,7 +24,7 @@ from audit import (
     _get_model_name,
 )
 from agentdog import evaluate_trajectory_safe, _should_evaluate_guard
-from security import _HITL_ENABLED, _ask_confirmation
+from security import HITL_ENABLED as _HITL_ENABLED, ask_confirmation as _ask_confirmation
 from scrape_tracker import (
     _detect_query_category,
     _get_category_score,
@@ -244,6 +244,21 @@ def make_web_scraping_node(
                         quality_fast  = {"output_length": len(formatted), "tool_calls_count": 1}
                         followup_fast = {"followup_likely": False}
                         meta          = _node_meta()
+
+                        # --- Guardrail AgentDoG: fast path usa la respuesta generada ---
+                        fast_path_result = {"messages": [AIMessage(content=formatted)], "next_agent": state.get("next_agent", "")}
+                        if _should_evaluate_guard("web_scraping_node"):
+                            is_safe, _ = await evaluate_trajectory_safe(fast_path_result, "web_scraping_node")
+                            if not is_safe:
+                                _emit_node_outcome(
+                                    rid, "web_scraping_node", "blocked", phase="post_guard",
+                                    agent="web_scraping_agent",
+                                    duration_ms=duration_ms,
+                                    reason="agentdog",
+                                    followup_likely=True,
+                                    **tokens_fast, **quality_fast, **meta,
+                                )
+                                return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
 
                         new_tracker, analytics = _update_scrape_tracker(
                             tracker, category, 200, turn_count,

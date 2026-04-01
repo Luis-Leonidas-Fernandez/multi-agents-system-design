@@ -85,7 +85,7 @@ def test_price_helpers_imports():
     )
     assert _detect_coin_from_query("precio del bitcoin") == "bitcoin"
     assert _detect_coin_from_query("eth price") == "ethereum"
-    assert _detect_coin_from_query("algo random") == "bitcoin"  # default
+    assert _detect_coin_from_query("completely unrelated query") == "bitcoin"  # default
 
 
 # ==================== NODOS ====================

@@ -9,7 +9,7 @@ from typing import Optional
 
 from langchain_core.messages import ToolMessage
 
-from agents import _get_crypto_price_fn  # función subyacente del tool, sin overhead de LangChain
+from crypto_price import _get_crypto_price_fn, _COIN_ALIASES as _QUERY_COIN_MAP  # fuente única de aliases
 from models import PriceToolResponse
 
 
@@ -23,21 +23,6 @@ _PRICE_CONTEXT_RE = re.compile(
 _PRICE_SANITY_MIN = 1.0
 _PRICE_SANITY_MAX = 1_000_000.0
 
-# Mapa de keywords → coin_id (CoinGecko). Permite detectar la moneda sin LLM.
-_QUERY_COIN_MAP: dict = {
-    "bitcoin":   "bitcoin",       "btc":      "bitcoin",
-    "ethereum":  "ethereum",      "eth":      "ethereum",
-    "solana":    "solana",        "sol":      "solana",
-    "cardano":   "cardano",       "ada":      "cardano",
-    "dogecoin":  "dogecoin",      "doge":     "dogecoin",
-    "ripple":    "ripple",        "xrp":      "ripple",
-    "polkadot":  "polkadot",      "dot":      "polkadot",
-    "chainlink": "chainlink",     "link":     "chainlink",
-    "litecoin":  "litecoin",      "ltc":      "litecoin",
-    "avalanche": "avalanche-2",   "avax":     "avalanche-2",
-    "matic":     "matic-network", "polygon":  "matic-network",
-    "uniswap":   "uniswap",       "uni":      "uniswap",
-}
 
 _KNOWN_SCHEMA_VERSIONS = {"1.0"}
 

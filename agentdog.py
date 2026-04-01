@@ -14,6 +14,9 @@ import httpx
 from langchain_core.messages import AIMessage, ToolMessage
 
 from audit import _emit_guard_audit, _truncate_text, _truncate_raw_response
+from crypto_price import CRYPTO_KEYWORDS
+
+_BTC_KEYWORDS: frozenset = frozenset({"bitcoin", "btc"})
 
 
 # ==================== CONSTANTES ====================
@@ -52,8 +55,8 @@ def _flatten_messages_text(msgs: List[Any]) -> str:
 def _is_allowed_public_price_request(msgs: List[Any], node: str) -> bool:
     txt = _flatten_messages_text(msgs)
 
-    wants_price    = any(k in txt for k in ["precio", "price", "cotiza", "cotización", "cotizacion"])
-    is_btc         = any(k in txt for k in ["bitcoin", "btc"])
+    wants_price    = any(k in txt for k in CRYPTO_KEYWORDS)
+    is_btc         = any(k in txt for k in _BTC_KEYWORDS)
     allowed_domains = ["coingecko.com", "coinbase.com", "kraken.com"]
     has_allowed_domain = any(d in txt for d in allowed_domains)
 

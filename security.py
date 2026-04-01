@@ -160,6 +160,12 @@ async def _ask_confirmation(prompt: str) -> bool:
     return answer in ("s", "si", "sí", "y", "yes")
 
 
+# API pública (sin underscore) para uso externo
+HITL_ENABLED = _HITL_ENABLED
+ask_confirmation = _ask_confirmation
+
 __all__ = [
     "input_guard",
+    "HITL_ENABLED",
+    "ask_confirmation",
 ]
