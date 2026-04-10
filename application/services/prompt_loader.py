@@ -22,15 +22,22 @@ def load_agent_prompt(agent_name: str, extra_context: str = "") -> str:
     hot_reload = os.getenv("AGENT_HOT_RELOAD", "false").lower() == "true"
     warn_missing = os.getenv("AGENT_PROMPT_WARN_MISSING", "false").lower() == "true"
 
-    if not hot_reload and agent_name in _PROMPT_CACHE:
-        prompt = _PROMPT_CACHE[agent_name]
+    prompt_path = Path(__file__).parent / "agents" / f"{agent_name}.md"
+    cache_key = agent_name
+    if prompt_path.exists():
+        try:
+            cache_key = f"{agent_name}|{prompt_path.stat().st_mtime_ns}"
+        except Exception:
+            cache_key = agent_name
+
+    if not hot_reload and cache_key in _PROMPT_CACHE:
+        prompt = _PROMPT_CACHE[cache_key]
     else:
-        prompt_path = Path(__file__).parent / "agents" / f"{agent_name}.md"
         if prompt_path.exists():
             try:
                 prompt = prompt_path.read_text(encoding="utf-8").strip()
                 if not hot_reload:
-                    _PROMPT_CACHE[agent_name] = prompt
+                    _PROMPT_CACHE[cache_key] = prompt
             except Exception:
                 _log.warning("Error al leer prompt: %s.md", agent_name)
                 prompt = ""
