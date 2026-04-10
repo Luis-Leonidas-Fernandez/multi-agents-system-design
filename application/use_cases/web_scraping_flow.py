@@ -1525,6 +1525,39 @@ async def _discover_country_press_sources(
     discovered_sources: list[dict[str, str]] = _extract_country_press_sources(lookup_text)
     seen_urls = {source.get("url", "") for source in discovered_sources if source.get("url")}
 
+    if not discovered_sources:
+        try:
+            homepage = await fetch_web_page(
+                url="https://periodicos.com.ar/",
+                prompt=(
+                    "Extraé únicamente la lista de periódicos, diarios y medios del país solicitado, "
+                    "con sus nombres y enlaces si están disponibles."
+                ),
+                use_dynamic=False,
+            )
+        except Exception:
+            homepage = ""
+        if not isinstance(homepage, str):
+            homepage = str(homepage)
+        homepage_sources = _extract_country_press_sources(homepage)
+        if homepage_sources:
+            match_terms = [term.lower() for term in lookup_terms + [query_source_group or ""] if term]
+            if match_terms:
+                filtered_homepage_sources = [
+                    source for source in homepage_sources
+                    if any(
+                        term in f"{(source.get('title') or '').lower()} {(source.get('url') or '').lower()}"
+                        for term in match_terms
+                    )
+                ]
+                if filtered_homepage_sources:
+                    homepage_sources = filtered_homepage_sources
+            for source in homepage_sources:
+                url = source.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    discovered_sources.append(source)
+
     if len(discovered_sources) >= 2:
         directory_urls = []
 
