@@ -3,17 +3,21 @@ Definición de agentes especializados para el sistema multi-agentes
 
 Este módulo usa langgraph.prebuilt.create_react_agent para crear agentes
 que pueden usar herramientas de forma autónoma siguiendo el patrón ReAct.
+
+Nota de migración (LangGraph 1.x): el warning sugiere mover a
+`langchain.agents.create_react_agent`, pero esa función no existe con la misma
+firma en la versión actual de langchain. Se suprime el warning hasta que haya
+un reemplazo drop-in verificado.
 """
-# pyright: reportDeprecated=false
-# Nota: El linter sugiere usar langchain.agents.create_agent, pero esa función
-# no existe con la misma firma. langgraph.prebuilt.create_react_agent es correcto
-# para agentes basados en LangGraph que devuelven CompiledStateGraph.
-#
-# Se mantiene create_react_agent hasta que exista un reemplazo drop-in
-# equivalente con la misma firma y tests end-to-end que validen parity.
+import warnings
 from typing import Any, Sequence
 
 from langgraph.prebuilt import create_react_agent
+
+# LangGraph 1.x emite LangGraphDeprecatedSinceV10 en cada llamada a create_react_agent
+# sugiriendo migrar a langchain.agents.create_react_agent, que no existe aún con la
+# misma firma. Se suprime hasta que haya reemplazo drop-in verificado.
+warnings.filterwarnings("ignore", message=".*create_react_agent.*", category=Warning)
 
 from application.helpers.config_flow_helpers import get_llm
 from application.services.agent_registry import get_agent_temperature
