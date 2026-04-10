@@ -354,6 +354,7 @@ async def test_news_economicas_china_no_hardcodea_espn():
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
         patch("tools.web_tools.search_web.func", side_effect=[
+            "Web search results for query: \"periodicos china noticias diarios\"\n\n1. [Xinhua](https://www.xinhuanet.com/)\n   Directorio de prensa de China\n\n2. [China Daily](https://www.chinadaily.com.cn/)\n   Directorio de prensa de China\n\nSources:\n- [Xinhua](https://www.xinhuanet.com/)\n- [China Daily](https://www.chinadaily.com.cn/)",
             "Web search results for query: \"dame las noticias economicas de china de hoy\"\n\n1. [Reuters China economy](https://www.reuters.com/world/china/)\n   China economy slows as market waits\n\n2. [ESPN Tenis](https://www.espn.com.ar/tenis/)\n   Noticias de Tenis\n\nSources:\n- [Reuters China economy](https://www.reuters.com/world/china/)\n- [ESPN Tenis](https://www.espn.com.ar/tenis/)",
             "Web search results for query: \"dame las noticias economicas de china de hoy últimas noticias recientes\"\n\n1. [El Economista China](https://www.eleconomista.es/economia/noticias/13643246/11/25/china-sufre-un-desplome-sin-precedentes-de-la-inversion-y-deja-a-la-economia-sin-motores-en-pleno-vuelo.html)\n   Inversion y economia china\n\nSources:\n- [El Economista China](https://www.eleconomista.es/economia/noticias/13643246/11/25/china-sufre-un-desplome-sin-precedentes-de-la-inversion-y-deja-a-la-economia-sin-motores-en-pleno-vuelo.html)",
         ]),
@@ -380,16 +381,17 @@ async def test_news_recientes_de_japon_devuelven_respuesta_y_sources():
     mock_llm_fn = MagicMock(return_value=MagicMock())
 
     with (
+        patch.dict("os.environ", {"TAVILY_API_KEY": "test-key"}),
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("langchain_community.tools.DuckDuckGoSearchResults.invoke", return_value=[
+        patch("tools.web_tools.TavilyClient", MagicMock(return_value=MagicMock(search=MagicMock(return_value={"results": [
             {
                 "title": "Seguridad de Japón hoy",
-                "link": "https://www.japannews.yomiuri.co.jp/security/today",
-                "snippet": "Breaking update today about security in Japan",
+                "url": "https://www.japannews.yomiuri.co.jp/security/today",
+                "content": "Breaking update today about security in Japan",
             }
-        ]),
+        ]})))),
         patch("tools.web_tools.fetch_web_page", AsyncMock(return_value="URL: https://www.japannews.yomiuri.co.jp/security/today\n\nJapón refuerza medidas de seguridad hoy\nTokio anuncia un nuevo operativo\n\nSources:\n- [Japan News](https://www.japannews.yomiuri.co.jp/security/today)")),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
@@ -425,21 +427,22 @@ async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
         return _NHK_CONTENT if _NHK_URL in url else _NO_INFO
 
     with (
+        patch.dict("os.environ", {"TAVILY_API_KEY": "test-key"}),
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("langchain_community.tools.DuckDuckGoSearchResults.invoke", return_value=[
+        patch("tools.web_tools.TavilyClient", MagicMock(return_value=MagicMock(search=MagicMock(return_value={"results": [
             {
                 "title": "CNN Mundo",
-                "link": "https://cnnespanol.cnn.com/mundo",
-                "snippet": "Noticias del mundo",
+                "url": "https://cnnespanol.cnn.com/mundo",
+                "content": "Noticias del mundo",
             },
             {
                 "title": "NHK Japón seguridad",
-                "link": _NHK_URL,
-                "snippet": "Japón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional",
+                "url": _NHK_URL,
+                "content": "Japón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional",
             },
-        ]),
+        ]})))),
         patch("tools.web_tools.fetch_web_page", side_effect=_fetch_by_url),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
@@ -451,6 +454,76 @@ async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
     assert "CNN Mundo" not in content
     assert "Japón celebrará en abril la primera reunión" in content
     assert "Sources:" in content
+
+
+@pytest.mark.asyncio
+async def test_weekly_country_query_uses_snippet_when_daily_fetch_fails():
+    from application.use_cases.web_scraping_flow import _run_generic_web_search_fetch
+
+    async def _discover(*args, **kwargs):
+        return (["ansa.it", "repubblica.it"], ["ANSA", "La Repubblica"])
+
+    async def _fetch_by_url(url, **kwargs):
+        if "ansa.it" in url:
+            raise RuntimeError("dns failed")
+        return (
+            "URL: https://www.repubblica.it/cronaca/2026/04/10/seguridad.html\n\n"
+            "Repubblica confirma medidas de seguridad en Italia esta semana\n"
+            "El ministerio anunció controles adicionales\n\n"
+            "Sources:\n- [Repubblica](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)"
+        )
+
+    with (
+        patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=_discover)),
+        patch("tools.web_tools.search_web.func", side_effect=[
+            "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
+            "1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)\n"
+            "   ANSA reporta novedades de seguridad en Italia\n\n"
+            "Sources:\n- [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)",
+            "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:repubblica.it La Repubblica noticias\"\n\n"
+            "1. [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)\n"
+            "   Repubblica confirma medidas de seguridad en Italia esta semana\n\n"
+            "Sources:\n- [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)",
+        ]),
+        patch("tools.web_tools.fetch_web_page", side_effect=_fetch_by_url),
+    ):
+        result = await _run_generic_web_search_fetch("dame las ultimas noticias sobre seguridad en italia de esta semana")
+
+    assert result is not None
+    summary = result["summary"]
+    assert "ANSA reporta novedades de seguridad en Italia" in summary
+    assert "Repubblica confirma medidas de seguridad en Italia esta semana" in summary
+    assert "Sources:" in summary
+
+
+@pytest.mark.asyncio
+async def test_weekly_country_query_uses_single_snippet_before_generic_fallback():
+    from application.use_cases.web_scraping_flow import _run_generic_web_search_fetch
+
+    async def _discover(*args, **kwargs):
+        return (["ansa.it"], ["ANSA"])
+
+    async def _fetch_by_url(url, **kwargs):
+        raise RuntimeError("dns failed")
+
+    with (
+        patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=_discover)),
+        patch("tools.web_tools.search_web.func", return_value=(
+            "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
+            "1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)\n"
+            "   ANSA reporta novedades de seguridad en Italia\n\n"
+            "Sources:\n- [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)"
+        )),
+        patch("tools.web_tools.fetch_web_page", side_effect=_fetch_by_url),
+    ):
+        result = await _run_generic_web_search_fetch("dame las ultimas noticias sobre seguridad en italia de esta semana")
+
+    assert result is not None
+    assert result["source_type"] == "search"
+    assert result["pre_synthesized"] is True
+    summary = result["summary"]
+    assert "ANSA reporta novedades de seguridad en Italia" in summary
+    assert "Sources:" in summary
 
 
 @pytest.mark.asyncio

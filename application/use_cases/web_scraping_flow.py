@@ -37,6 +37,7 @@ from application.policies.web_source_policy import (
     detect_recent_query_horizon,
     get_query_source_terms,
     get_recent_query_requirements,
+    get_source_domain_priority,
     score_domain_boost,
 )
 from tools.web_tools import _is_specific_article_hit
@@ -109,6 +110,33 @@ def _build_source_backed_response(summary_lines: list[str], sources: list[dict[s
             body.append("")
         body.append(sources_block)
     return "\n".join(body).strip()
+
+
+_COUNTRY_PRESS_CACHE: dict[str, tuple[float, tuple[list[str], list[str]]]] = {}
+_COUNTRY_PRESS_CACHE_TTL_SECONDS = 60 * 60 * 24
+
+
+def _country_press_cache_key(query_source_group: Optional[str], source_terms: list[str]) -> str:
+    normalized_terms = tuple(sorted({term.strip().lower() for term in source_terms if term.strip()}))
+    return f"{query_source_group or ''}|{'|'.join(normalized_terms)}"
+
+
+def _country_press_cache_get(query_source_group: Optional[str], source_terms: list[str]) -> Optional[tuple[list[str], list[str]]]:
+    cache_key = _country_press_cache_key(query_source_group, source_terms)
+    cached = _COUNTRY_PRESS_CACHE.get(cache_key)
+    if not cached:
+        return None
+    cached_at, value = cached
+    if (time.time() - cached_at) > _COUNTRY_PRESS_CACHE_TTL_SECONDS:
+        _COUNTRY_PRESS_CACHE.pop(cache_key, None)
+        return None
+    domains, titles = value
+    return list(domains), list(titles)
+
+
+def _country_press_cache_set(query_source_group: Optional[str], source_terms: list[str], domains: list[str], titles: list[str]) -> None:
+    cache_key = _country_press_cache_key(query_source_group, source_terms)
+    _COUNTRY_PRESS_CACHE[cache_key] = (time.time(), (list(domains), list(titles)))
 
 
 def _web_search_runtime_args(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -1255,6 +1283,44 @@ def _score_generic_candidate(candidate: dict[str, str], query_terms: list[str], 
     return score
 
 
+def _candidate_source_priority(candidate: dict[str, str], query_source_group: Optional[str]) -> int:
+    url = candidate.get("url", "")
+    return get_source_domain_priority(query_source_group, url)
+
+
+def _rank_candidates_by_source_policy(
+    candidates: list[dict[str, str]],
+    query_terms: list[str],
+    query_source_group: Optional[str],
+) -> list[dict[str, str]]:
+    if not candidates:
+        return []
+    if not query_source_group:
+        return sorted(
+            candidates,
+            key=lambda c: _score_generic_candidate(c, query_terms, query_source_group),
+            reverse=True,
+        )
+    return sorted(
+        candidates,
+        key=lambda c: (
+            _candidate_source_priority(c, query_source_group),
+            -_score_generic_candidate(c, query_terms, query_source_group),
+        ),
+    )
+
+
+def _candidate_snippet_lines(candidate: dict[str, str]) -> list[str]:
+    snippet = (candidate.get("snippet") or "").strip()
+    if not snippet:
+        return []
+    snippet = re.sub(r"^#+\s+", "", snippet)
+    snippet = re.sub(r"\s+#+\s+", " ", snippet).strip()
+    if len(snippet.split()) < 4:
+        return []
+    return [snippet]
+
+
 def _strip_accents(text: str) -> str:
     """Remove diacritics so 'japon' matches 'japón', 'ultima' matches 'última', etc."""
     import unicodedata
@@ -1391,6 +1457,198 @@ def _extract_sources_from_text(text: str) -> list[dict[str, str]]:
     return sources
 
 
+def _extract_country_press_sources(text: str) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for source in _extract_sources_from_text(text):
+        url = source.get("url", "")
+        if not url:
+            continue
+        if "periodicos.com.ar" in url:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        sources.append(source)
+    return sources
+
+
+async def _discover_country_press_sources(
+    last_message: str,
+    query_source_group: Optional[str],
+    source_terms: list[str],
+    web_search_runtime_args: Optional[dict[str, Any]] = None,
+) -> tuple[list[str], list[str]]:
+    if not query_source_group or not source_terms:
+        return [], []
+
+    cached = _country_press_cache_get(query_source_group, source_terms)
+    if cached is not None:
+        return cached
+
+    from tools import search_web
+    from tools.web_tools import fetch_web_page
+
+    lookup_terms = [term for term in source_terms if len(term) >= 3][:4]
+    if not lookup_terms:
+        return [], []
+
+    lookup_query = " ".join([
+        'site:periodicos.com.ar',
+        *lookup_terms,
+        "periódicos",
+        "diarios",
+        "medios",
+    ])
+    lookup_args: dict[str, Any] = {
+        "query": lookup_query,
+        "use_cache": False,
+        "allowed_domains": ["periodicos.com.ar"],
+        "num_results": 5,
+    }
+    if web_search_runtime_args:
+        lookup_args["blocked_domains"] = web_search_runtime_args.get("blocked_domains") or None
+
+    lookup_text = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: search_web.invoke(lookup_args),
+    )
+    if not isinstance(lookup_text, str):
+        lookup_text = str(lookup_text)
+
+    directory_urls = [
+        source.get("url", "")
+        for source in _extract_sources_from_text(lookup_text)
+        if "periodicos.com.ar" in (source.get("url") or "")
+    ]
+
+    discovered_sources: list[dict[str, str]] = _extract_country_press_sources(lookup_text)
+    seen_urls = {source.get("url", "") for source in discovered_sources if source.get("url")}
+
+    if len(discovered_sources) >= 2:
+        directory_urls = []
+
+    for directory_url in directory_urls[:2]:
+        try:
+            fetched = await fetch_web_page(
+                url=directory_url,
+                prompt=(
+                    "Extraé únicamente la lista de periódicos, diarios y medios del país solicitado, "
+                    "con sus nombres y enlaces si están disponibles."
+                ),
+                use_dynamic=False,
+            )
+        except Exception:
+            continue
+        if not isinstance(fetched, str):
+            fetched = str(fetched)
+        for source in _extract_country_press_sources(fetched):
+            url = source.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                discovered_sources.append(source)
+
+    domains: list[str] = []
+    titles: list[str] = []
+    seen_domains: set[str] = set()
+    seen_titles: set[str] = set()
+    for source in discovered_sources:
+        url = source.get("url", "")
+        title = (source.get("title") or "").strip()
+        hostname = (urlparse(url).hostname or "").lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        if hostname and hostname not in seen_domains:
+            seen_domains.add(hostname)
+            domains.append(hostname)
+        if title and title not in seen_titles:
+            seen_titles.add(title)
+            titles.append(title)
+
+    domains = domains[:10]
+    titles = titles[:10]
+    _country_press_cache_set(query_source_group, source_terms, domains, titles)
+    return domains, titles
+
+
+async def _run_country_press_search_candidates(
+    last_message: str,
+    search_age_days: Optional[int],
+    query_terms: list[str],
+    query_source_group: Optional[str],
+    source_terms: list[str],
+    web_search_runtime_args: Optional[dict[str, Any]] = None,
+    query_horizon: Optional[str] = None,
+) -> tuple[list[dict[str, str]], str]:
+    from tools import search_web
+
+    country_press_domains, country_press_names = await _discover_country_press_sources(
+        last_message,
+        query_source_group,
+        source_terms,
+        web_search_runtime_args,
+    )
+    if not country_press_domains:
+        return [], ""
+
+    loop = asyncio.get_running_loop()
+    combined_search_text: list[str] = []
+    raw_candidates: list[dict[str, str]] = []
+
+    max_targets = min(4, len(country_press_domains))
+    for idx in range(max_targets):
+        domain = country_press_domains[idx]
+        press_name = country_press_names[idx] if idx < len(country_press_names) else domain
+        query_parts = [
+            f"site:{domain}",
+            last_message.strip(),
+        ]
+        if press_name:
+            press_name_lower = press_name.strip().lower()
+            if press_name_lower and press_name_lower not in last_message.lower():
+                query_parts.append(press_name.strip())
+        if _is_recent_web_information_query(last_message):
+            query_parts.append("noticias")
+        query = " ".join(part for part in query_parts if part).strip()
+        invoke_args: dict[str, Any] = {
+            "query": query,
+            "use_cache": False,
+            **(web_search_runtime_args or {}),
+        }
+        invoke_args["allowed_domains"] = [domain]
+        if search_age_days is not None:
+            invoke_args["max_age_days"] = search_age_days
+        if _is_recent_web_information_query(last_message):
+            invoke_args["topic"] = "news"
+            if query_horizon == "today":
+                invoke_args["time_range"] = "day"
+            elif query_horizon == "week":
+                invoke_args["time_range"] = "week"
+        try:
+            search_text = await loop.run_in_executor(
+                None,
+                lambda q=invoke_args: search_web.invoke(q),
+            )
+        except Exception:
+            continue
+        if not isinstance(search_text, str):
+            search_text = str(search_text)
+        combined_search_text.append(search_text)
+        diary_candidates = [
+            c for c in _extract_generic_search_candidates(search_text)
+            if not _is_non_news_candidate(c)
+        ]
+        article_candidates = [c for c in diary_candidates if _is_specific_article_hit(c)]
+        if article_candidates:
+            raw_candidates.extend(article_candidates)
+        else:
+            raw_candidates.extend(diary_candidates)
+
+    ranked_candidates = _rank_candidates_by_source_policy(raw_candidates, query_terms, query_source_group)
+    diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)[:8]
+    return diverse_candidates, "\n".join(combined_search_text)
+
+
 def _build_generic_fetch_prompt(query: str) -> str:
     geography = _extract_query_geography(query)
     geography_line = f"Contexto geográfico: {geography}. " if geography else ""
@@ -1424,6 +1682,25 @@ async def _run_week_search_candidates(
     The search provider decides the result set; this helper only normalizes, ranks,
     and deduplicates the returned hits.
     """
+    source_terms = list(get_query_source_terms(last_message))
+    country_press_candidates, country_press_search_text = await _run_country_press_search_candidates(
+        last_message,
+        search_age_days,
+        query_terms,
+        query_source_group,
+        source_terms,
+        web_search_runtime_args,
+        query_horizon="week",
+    )
+    if country_press_candidates:
+        url_age_threshold = search_age_days or 14
+        filtered_candidates = [
+            c for c in country_press_candidates
+            if _candidate_url_is_recent(c.get("url", ""), url_age_threshold)
+        ]
+        if filtered_candidates:
+            return filtered_candidates[:8], country_press_search_text
+
     from tools import search_web
 
     loop = asyncio.get_running_loop()
@@ -1443,11 +1720,7 @@ async def _run_week_search_candidates(
         if not _is_non_news_candidate(c)
         and _candidate_url_is_recent(c.get("url", ""), url_age_threshold)
     ]
-    ranked_candidates = sorted(
-        candidates,
-        key=lambda c: _score_generic_candidate(c, query_terms, query_source_group),
-        reverse=True,
-    )
+    ranked_candidates = _rank_candidates_by_source_policy(candidates, query_terms, query_source_group)
     diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)[:8]
 
     return diverse_candidates, search_text
@@ -1511,6 +1784,12 @@ async def _run_generic_web_search_fetch(
             last_message, search_age_days, query_terms, query_source_group, web_search_runtime_args
         )
     else:
+        country_press_domains, country_press_names = await _discover_country_press_sources(
+            last_message,
+            query_source_group,
+            source_terms,
+            web_search_runtime_args,
+        )
         search_invoke_args: dict = {"query": last_message, "use_cache": False, **(web_search_runtime_args or {})}
         if search_age_days is not None:
             search_invoke_args["max_age_days"] = search_age_days
@@ -1518,6 +1797,10 @@ async def _run_generic_web_search_fetch(
             search_invoke_args["topic"] = "news"
             if query_horizon == "today":
                 search_invoke_args["time_range"] = "day"
+        if country_press_domains and not search_invoke_args.get("allowed_domains"):
+            search_invoke_args["allowed_domains"] = country_press_domains
+        if country_press_names:
+            search_invoke_args["query"] = f"{last_message} {' '.join(country_press_names[:4])}".strip()
 
         search_text = await loop.run_in_executor(
             None,
@@ -1527,15 +1810,10 @@ async def _run_generic_web_search_fetch(
             search_text = str(search_text)
 
         candidates = _extract_generic_search_candidates(search_text)
-
-        def _candidate_sort_key(c: dict[str, str]) -> tuple:
-            score = _score_generic_candidate(c, query_terms, query_source_group)
-            return (score,)
-
-        ranked_candidates = sorted(
+        ranked_candidates = _rank_candidates_by_source_policy(
             [c for c in candidates if not _is_non_news_candidate(c)],
-            key=_candidate_sort_key,
-            reverse=True,
+            query_terms,
+            query_source_group,
         )[:8]
 
         diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)
@@ -1549,6 +1827,10 @@ async def _run_generic_web_search_fetch(
                 alt_invoke_args["topic"] = "news"
                 if query_horizon == "today":
                     alt_invoke_args["time_range"] = "day"
+            if country_press_domains and not alt_invoke_args.get("allowed_domains"):
+                alt_invoke_args["allowed_domains"] = country_press_domains
+            if country_press_names:
+                alt_invoke_args["query"] = f"{last_message} últimas noticias recientes {' '.join(country_press_names[:4])}".strip()
             alt_search_text = await loop.run_in_executor(
                 None,
                 lambda q=alt_invoke_args: search_web.invoke(q),
@@ -1556,7 +1838,7 @@ async def _run_generic_web_search_fetch(
             if not isinstance(alt_search_text, str):
                 alt_search_text = str(alt_search_text)
             alt_candidates = [c for c in _extract_generic_search_candidates(alt_search_text) if not _is_non_news_candidate(c)]
-            for c in sorted(alt_candidates, key=lambda x: _score_generic_candidate(x, query_terms, query_source_group), reverse=True):
+            for c in _rank_candidates_by_source_policy(alt_candidates, query_terms, query_source_group):
                 if len(diverse_candidates) >= 4:
                     break
                 if not any(_same_event(c, d, query_terms) for d in diverse_candidates):
@@ -1577,11 +1859,13 @@ async def _run_generic_web_search_fetch(
             r"|/[a-z0-9-]{15,}/?$"  # article slug (was 30, lowered to 15)
         )
         week_entry_lines: list[str] = []
+        week_snippet_lines: list[str] = []
         week_entry_sources: list[dict[str, str]] = []
+        week_snippet_sources: list[dict[str, str]] = []
         seen_week_urls: set[str] = set()
         fetch_prompt_week = _build_generic_fetch_prompt(last_message)
 
-        async def _week_entry(c: dict[str, str]) -> tuple[str, str]:
+        async def _week_entry(c: dict[str, str]) -> tuple[str, str, bool]:
             url = c.get("url", "")
             snippet = c.get("snippet", "").strip()
             # Strip markdown from snippet
@@ -1607,16 +1891,17 @@ async def _run_generic_web_search_fetch(
                     ):
                         lines = _extract_generic_content_lines(fetched, query_terms)
                         if lines:
-                            return title, " ".join(lines[:3])
+                            return title, " ".join(lines[:3]), False
                 except Exception:
                     pass
             # Fallback to Tavily snippet
-            return title, snippet
+            return title, snippet, True
 
         week_results = await asyncio.gather(*[_week_entry(c) for c in diverse_candidates])
 
-        for (title, content), c in zip(week_results, diverse_candidates):
-            if not content or len(content.split()) < 8:
+        for (title, content, from_snippet), c in zip(week_results, diverse_candidates):
+            min_words = 4 if from_snippet else 8
+            if not content or len(content.split()) < min_words:
                 continue
             # Discard entries that are no-info placeholders
             if _is_no_info_response(content):
@@ -1626,6 +1911,8 @@ async def _run_generic_web_search_fetch(
                 continue
             seen_week_urls.add(url)
             week_entry_lines.append(f"[{title}] — {content}")
+            if from_snippet:
+                week_snippet_lines.append(f"[{title}] — {content}")
             # Include URL in Sources if it looks like a specific article:
             # has date/long-slug pattern, OR has a non-trivial path (≥2 segments, last ≥5 chars)
             path = urlparse(url).path.rstrip("/")
@@ -1635,6 +1922,8 @@ async def _run_generic_web_search_fetch(
             )
             if is_article_url:
                 week_entry_sources.append({"title": title, "url": url})
+                if from_snippet:
+                    week_snippet_sources.append({"title": title, "url": url})
 
         if len(week_entry_lines) >= 2:
             # Format bullets directly — each fetched entry is already LLM-processed.
@@ -1643,7 +1932,7 @@ async def _run_generic_web_search_fetch(
             _current_year = _dt_week.date.today().year
             _old_year_re = re.compile(r'\b(20\d{2})\b')
             paragraph_parts = []
-            for (content_title, content), c in zip(week_results, diverse_candidates):
+            for (content_title, content, _from_snippet), c in zip(week_results, diverse_candidates):
                 title = content_title or c.get("title") or c.get("url") or ""
                 # Skip entries whose content ONLY references years before the current year.
                 # "18 de noviembre de 2025" is 5 months old — not "this week".
@@ -1666,6 +1955,21 @@ async def _run_generic_web_search_fetch(
                 "words": summary.split(),
                 "source_type": "search",
                 "sources": week_entry_sources,
+                "pre_synthesized": True,
+            }
+        if week_snippet_lines:
+            # Local snippet-backed fallback: keep country-local material visible even when
+            # we do not reach the stronger multi-article threshold required for fetched content.
+            snippet_sources = week_snippet_sources or week_entry_sources or [{"title": "search result", "url": ""}]
+            snippet_summary = _build_source_backed_response(
+                week_snippet_lines[:8],
+                snippet_sources,
+            )
+            return {
+                "summary": snippet_summary,
+                "words": snippet_summary.split(),
+                "source_type": "search",
+                "sources": snippet_sources,
                 "pre_synthesized": True,
             }
         # Not enough content — fall through to page fetch approach
@@ -1703,13 +2007,17 @@ async def _run_generic_web_search_fetch(
     eligible_entries: list[dict[str, Any]] = []
     for candidate, result in fetched_results:
         if isinstance(result, Exception):
-            continue
+            snippet_lines = _candidate_snippet_lines(candidate)
+            if not snippet_lines:
+                continue
+            result = "\n".join(snippet_lines)
         if not isinstance(result, str):
             result = str(result)
-        if result.startswith("Error") or result.startswith("URL rechazada"):
-            continue
-        if _is_no_info_response(result):
-            continue
+        if result.startswith("Error") or result.startswith("URL rechazada") or _is_no_info_response(result):
+            snippet_lines = _candidate_snippet_lines(candidate)
+            if not snippet_lines:
+                continue
+            result = "\n".join(snippet_lines)
 
         body_lines = _extract_generic_content_lines(result, query_terms)
         candidate_score = _score_generic_candidate(candidate, query_terms, query_source_group)
@@ -1719,12 +2027,10 @@ async def _run_generic_web_search_fetch(
             if any(term in result_blob for term in query_terms):
                 content_score = 1
         if not body_lines and content_score <= 1:
-            # Fallback: use the Tavily snippet so diverse candidates aren't dropped
-            # just because the fetched page returned poor content
-            tavily_snippet = candidate.get("snippet", "").strip()
-            if tavily_snippet and len(tavily_snippet.split()) >= 6:
-                body_lines = [tavily_snippet]
-                content_score = 4
+            snippet_lines = _candidate_snippet_lines(candidate)
+            if snippet_lines:
+                body_lines = snippet_lines
+                content_score = 3
             else:
                 continue
 
@@ -1759,7 +2065,13 @@ async def _run_generic_web_search_fetch(
         })
 
     if query_horizon == "week" and eligible_entries:
-        ordered_entries = sorted(eligible_entries, key=lambda entry: cast(int, entry["score"]), reverse=True)
+        ordered_entries = sorted(
+            eligible_entries,
+            key=lambda entry: (
+                _candidate_source_priority(cast(dict[str, str], entry["candidate"]), query_source_group),
+                -cast(int, entry["score"]),
+            ),
+        )
         max_size = min(len(ordered_entries), max(4, recent_min_candidates))
         for size in range(min(recent_min_candidates, max_size), max_size + 1):
             selected = ordered_entries[:size]
@@ -1817,7 +2129,7 @@ async def _run_generic_web_search_fetch(
             title = c.get("title", url)
             snippet_lines.append(f"{title} — {snippet}")
             snippet_sources.append({"title": title, "url": url})
-        if len(snippet_lines) >= 2:
+        if snippet_lines:
             summary = _build_source_backed_response(snippet_lines, snippet_sources)
             return {
                 "summary": summary,
@@ -1828,7 +2140,13 @@ async def _run_generic_web_search_fetch(
             }
 
     if query_horizon != "week" and eligible_entries:
-        best_entry = max(eligible_entries, key=lambda entry: cast(int, entry["score"]))
+        best_entry = sorted(
+            eligible_entries,
+            key=lambda entry: (
+                _candidate_source_priority(cast(dict[str, str], entry["candidate"]), query_source_group),
+                -cast(int, entry["score"]),
+            ),
+        )[0]
         summary = _build_source_backed_response(cast(list[str], best_entry["summary_lines"]), cast(list[dict[str, str]], best_entry["sources"]))
         return {
             "summary": summary,
