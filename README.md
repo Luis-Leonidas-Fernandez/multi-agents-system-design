@@ -43,6 +43,7 @@ cp .env.example .env          # agregar OPENAI_API_KEY
 ## Ejecución
 
 ```bash
+./run.sh                               # wrapper local: levanta la app y el auto-start de SearXNG
 python main.py                           # REPL interactivo con historial en sessions/
 docker compose up --build                # containerizado (monta data_trading/ como volumen)
 python application/composition/graph.py  # test rápido del grafo (__main__)
@@ -50,6 +51,8 @@ pytest tests/ -v                         # suite completa (399 tests, no requier
 python ops/dashboard.py [audit.jsonl]    # dashboard visual del audit log
 python ops/analytics.py [audit.jsonl]    # strategy ranking + learning curve
 ```
+
+`python main.py` intenta levantar `searxng` automáticamente vía `docker compose up -d searxng` cuando `SEARXNG_AUTO_START=true` y `SEARXNG_BASE_URL` apunta a un host local.
 
 ## Variables de entorno
 
@@ -67,7 +70,11 @@ python ops/analytics.py [audit.jsonl]    # strategy ranking + learning curve
 | `COORDINATOR_MODE` | no | `false` | `true` activa el modo coordinador con workers paralelos |
 | `AGENT_HOT_RELOAD` | no | `false` | `true` recarga system prompts de `agents/` sin reiniciar |
 | `USE_SQLITE` | no | `true` | `true` = SQLite / `false` = JSONL legacy |
-| `TAVILY_API_KEY` | sí* | — | Tavily Search API key (*requerida para `search_web`) |
+| `TAVILY_API_KEY` | sí* | — | Tavily Search API key (*requerida si querés usar Tavily como provider) |
+| `SEARXNG_BASE_URL` | no | — | URL base de tu instancia SearXNG (fallback sin API key) |
+| `SEARXNG_AUTO_START` | no | `true` | `true` arranca `searxng` con `docker compose up -d searxng` cuando levantás `python main.py` |
+| `SEARXNG_LIMITER` | no | `false` | `false` evita que el limiter/bot-detection bloquee las búsquedas locales |
+| `SEARXNG_LANGUAGE` | no | — | Código de idioma para SearXNG, por ejemplo `es` |
 | `LANGCHAIN_TRACING_V2` | no | — | `true` para activar LangSmith |
 | `LANGCHAIN_API_KEY` | no | — | API key de LangSmith |
 | `LANGCHAIN_PROJECT` | no | `multi-agents` | Nombre del proyecto en LangSmith |
@@ -87,7 +94,7 @@ User → input_guard → supervisor / coordinator → route_agent() → [agente 
 
 **Modo supervisor** (default): el supervisor rutea directamente al agente especializado.
 
-**Modo coordinador** (`COORDINATOR_MODE=true`): el coordinador spawnea workers dinámicos y puede ejecutar probes en paralelo antes de delegar. Para `web_scraping_agent` lanza un probe round y elige la mejor fuente antes de responder.
+**Modo coordinador** (`COORDINATOR_MODE=true`): el coordinador spawnea workers dinámicos y puede ejecutar probes en paralelo antes de delegar. Para `web_scraping_agent` lanza un probe round y el flujo de noticias usa búsqueda web estilo OpenClaw para obtener múltiples fuentes.
 
 ### Capas de ejecución en orden
 
@@ -105,7 +112,7 @@ User → input_guard → supervisor / coordinator → route_agent() → [agente 
 | `math_agent` | `calculate` (safe `eval` con namespace matemático) |
 | `analysis_agent` | `analyze_data` |
 | `code_agent` | `write_code` |
-| `web_scraping_agent` | `scrape_website_simple` (requests+BS4), `scrape_website_dynamic` (Playwright, cache 60s), `scrape_website_with_json_capture` (Playwright async, guarda JSON en `data_trading/`), `extract_price_from_text`, `search_web` (Tavily/DuckDuckGo) |
+| `web_scraping_agent` | `scrape_website_simple` (requests+BS4), `scrape_website_dynamic` (Playwright, cache 60s), `scrape_website_with_json_capture` (Playwright async, guarda JSON en `data_trading/`), `extract_price_from_text`, `search_web` (Tavily + SearXNG fallback) |
 
 ### Estado compartido (`AgentState`)
 
