@@ -98,9 +98,15 @@ def _wait_for_searxng(base_url: str, timeout_seconds: int = 45) -> bool:
     last_error: Optional[Exception] = None
     probe_headers = {
         "User-Agent": "Mozilla/5.0 (Multi-Agents)",
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
         "X-Forwarded-For": "127.0.0.1",
         "X-Real-IP": "127.0.0.1",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Site": "same-origin",
     }
 
     while time.monotonic() < deadline:

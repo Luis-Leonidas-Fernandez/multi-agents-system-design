@@ -465,9 +465,15 @@ def _run_searxng_search(
 
     headers = {
         "User-Agent": os.getenv("SEARXNG_USER_AGENT") or "Mozilla/5.0 (Multi-Agents)",
-        "Accept": "application/json, text/plain, */*",
+        "Accept": os.getenv("SEARXNG_ACCEPT") or "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": os.getenv("SEARXNG_ACCEPT_LANGUAGE") or "es-AR,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": os.getenv("SEARXNG_ACCEPT_ENCODING") or "gzip, deflate, br",
+        "Connection": "keep-alive",
         "X-Forwarded-For": os.getenv("SEARXNG_FORWARDED_FOR") or "127.0.0.1",
         "X-Real-IP": os.getenv("SEARXNG_REAL_IP") or "127.0.0.1",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Site": "same-origin",
     }
     response = requests.get(search_url, params=params, headers=headers, timeout=20)
     response.raise_for_status()
