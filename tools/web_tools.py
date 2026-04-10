@@ -384,6 +384,8 @@ def _run_tavily_search(
     blocked_domains: Optional[list[str]],
     num_results: int,
     max_age_days: Optional[int],
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
 ) -> list[dict[str, str]]:
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
@@ -400,7 +402,11 @@ def _run_tavily_search(
         "exclude_domains": blocked_domains or [],
         "search_depth": "advanced",
     }
-    if max_age_days is not None:
+    if topic:
+        search_kwargs["topic"] = topic
+    if time_range:
+        search_kwargs["time_range"] = time_range
+    elif max_age_days is not None:
         search_kwargs["days"] = max_age_days
     response = client.search(**search_kwargs)
     return _normalize_search_hits(response.get("results") or [])
@@ -434,9 +440,11 @@ def _run_web_search_provider(
     blocked_domains: Optional[list[str]],
     num_results: int,
     max_age_days: Optional[int],
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
 ) -> list[dict[str, str]]:
     if provider_kind == "tavily":
-        return _run_tavily_search(query, allowed_domains, blocked_domains, num_results, max_age_days)
+        return _run_tavily_search(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
     if provider_kind == "duckduckgo":
         return _run_duckduckgo_search(query, allowed_domains, blocked_domains, num_results)
     raise ValueError(f"Proveedor de web search desconocido: {provider_kind}")
@@ -476,6 +484,8 @@ def _execute_web_search_plan(
     num_results: int,
     max_age_days: Optional[int],
     use_cache: bool,
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
 ) -> str:
     try:
         last_error: Exception | None = None
@@ -484,7 +494,7 @@ def _execute_web_search_plan(
             cache_key = (
                 f"provider={provider_spec.name}|selected={plan.selected_provider}|chain={provider_chain}|explicit={plan.provider_explicit}|{query}"
                 f"|allowed={sorted(allowed_domains or [])}|blocked={sorted(blocked_domains or [])}"
-                f"|n={num_results}|days={max_age_days}"
+                f"|n={num_results}|days={max_age_days}|topic={topic}|time_range={time_range}"
             )
             if use_cache:
                 cached = _get_search_cache(cache_key)
@@ -499,6 +509,8 @@ def _execute_web_search_plan(
                     blocked_domains,
                     num_results,
                     max_age_days,
+                    topic=topic,
+                    time_range=time_range,
                 )
                 result = _format_search_results(query, hits)
                 if use_cache:
@@ -616,6 +628,8 @@ def search_web(
     blocked_domains: Annotated[Optional[list[str]], Field(description="Dominios bloqueados para filtrar resultados")] = None,
     num_results: Annotated[int, Field(description="Cantidad máxima de resultados", ge=1, le=10)] = 8,
     max_age_days: Annotated[Optional[int], Field(description="Limitar resultados a los últimos N días. Usá 7 para 'esta semana/hoy', 30 para noticias recientes. None para sin límite.", ge=1, le=365)] = None,
+    topic: Annotated[Optional[str], Field(description="Tipo de búsqueda: 'news' para noticias recientes, 'general' para búsqueda general, 'finance' para finanzas. Usá 'news' cuando busques noticias.")] = None,
+    time_range: Annotated[Optional[str], Field(description="Rango temporal para Tavily: 'day' (hoy), 'week' (esta semana), 'month' (este mes), 'year'. Tiene precedencia sobre max_age_days.")] = None,
     use_cache: Annotated[bool, Field(description="Si True, usa caché de resultados por 15 minutos")] = True,
 ) -> str:
     """Busca información en internet usando el provider configurado. No requiere URL."""
@@ -635,6 +649,8 @@ def search_web(
         num_results,
         max_age_days,
         use_cache,
+        topic=topic,
+        time_range=time_range,
     )
 
 
@@ -855,7 +871,7 @@ async def web_fetch(
 
         is_preapproved = _is_preapproved_url(final_url)
 
-        llm = get_llm(temperature=0.1)
+        llm = get_llm()
         synthesized = await llm.ainvoke([
             HumanMessage(content=_build_web_fetch_prompt(markdown_content, prompt, is_preapproved))
         ])

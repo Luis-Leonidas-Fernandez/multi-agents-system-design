@@ -456,9 +456,12 @@ async def _legacy_run_web_scraping_flow(
             from tools import search_web
 
             loop = asyncio.get_running_loop()
+            _fb_args: dict = {"query": last_message, "use_cache": False, **web_search_runtime_args}
+            if _is_recent_web_information_query(last_message):
+                _fb_args["topic"] = "news"
             fallback_search = await loop.run_in_executor(
                 None,
-                lambda: search_web.invoke({"query": last_message, "use_cache": False, **web_search_runtime_args}),
+                lambda: search_web.invoke(_fb_args),
             )
             if not isinstance(fallback_search, str):
                 fallback_search = str(fallback_search)
@@ -1238,6 +1241,17 @@ def _score_generic_candidate(candidate: dict[str, str], query_terms: list[str], 
     if any(noise in blob for noise in ("login", "signin", "cookie", "privacy", "archive", "perfil")):
         score -= 2
     score += score_domain_boost(query_source_group, url)
+
+    # Penalize candidates whose title matches zero query terms — likely off-topic.
+    # e.g. a celebrity article mentions "seguridad" in the snippet but the title
+    # ("Terrible momento en vivo: la cronista de TN") has no relevant term.
+    # Stopword-only terms (len < 4) are excluded from this check to avoid false
+    # positives on queries with no long meaningful terms.
+    title_lower = candidate.get("title", "").lower()
+    meaningful_terms = [t for t in query_terms if len(t) >= 4]
+    if meaningful_terms and not any(t in title_lower for t in meaningful_terms):
+        score -= 6
+
     return score
 
 
@@ -1416,6 +1430,8 @@ async def _run_week_search_candidates(
     search_invoke_args: dict = {"query": last_message, "use_cache": False, **(web_search_runtime_args or {})}
     if search_age_days is not None:
         search_invoke_args["max_age_days"] = search_age_days
+    search_invoke_args["topic"] = "news"
+    search_invoke_args["time_range"] = "week"
 
     search_text = await loop.run_in_executor(None, lambda: search_web.invoke(search_invoke_args))
     if not isinstance(search_text, str):
@@ -1432,7 +1448,7 @@ async def _run_week_search_candidates(
         key=lambda c: _score_generic_candidate(c, query_terms, query_source_group),
         reverse=True,
     )
-    diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)[:4]
+    diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)[:8]
 
     return diverse_candidates, search_text
 
@@ -1498,6 +1514,10 @@ async def _run_generic_web_search_fetch(
         search_invoke_args: dict = {"query": last_message, "use_cache": False, **(web_search_runtime_args or {})}
         if search_age_days is not None:
             search_invoke_args["max_age_days"] = search_age_days
+        if _is_recent_web_information_query(last_message):
+            search_invoke_args["topic"] = "news"
+            if query_horizon == "today":
+                search_invoke_args["time_range"] = "day"
 
         search_text = await loop.run_in_executor(
             None,
@@ -1525,6 +1545,10 @@ async def _run_generic_web_search_fetch(
             alt_invoke_args: dict = {"query": last_message + " últimas noticias recientes", "use_cache": False, **(web_search_runtime_args or {})}
             if search_age_days is not None:
                 alt_invoke_args["max_age_days"] = search_age_days
+            if _is_recent_web_information_query(last_message):
+                alt_invoke_args["topic"] = "news"
+                if query_horizon == "today":
+                    alt_invoke_args["time_range"] = "day"
             alt_search_text = await loop.run_in_executor(
                 None,
                 lambda q=alt_invoke_args: search_web.invoke(q),
@@ -1612,7 +1636,7 @@ async def _run_generic_web_search_fetch(
             if is_article_url:
                 week_entry_sources.append({"title": title, "url": url})
 
-        if len(week_entry_lines) >= 3:
+        if len(week_entry_lines) >= 2:
             # Format bullets directly — each fetched entry is already LLM-processed.
             # Bypassing _synthesize_search_summary avoids the LLM merging distinct articles.
             import datetime as _dt_week
@@ -1800,6 +1824,7 @@ async def _run_generic_web_search_fetch(
                 "words": summary.split(),
                 "source_type": "search",
                 "sources": snippet_sources,
+                "pre_synthesized": True,
             }
 
     if query_horizon != "week" and eligible_entries:
@@ -1973,7 +1998,7 @@ async def _synthesize_search_summary(
 ) -> str:
     """Passes raw search content through LLM to produce a clean, structured response."""
     try:
-        llm = get_llm_fn(temperature=0.2)
+        llm = get_llm_fn()
         sources_block = _format_sources(sources)
         clean_lines = []
         for line in raw_summary.splitlines():
@@ -2176,9 +2201,12 @@ async def run_web_scraping_flow(
             from tools import search_web
 
             loop = asyncio.get_running_loop()
+            _fb2_args: dict = {"query": last_message, "use_cache": False, **web_search_runtime_args}
+            if _is_recent_web_information_query(last_message):
+                _fb2_args["topic"] = "news"
             fallback_search = await loop.run_in_executor(
                 None,
-                lambda: search_web.invoke({"query": last_message, "use_cache": False, **web_search_runtime_args}),
+                lambda: search_web.invoke(_fb2_args),
             )
             if not isinstance(fallback_search, str):
                 fallback_search = str(fallback_search)
