@@ -1,187 +1,199 @@
 # Sistema Multi-Agentes con LangGraph
 
-Sistema multi-agentes implementado con LangGraph siguiendo el patrón supervisor.
+Sistema multi-agentes implementado con LangGraph siguiendo el patrón supervisor/coordinador con arquitectura hexagonal.
 
-## 📋 Estructura
+## Estructura
 
 ```
 06_multi_agents/
-├── README.md
+├── main.py                # Punto de entrada (REPL interactivo con slash commands)
 ├── requirements.txt
-├── main.py                # Punto de entrada (REPL interactivo)
 ├── application/           # Capa de aplicación
 │   ├── use_cases/         # Flujos y casos de uso
-│   ├── services/          # Registries, factories y gateway
-│   ├── helpers/           # Helpers compartidos
+│   ├── services/          # Registries, factories, gateway y servicios de sesión
+│   ├── helpers/           # Helpers compartidos (config, audit, scraping, precio, etc.)
 │   ├── policies/          # Guardrails, HITL y seguridad
-│   └── composition/       # Composition root y wiring
-│       └── graph.py       # Grafo supervisor
-├── domain/                # Modelos puros del dominio
-├── infra/                 # Infraestructura (persistence, scraping, memory)
-├── ports/                 # Contratos/puertos (LLM, confirmación)
-├── nodes/                 # Nodos del grafo (adaptadores finos)
-├── tools/                 # Tools reutilizables para agentes
-├── agents/                # System prompts en Markdown por agente
-├── prompts/               # Snapshots de prompts versionados
-├── ops/                   # Dashboards y scripts de observabilidad
+│   └── composition/       # Composition root
+│       └── graph.py       # Grafo supervisor/coordinador y wiring
+├── domain/                # Modelos puros del dominio (AgentState, RoutingDecision, pricing)
+├── infra/                 # Infraestructura (persistence.py, scraping_infra.py, memory.py)
+├── ports/                 # Contratos/puertos (llm_port.py, confirmation_port.py)
+├── nodes/                 # Nodos del grafo (adaptadores finos sobre use_cases)
+├── tools/                 # Tools reutilizables para agentes (math, code, data, web, crypto)
+├── agents/                # System prompts en Markdown por agente (hot-reload opcional)
+├── prompts/               # Snapshots de prompts versionados por agente
+├── ops/                   # Dashboards y scripts de observabilidad (dashboard.py, analytics.py)
 ├── analytics/             # Queries DuckDB sobre sesiones
-├── ui/                    # Frontend alternativo (claude_app)
+├── ui/                    # Frontend alternativo (claude_app.py)
 ├── sessions/              # Historial persistido de sesiones (SQLite)
 ├── docs/                  # Documentación larga y material educativo
 ├── flujo/                 # Diagramas de flujo del sistema
-├── tests/                 # Suite de tests y fixtures
+├── tests/                 # Suite de tests (399 passing)
 └── .env.example           # Ejemplo de variables de entorno
 ```
 
-## 🚀 Instalación
+## Instalación
 
-1. Instalar dependencias:
 ```bash
 pip install -r requirements.txt
+playwright install chromium   # requerido para web scraping dinámico
+cp .env.example .env          # agregar OPENAI_API_KEY
 ```
 
-2. Configurar variables de entorno:
+## Ejecución
+
 ```bash
-cp .env.example .env
-# Editar .env y agregar tu OPENAI_API_KEY
+python main.py                           # REPL interactivo con historial en sessions/
+docker compose up --build                # containerizado (monta data_trading/ como volumen)
+python application/composition/graph.py  # test rápido del grafo (__main__)
+pytest tests/ -v                         # suite completa (399 tests, no requieren API key)
+python ops/dashboard.py [audit.jsonl]    # dashboard visual del audit log
+python ops/analytics.py [audit.jsonl]    # strategy ranking + learning curve
 ```
 
-3. Ejecutar:
+## Variables de entorno
+
+| Variable | Requerida | Default | Descripción |
+|---|---|---|---|
+| `OPENAI_API_KEY` | sí* | — | OpenAI API key (*no requerida con `ollama`) |
+| `LLM_PROVIDER` | no | `openai` | `openai` / `azure` / `ollama` |
+| `OPENAI_MODEL` | no | `gpt-4o-mini` | Nombre del modelo |
+| `TEMPERATURE` | no | `0.7` | Temperatura del LLM |
+| `AZURE_OPENAI_ENDPOINT` | no | — | Solo si `LLM_PROVIDER=azure` |
+| `AZURE_OPENAI_API_KEY` | no | — | Solo si `LLM_PROVIDER=azure` |
+| `AZURE_OPENAI_DEPLOYMENT` | no | `gpt-4o-mini` | Solo si `LLM_PROVIDER=azure` |
+| `OLLAMA_MODEL` | no | `llama3` | Solo si `LLM_PROVIDER=ollama` |
+| `HITL_ENABLED` | no | `true` | Confirmación humana antes de `code_node`/`web_scraping_node` |
+| `COORDINATOR_MODE` | no | `false` | `true` activa el modo coordinador con workers paralelos |
+| `AGENT_HOT_RELOAD` | no | `false` | `true` recarga system prompts de `agents/` sin reiniciar |
+| `USE_SQLITE` | no | `true` | `true` = SQLite / `false` = JSONL legacy |
+| `TAVILY_API_KEY` | sí* | — | Tavily Search API key (*requerida para `search_web`) |
+| `LANGCHAIN_TRACING_V2` | no | — | `true` para activar LangSmith |
+| `LANGCHAIN_API_KEY` | no | — | API key de LangSmith |
+| `LANGCHAIN_PROJECT` | no | `multi-agents` | Nombre del proyecto en LangSmith |
+| `AGENTDOG_GUARD_URL` | no | — | AgentDoG guardrail endpoint (OpenAI-compatible) |
+| `AGENTDOG_POLICY` | no | `fail_open` | `fail_open` / `fail_closed` / `fail_soft` |
+| `AGENTDOG_EVAL_MODE` | no | `high_risk_only` | `all_nodes` / `high_risk_only` / `final_only` |
+| `AGENTDOG_AUDIT_LOG` | no | stdout | Path para el audit log JSONL |
+| `AGENTDOG_API_KEY` | no | — | Bearer token para el guardrail endpoint |
+
+## Arquitectura
+
+### Flujo de ejecución
+
+```
+User → input_guard → supervisor / coordinator → route_agent() → [agente especializado] → END
+```
+
+**Modo supervisor** (default): el supervisor rutea directamente al agente especializado.
+
+**Modo coordinador** (`COORDINATOR_MODE=true`): el coordinador spawnea workers dinámicos y puede ejecutar probes en paralelo antes de delegar. Para `web_scraping_agent` lanza un probe round y elige la mejor fuente antes de responder.
+
+### Capas de ejecución en orden
+
+1. **`input_guard`** — bloquea patrones de prompt injection antes de cualquier llamada al LLM
+2. **`supervisor_node`** — rutea via `llm.with_structured_output(RoutingDecision)`; el precio BTC tiene un shortcut que bypasea el LLM
+3. **HITL** — `code_node` y `web_scraping_node` piden confirmación al usuario (`HITL_ENABLED=true`)
+4. **Agent execution** — `create_react_agent` corre tools en un loop ReAct
+5. **AgentDoG** — chequeo post-ejecución de la trayectoria; bloquea resultados inseguros antes de que lleguen al estado compartido
+6. **Context quarantine** (solo web scraping) — el sub-agente absorbe el HTML crudo; solo un resumen ≤200 palabras llega al estado compartido
+
+### Agentes y tools
+
+| Agente | Tools |
+|---|---|
+| `math_agent` | `calculate` (safe `eval` con namespace matemático) |
+| `analysis_agent` | `analyze_data` |
+| `code_agent` | `write_code` |
+| `web_scraping_agent` | `scrape_website_simple` (requests+BS4), `scrape_website_dynamic` (Playwright, cache 60s), `scrape_website_with_json_capture` (Playwright async, guarda JSON en `data_trading/`), `extract_price_from_text`, `search_web` (Tavily/DuckDuckGo) |
+
+### Estado compartido (`AgentState`)
+
+- `messages` — lista append-only (reducer `lambda x, y: x + y`)
+- `next_agent` — seteado por `supervisor_node` via `RoutingDecision`, consumido por `route_agent()`
+
+### Archivos clave
+
+| Archivo | Responsabilidad |
+|---|---|
+| `application/composition/graph.py` | `StateGraph`, wiring, `create_supervisor_graph()` |
+| `application/helpers/config_flow_helpers.py` | `get_llm()` — selecciona provider via `LLM_PROVIDER` |
+| `application/services/agents_factory.py` | Construcción centralizada de agentes ReAct |
+| `application/services/coordinator_mode.py` | Feature flag del modo coordinador |
+| `application/services/coordinator_workers.py` | Spawn y ejecución de workers dinámicos |
+| `application/services/session_gateway.py` | `AgentGateway` + `LaneQueue` (base para integración Telegram/etc.) |
+| `infra/persistence.py` | SQLite backend para historial de sesiones |
+| `infra/memory.py` | `distill_memory()` — destila sesión a `MEMORY.md` e inyecta como contexto |
+| `domain/models.py` | `AgentState`, `RoutingDecision`, modelos Pydantic |
+| `main.py` | REPL async con slash commands y sesiones persistidas |
+
+## Slash commands del REPL
+
+| Comando | Descripción |
+|---|---|
+| `/help` | Lista todos los comandos disponibles |
+| `/commands` | Registry completo con aliases y grupos |
+| `/command <nombre>` | Ayuda detallada de un comando |
+| `/replay` | Línea de tiempo unificada de la sesión (transcript + prompts + tasks + audit) |
+| `/memory [texto]` | Busca memorias destiladas entre sesiones |
+| `/inspect` | Estado actual del grafo y agentes |
+| `/tasks` | Background tasks activas |
+| `/task <id>` | Detalle de una task específica |
+| `/cancel <id>` | Cancela una background task |
+| `/retryable` | Lista tasks reintentables |
+| `/artifact` | Artifact completo de la sesión |
+| `/tools` | Catálogo de tools con riesgo y modo de permiso |
+| `/tool <name> [args]` | Preview HITL de una tool antes de ejecutarla |
+| `/impact <name> [args]` | Impacto estimado (archivos afectados, diff, side effects) |
+| `/context [agente]` | Presupuesto de contexto del turno actual |
+| `/bookmarks` | Lista checkpoints de sesión |
+| `/bookmark [nombre]` | Guarda un checkpoint de sesión |
+| `/checkpoint <id>` | Consulta un checkpoint guardado |
+| `/prompts` | Snapshots de prompts versionados |
+| `/prompt <agente>` | Snapshot del prompt de un agente específico |
+| `/status` / `/state` | Estado resumido de la sesión |
+
+## Observabilidad
+
+**AgentDoG guardrail**: chequeo post-ejecución sobre la trayectoria (pares acción/observación de `AIMessage.tool_calls` + `ToolMessage`). `code_node` y `web_scraping_node` son `HIGH_RISK_NODES`. Emite eventos JSONL a `AGENTDOG_AUDIT_LOG` o stdout.
+
+**Dashboard visual**:
 ```bash
-python main.py
+python ops/dashboard.py [audit.jsonl]   # genera PNG del audit log
+python ops/analytics.py [audit.jsonl]   # strategy ranking + learning curve (--train para regresión logística)
 ```
 
-## 🏗️ Arquitectura
+**Análisis con DuckDB** (requiere `pip install duckdb`):
+```bash
+duckdb -c ".read analytics/queries.sql"
+```
+Queries incluidas: debugging (score < 0), ranking por `(category, strategy)`, malas decisiones del sistema, comparativa API vs scraping, learning curve, counterfactual insight.
 
-El sistema utiliza un **patrón supervisor** donde:
+**Memory distillation**: al salir del REPL, `infra/memory.py` destila la sesión en `sessions/{id}/MEMORY.md` y lo inyecta como `SystemMessage` al inicio de la siguiente sesión.
 
-- **Supervisor**: Coordina y delega tareas a agentes especializados
-- **Agente de Matemáticas**: Resuelve problemas matemáticos
-- **Agente de Análisis**: Analiza datos y genera reportes
-- **Agente de Código**: Escribe y revisa código
-- **Agente de Web Scraping**: Extrae información de páginas web
+## Documentación
 
-## 📚 Conceptos Clave
+| Archivo | Contenido |
+|---|---|
+| `docs/ARCHITECTURE.md` | Mapa de capas y responsabilidades |
+| `docs/RELEASE_NOTES.md` | Historial de releases del refactor arquitectónico |
+| `docs/GUIA_EDUCATIVA.md` | Guía conceptual paso a paso |
+| `docs/CODIGO_PASO_A_PASO.md` | Recorrido didáctico del código |
+| `docs/DIAGRAMA_FLUJO.md` | Visualización del flujo entre agentes |
+| `docs/DIAGRAMA_EJECUCION.md` | Flujo de ejecución del sistema |
+| `docs/PLAN_CLASE.md` | Plan de clase de 90 minutos |
 
-- **StateGraph**: Grafo de estado que define el flujo entre agentes
-- **Nodes**: Nodos que representan cada agente
-- **Edges**: Conexiones que definen cómo fluye la información
-- **State**: Estado compartido entre agentes
+## Ejemplos de uso
 
-## 📖 Guías Educativas
+```
+"Calcula la raíz cuadrada de 144"
+"Analiza un dataset de ventas del Q3"
+"Escribe una función Python para calcular factoriales"
+"Extrae el precio actual de BTC"
+"Scrapea esta página y dame un resumen"
+```
 
-Este proyecto incluye guías completas para enseñanza:
+## Estado
 
-### Para Estudiantes:
-- **[GUIA_EDUCATIVA.md](./docs/GUIA_EDUCATIVA.md)**: Guía completa paso a paso con explicaciones teóricas y prácticas
-- **[CODIGO_PASO_A_PASO.md](./docs/CODIGO_PASO_A_PASO.md)**: Código comentado línea por línea para seguir durante la implementación
-- **[DIAGRAMA_FLUJO.md](./docs/DIAGRAMA_FLUJO.md)**: Visualizaciones y diagramas del flujo del sistema
-
-### Para Instructores:
-- **[PLAN_CLASE.md](./docs/PLAN_CLASE.md)**: Plan estructurado para una clase de 90 minutos con objetivos, timing y ejercicios
-
-### Orden Recomendado de Estudio:
-
-1. **Leer** `docs/GUIA_EDUCATIVA.md` para entender los conceptos
-2. **Seguir** `docs/CODIGO_PASO_A_PASO.md` para implementar paso a paso
-3. **Consultar** `docs/DIAGRAMA_FLUJO.md` para visualizar el flujo
-4. **Usar** `docs/PLAN_CLASE.md` si estás enseñando
-
-## 🗂️ Mapa de documentación
-
-- `README.md` — visión general del proyecto y puntos de entrada.
-- `docs/ARCHITECTURE.md` — mapa actual de capas y responsabilidades.
-- `docs/RELEASE_NOTES.md` — nota de release del refactor arquitectónico.
-- `docs/DIAGRAMA_EJECUCION.md` — flujo de ejecución del sistema.
-- `docs/DIAGRAMA_FLUJO.md` — visualización del flujo entre agentes.
-- `docs/GUIA_EDUCATIVA.md` — explicación paso a paso del sistema.
-- `docs/CODIGO_PASO_A_PASO.md` — recorrido didáctico del código.
-- `docs/PLAN_CLASE.md` — plan de clase para enseñar el proyecto.
-
-## 🎯 Ejemplos de Uso
-
-- "Calcula la raíz cuadrada de 144"
-- "Analiza un dataset de ventas"
-- "Escribe una función para calcular factoriales"
-- "Extrae información de https://example.com"
-- "Scrapea esta página web y dame un resumen"
-
-## 📝 Changelog reciente
-
-### Fase 4 — Refactor arquitectónico completado
-
-- **Registry de agentes**: se centralizó la metadata y el wiring en `application/services/agent_registry.py`.
-- **Nodos genéricos**: `math`, `analysis` y `code` comparten `nodes/generic_node.py`.
-- **Pricing separado**: `MODEL_PRICING` vive en `domain/model_pricing.py` y lo usan los helpers de audit.
-- **Temperatura por agente**: cada `AgentSpec` puede definir su `temperature`.
-- **Seguridad configurable**: `_BLOCKED_PATTERNS` y `_RISK_SIGNALS` admiten overrides por entorno sin perder defaults.
-- **Truncado compartido**: la lógica común se movió a `application/helpers/text_truncation.py`.
-- **HITL abstraído**: `application/policies/hitl_flow.py` introdujo `ConfirmationHandler` para desacoplar la confirmación humana del flujo de los nodos.
-- **Supervisor chain en aplicación**: `application/use_cases/supervisor_chain.py` construye el chain estructurado.
-- **Supervisor más fino**: la lógica del supervisor quedó dividida en `application/use_cases/supervisor_chain.py`, `supervisor_routing.py` y `supervisor_shortcuts.py`.
-- **Web scraping más delgado**: `nodes/web_scraping_node.py` quedó como adaptador fino sobre el caso de uso.
-- **Factories de agentes menos repetidas**: `application/services/agents_factory.py` ahora centraliza la construcción ReAct en `_build_specialized_agent`.
-- **Tools modularizadas**: `tools/` concentra las tools de código, datos y web.
-- **Helpers de precio extraídos**: `application/helpers/price_flow_helpers.py` contiene el fast path cripto.
-- **Helpers de seguridad extraídos**: `application/helpers/security_flow_helpers.py` concentra parsing y patrones.
-- **Helpers de audit extraídos**: `application/helpers/audit_flow_helpers.py` concentra métricas y truncado.
-- **Helpers de persistencia extraídos**: `application/helpers/persistence_flow_helpers.py` concentra serialización y JSONL.
-- **Helpers de scraping extraídos**: `application/helpers/scraping_flow_helpers.py` concentra validación, cache y parseo HTML.
-- **Helpers de config extraídos**: `application/helpers/config_flow_helpers.py` concentra validación y fábrica LLM.
-- **Guard de entrada extraído**: `application/policies/security_flow.py` aloja el middleware de seguridad.
-- **HITL extraído**: `application/policies/hitl_flow.py` centraliza confirmación y flag de alto riesgo.
-
-### Fase 5 — Inspección y trazabilidad extendidas
-
-- **Delegación inspectable**: tareas en background con lifecycle persistido y comandos CLI para ver estado y artefactos.
-- **Prompt snapshots**: `prompts/{agent}/PROMPT_SNAPSHOT.json` + historial append-only por agente.
-- **Artifacts enriquecidos**: `SESSION_ARTIFACT.json` ahora incluye prompt snapshots y sus rutas.
-
-### Fase 6 — Replay unificado
-
-- **Replay CLI**: `/replay` muestra una línea de tiempo unificada de la sesión.
-- **Timeline**: combina snapshot, prompts, mensajes, background tasks y audit trail.
-- **Objetivo**: facilitar debug y revisión sin saltar entre artifacts separados.
-
-### Fase 7 — Memory retrieval
-
-- **Memory CLI**: `/memory [buscar texto]` busca memorias destiladas entre sesiones.
-- **Ranking**: score por coincidencia de términos + bonus de recencia.
-- **Listado**: `/memory` sin query muestra sesiones con `MEMORY.md`.
-
-### Fase 8 — Approval UX
-
-- **Tool catalog**: `/tools` muestra tools, riesgo y modo de permiso.
-- **Tool preview**: `/tool <name> [json_args|key=value ...]` muestra la previsualización HITL antes de ejecutar.
-- **Prompt HITL**: la confirmación humana ahora incluye args y motivo de la política.
-- **Objetivo**: reducir decisiones ciegas antes de ejecutar operaciones sensibles.
-
-### Fase 9 — Contexto y checkpoints
-
-- **Context budget**: `/context [agente]` muestra qué entra al contexto, qué viene resumido y qué queda afuera.
-- **Bookmarks**: `/bookmarks`, `/bookmark [nombre]` y `/checkpoint <id>` guardan y consultan checkpoints de sesión.
-- **Commands registry**: `/commands` lista los slash commands y `/command <nombre>` muestra ayuda detallada; aliases como `/status` y `/state` apuntan a la misma lógica.
-- **Objetivo**: hacer visible el estado de la sesión y cortar puntos de reanudación útiles para debug.
-
-### Fase 10 — Impact preview real
-
-- **Impact preview**: `/impact <tool> [args]` estima archivos afectados, tamaño de diff y side effects antes de ejecutar tools de código/web.
-- **Repo-aware**: usa archivos reales del repo como evidencia cuando la tarea coincide con módulos/tests existentes.
-- **Symbols/imports**: también cruza símbolos reales del código (classes/defs/imports) para elevar la confianza.
-- **Approval UX**: `/tool` y el prompt HITL ahora muestran también el impacto estimado.
-- **Objetivo**: reemplazar “prompts bonitos” por señales concretas de cambio y riesgo.
-
-### Estado de verificación
-
-- Suite verificada: **399 tests passing**
-- Sin warnings conocidos
-
-### Release notes
-
-- [RELEASE_NOTES.md](./docs/RELEASE_NOTES.md): nota de release del refactor arquitectónico y la cobertura de tests agregada.
-
-### Cobertura de tests agregada
-
-- **Integración del grafo**: `tests/test_graph_integration.py` valida el cableado `input_guard → supervisor → agente`.
-- **HITL crítico**: `tests/test_code_node_hitl.py` asegura que `code_node` cancela antes de ejecutar el agente si el usuario rechaza.
-- **Web scraping**: `tests/test_web_scraping_node.py` cubre `web_scraping_agent`, context quarantine y auto-retry cuando el contenido es insuficiente.
+- **399 tests passing**
+- **Sin warnings conocidos**
