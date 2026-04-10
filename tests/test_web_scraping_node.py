@@ -408,7 +408,21 @@ async def test_news_recientes_de_japon_devuelven_respuesta_y_sources():
 async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
     mock_agent = AsyncMock()
     mock_agent.ainvoke = AsyncMock(side_effect=AssertionError("no debería invocarse el agente"))
-    mock_llm_fn = MagicMock(return_value=MagicMock())
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="Japón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional\n\nEl Gobierno japonés convocará a expertos para revisar tres documentos clave."))
+    mock_llm_fn = MagicMock(return_value=mock_llm)
+
+    _NHK_URL = "https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/"
+    _NHK_CONTENT = (
+        f"URL: {_NHK_URL}\n\n"
+        "Japón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional\n"
+        "El Gobierno japonés convocará a expertos para revisar tres documentos clave.\n\n"
+        f"Sources:\n- [NHK]({_NHK_URL})"
+    )
+    _NO_INFO = "Lo siento, pero la página proporcionada no contiene información sobre la seguridad de Japón ni noticias relacionadas con ese tema."
+
+    async def _fetch_by_url(url, **kwargs):
+        return _NHK_CONTENT if _NHK_URL in url else _NO_INFO
 
     with (
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
@@ -422,14 +436,11 @@ async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
             },
             {
                 "title": "NHK Japón seguridad",
-                "link": "https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/",
+                "link": _NHK_URL,
                 "snippet": "Japón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional",
             },
         ]),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(side_effect=[
-            "Lo siento, pero la página proporcionada no contiene información sobre la seguridad de Japón ni noticias relacionadas con ese tema.",
-            "URL: https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/\n\nJapón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional\nEl Gobierno japonés convocará a expertos para revisar tres documentos clave.\n\nSources:\n- [NHK](https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/)",
-        ])),
+        patch("tools.web_tools.fetch_web_page", side_effect=_fetch_by_url),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
         from nodes.web_scraping_node import make_web_scraping_node
