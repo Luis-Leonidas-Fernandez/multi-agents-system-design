@@ -1,22 +1,6 @@
 {
   "providers": [
     {
-      "name": "tavily",
-      "label": "Tavily Search",
-      "kind": "tavily",
-      "env_vars": ["TAVILY_API_KEY"],
-      "auto_detect_order": 10,
-      "requires_credential": true
-    },
-    {
-      "name": "google_news_rss",
-      "label": "Google News RSS",
-      "kind": "google_news_rss",
-      "env_vars": [],
-      "auto_detect_order": 150,
-      "requires_credential": false
-    },
-    {
       "name": "searxng",
       "label": "SearXNG Search",
       "kind": "searxng",
@@ -25,5 +9,5 @@
       "requires_credential": false
     }
   ],
-  "fallback_provider": "tavily"
+  "fallback_provider": "searxng"
 }
