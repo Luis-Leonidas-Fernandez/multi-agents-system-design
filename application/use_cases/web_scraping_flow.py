@@ -114,6 +114,7 @@ def _build_source_backed_response(summary_lines: list[str], sources: list[dict[s
 
 _COUNTRY_PRESS_CACHE: dict[str, tuple[float, tuple[list[str], list[str]]]] = {}
 _COUNTRY_PRESS_CACHE_TTL_SECONDS = 60 * 60 * 24
+_COUNTRY_PRESS_SOURCE_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
 
 
 def _country_press_cache_key(query_source_group: Optional[str], source_terms: list[str]) -> str:
@@ -137,6 +138,23 @@ def _country_press_cache_get(query_source_group: Optional[str], source_terms: li
 def _country_press_cache_set(query_source_group: Optional[str], source_terms: list[str], domains: list[str], titles: list[str]) -> None:
     cache_key = _country_press_cache_key(query_source_group, source_terms)
     _COUNTRY_PRESS_CACHE[cache_key] = (time.time(), (list(domains), list(titles)))
+
+
+def _country_press_source_cache_get(query_source_group: Optional[str], source_terms: list[str]) -> list[dict[str, str]]:
+    cache_key = _country_press_cache_key(query_source_group, source_terms)
+    cached = _COUNTRY_PRESS_SOURCE_CACHE.get(cache_key)
+    if not cached:
+        return []
+    cached_at, value = cached
+    if (time.time() - cached_at) > _COUNTRY_PRESS_CACHE_TTL_SECONDS:
+        _COUNTRY_PRESS_SOURCE_CACHE.pop(cache_key, None)
+        return []
+    return [dict(source) for source in value]
+
+
+def _country_press_source_cache_set(query_source_group: Optional[str], source_terms: list[str], sources: list[dict[str, str]]) -> None:
+    cache_key = _country_press_cache_key(query_source_group, source_terms)
+    _COUNTRY_PRESS_SOURCE_CACHE[cache_key] = (time.time(), [dict(source) for source in sources])
 
 
 def _web_search_runtime_args(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -1600,6 +1618,7 @@ async def _discover_country_press_sources(
 
     domains = domains[:10]
     titles = titles[:10]
+    _country_press_source_cache_set(query_source_group, source_terms, discovered_sources)
     _country_press_cache_set(query_source_group, source_terms, domains, titles)
     return domains, titles
 
@@ -1614,6 +1633,7 @@ async def _run_country_press_search_candidates(
     query_horizon: Optional[str] = None,
 ) -> tuple[list[dict[str, str]], str]:
     from tools import search_web
+    from tools.web_tools import fetch_web_page
 
     country_press_domains, country_press_names = await _discover_country_press_sources(
         last_message,
@@ -1627,6 +1647,15 @@ async def _run_country_press_search_candidates(
     loop = asyncio.get_running_loop()
     combined_search_text: list[str] = []
     raw_candidates: list[dict[str, str]] = []
+    country_press_sources = _country_press_source_cache_get(query_source_group, source_terms)
+    sources_by_domain: dict[str, dict[str, str]] = {}
+    for source in country_press_sources:
+        url = source.get("url", "")
+        hostname = (urlparse(url).hostname or "").lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        if hostname and hostname not in sources_by_domain:
+            sources_by_domain[hostname] = source
 
     max_targets = min(4, len(country_press_domains))
     for idx in range(max_targets):
@@ -1676,6 +1705,30 @@ async def _run_country_press_search_candidates(
             raw_candidates.extend(article_candidates)
         else:
             raw_candidates.extend(diary_candidates)
+            if not diary_candidates or search_text.startswith("Error en búsqueda:"):
+                fallback_source = sources_by_domain.get(domain)
+                fallback_url = (fallback_source or {}).get("url", "").strip()
+                if fallback_url:
+                    try:
+                        fetched_home = await fetch_web_page(
+                            url=fallback_url,
+                            prompt=(
+                                "Extraé titulares y notas recientes relacionadas con seguridad, política, "
+                                "crónica o actualidad del diario. Devolvé solo texto útil para una búsqueda local."
+                            ),
+                            use_dynamic=False,
+                        )
+                    except Exception:
+                        fetched_home = ""
+                    if not isinstance(fetched_home, str):
+                        fetched_home = str(fetched_home)
+                    homepage_lines = _extract_generic_content_lines(fetched_home, query_terms)
+                    if homepage_lines:
+                        raw_candidates.append({
+                            "title": fallback_source.get("title") or domain,
+                            "url": fallback_url,
+                            "snippet": " ".join(homepage_lines[:3]),
+                        })
 
     ranked_candidates = _rank_candidates_by_source_policy(raw_candidates, query_terms, query_source_group)
     diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)[:8]

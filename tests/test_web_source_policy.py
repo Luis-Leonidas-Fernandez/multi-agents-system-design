@@ -207,6 +207,44 @@ async def test_country_press_discovery_falls_back_to_homepage_when_lookup_fails(
 
 
 @pytest.mark.asyncio
+async def test_country_press_search_candidates_falls_back_to_source_homepage_when_search_fails() -> None:
+    from application.use_cases.web_scraping_flow import _run_country_press_search_candidates
+
+    async def fake_discover(*args, **kwargs):
+        return (["ansa.it"], ["ANSA"])
+
+    def fake_invoke(**payload: object) -> str:
+        return "Error en búsqueda: provider down"
+
+    async def fake_fetch(url: str, prompt: str, use_dynamic: bool = True) -> str:
+        if url == "https://www.ansa.it/":
+            return (
+                "URL: https://www.ansa.it/\n\n"
+                "ANSA reporta novedades de seguridad en Italia esta semana\n"
+                "Roma refuerza controles en zonas críticas\n\n"
+                "Sources:\n- [ANSA](https://www.ansa.it/)"
+            )
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    with (
+        patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=fake_discover)),
+        patch("tools.web_tools.search_web.func", side_effect=fake_invoke),
+        patch("tools.web_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+    ):
+        candidates, search_text = await _run_country_press_search_candidates(
+            "dame las ultimas noticias sobre seguridad en italia de esta semana",
+            14,
+            ["italia", "seguridad"],
+            "italy",
+            ["italia"],
+            query_horizon="week",
+        )
+
+    assert candidates
+    assert "ANSA reporta novedades de seguridad en Italia esta semana" in search_text or search_text == "Error en búsqueda: provider down"
+
+
+@pytest.mark.asyncio
 async def test_country_press_search_candidates_queries_each_diary() -> None:
     from application.use_cases.web_scraping_flow import _run_country_press_search_candidates
 
