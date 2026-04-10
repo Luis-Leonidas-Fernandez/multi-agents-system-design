@@ -232,26 +232,33 @@ async def _summarize_if_long(
     tags = ["web_scraping", "context_quarantine", "summary"]
     if is_retry:
         tags.append("retry")
-    llm = get_llm_fn()
-    summary_response = await llm.ainvoke(
-        [HumanMessage(content=(
-            "Resume el siguiente texto en máximo 200 palabras, "
-            f"conservando los datos más importantes:\n\n{body_text[:4000]}"
-        ))],
-        config=RunnableConfig(
-            tags=tags,
-            metadata={
-                "node":              "web_scraping_node",
-                "request_id":        rid,
-                "raw_words":         len(body_text.split()),
-                "summary_triggered": True,
-            },
-        ),
-    )
-    summary = cast(str, summary_response.content)
-    if sources_block:
-        summary = f"{summary.strip()}\n\n{sources_block.strip()}"
-    return summary
+    try:
+        llm = get_llm_fn()
+        summary_response = await llm.ainvoke(
+            [HumanMessage(content=(
+                "Resume el siguiente texto en máximo 200 palabras, "
+                f"conservando los datos más importantes:\n\n{body_text[:4000]}"
+            ))],
+            config=RunnableConfig(
+                tags=tags,
+                metadata={
+                    "node":              "web_scraping_node",
+                    "request_id":        rid,
+                    "raw_words":         len(body_text.split()),
+                    "summary_triggered": True,
+                },
+            ),
+        )
+        summary = cast(str, summary_response.content)
+        if sources_block:
+            summary = f"{summary.strip()}\n\n{sources_block.strip()}"
+        return summary
+    except Exception:
+        # If the model backend is unavailable, preserve the raw content instead of
+        # aborting the whole turn with a connection error.
+        if sources_block:
+            return f"{body_text.strip()}\n\n{sources_block.strip()}"
+        return body_text.strip()
 
 
 async def _run_retry_agent(
@@ -2708,19 +2715,59 @@ async def run_web_scraping_flow(
             "Si la respuesta es de noticias o actualidad, desarrollala en 4 párrafos breves sobre el mismo tema solicitado, sin repetir noticias. "
             "Tu respuesta final debe incluir un bloque Sources con enlaces markdown.\n\n"
         )
-        raw_result = await agent.ainvoke(
-            {"messages": [HumanMessage(content=agent_hint + last_message)]},
-            config=RunnableConfig(
-                tags=["web_scraping", "agent", "high_risk", "context_quarantine"],
-                metadata={
-                    "node": "web_scraping_node",
-                    "agent": "web_scraping_agent",
-                    "request_id": rid,
-                    "input_chars": len(last_message),
-                    "prior_reliability": prior_reliability,
-                },
-            ),
-        )
+        try:
+            raw_result = await agent.ainvoke(
+                {"messages": [HumanMessage(content=agent_hint + last_message)]},
+                config=RunnableConfig(
+                    tags=["web_scraping", "agent", "high_risk", "context_quarantine"],
+                    metadata={
+                        "node": "web_scraping_node",
+                        "agent": "web_scraping_agent",
+                        "request_id": rid,
+                        "input_chars": len(last_message),
+                        "prior_reliability": prior_reliability,
+                    },
+                ),
+            )
+        except Exception as exc:
+            fallback_discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
+            if fallback_discovery is not None:
+                summary = cast(str, fallback_discovery["summary"])
+                words = cast(list[str], fallback_discovery.get("words") or summary.split())
+                duration_ms = int((time.time() - t0) * 1000)
+                reliability = _scrape_reliability(len(words))
+                source_type = cast(str, fallback_discovery.get("source_type") or "search")
+                new_tracker, analytics = cast(tuple[dict[str, Any], dict[str, Any]], _update_scrape_tracker(
+                    tracker, category, len(words), turn_count,
+                    duration_ms=duration_ms, cost_usd=0.0,
+                    source_type=source_type, reliability_override=reliability,
+                ))
+                analytics = cast(dict[str, Any], analytics)
+                new_score = _get_category_score(new_tracker, category, turn_count)
+                _emit_node_outcome(
+                    rid, "web_scraping_node", "success", phase="agent",
+                    agent="web_scraping_agent", duration_ms=duration_ms,
+                    category=category, exploring=False, strategy="search_web" if source_type == "search" else "web_search_fetch", exp_rate=0.0,
+                    scrape_reliability=reliability, prior_reliability=prior_reliability,
+                    prior_score=prior_score, scrape_score=new_score,
+                    retry_done=False, source_type=source_type,
+                    ml_recommended=ml_recommended, prediction_match=prediction_match,
+                    ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
+                    **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
+                )
+                return {
+                    "messages": [AIMessage(content=summary)],
+                    "scrape_tracker": new_tracker,
+                }
+            _emit_node_outcome(
+                rid, "web_scraping_node", "error", phase="agent",
+                agent="web_scraping_agent",
+                duration_ms=int((time.time() - t0) * 1000),
+                reason=str(exc),
+                followup_likely=True,
+                **_node_meta(),
+            )
+            return {"messages": [AIMessage(content="No pude conectar con el motor de síntesis, pero no pude recuperar fuentes útiles tampoco. Probá de nuevo en unos minutos.")]}
 
         tokens = _extract_tokens(raw_result)
         quality = _extract_quality(raw_result)

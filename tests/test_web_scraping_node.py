@@ -68,6 +68,38 @@ async def test_hitl_disabled_agente_se_invoca():
     assert len(result["messages"]) == 1
 
 
+@pytest.mark.asyncio
+async def test_web_agent_connection_failure_uses_search_fallback():
+    mock_agent = AsyncMock()
+    mock_agent.ainvoke = AsyncMock(side_effect=ConnectionError("boom"))
+
+    mock_llm_fn = MagicMock(return_value=MagicMock())
+
+    fallback = {
+        "summary": "• ANSA reporta novedades de seguridad en Italia esta semana\n\nSources:\n- [ANSA](https://www.ansa.it/)",
+        "words": ["ANSA", "reporta", "novedades", "de", "seguridad"],
+        "source_type": "search",
+        "sources": [{"title": "ANSA", "url": "https://www.ansa.it/"}],
+        "pre_synthesized": True,
+    }
+
+    with (
+        patch("application.policies.hitl_flow.HITL_ENABLED", False),
+        patch("nodes.web_scraping_node.evaluate_trajectory_safe",
+              AsyncMock(return_value=(True, {"label": "safe"}))),
+        patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
+        patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
+        patch("application.use_cases.web_scraping_flow._run_generic_web_search_fetch", new=AsyncMock(side_effect=[None, fallback])),
+    ):
+        from nodes.web_scraping_node import make_web_scraping_node
+        node = make_web_scraping_node(mock_agent, mock_llm_fn)
+        result = await node(_make_state("dame las ultimas noticias sobre seguridad en italia de esta semana"))
+
+    assert "messages" in result
+    assert "ANSA reporta novedades de seguridad en Italia esta semana" in result["messages"][0].content
+    mock_llm_fn.assert_not_called()
+
+
 # ==================== HITL enabled + confirmado → agente se invoca ====================
 
 @pytest.mark.asyncio
