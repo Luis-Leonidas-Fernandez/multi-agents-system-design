@@ -463,7 +463,13 @@ def _run_searxng_search(
     if time_range:
         params["time_range"] = time_range
 
-    response = requests.get(search_url, params=params, timeout=20)
+    headers = {
+        "User-Agent": os.getenv("SEARXNG_USER_AGENT") or "Mozilla/5.0 (Multi-Agents)",
+        "Accept": "application/json, text/plain, */*",
+        "X-Forwarded-For": os.getenv("SEARXNG_FORWARDED_FOR") or "127.0.0.1",
+        "X-Real-IP": os.getenv("SEARXNG_REAL_IP") or "127.0.0.1",
+    }
+    response = requests.get(search_url, params=params, headers=headers, timeout=20)
     response.raise_for_status()
     payload = response.json()
     hits = _normalize_search_hits(payload.get("results") or [])

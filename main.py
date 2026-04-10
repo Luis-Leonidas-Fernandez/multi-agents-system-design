@@ -6,12 +6,13 @@ import json
 import os
 import shlex
 import sys
+import time
 import traceback
 import threading
 import importlib.util
 import subprocess
 from pathlib import Path
-from typing import cast
+from typing import cast, Optional
 
 from application.helpers.config_flow_helpers import validate_env
 from application.services.agent_registry import get_agent_specs
@@ -45,6 +46,8 @@ from application.services.session_inspection import (
 )
 
 TURN_TIMEOUT_SECONDS = float(os.getenv("TURN_TIMEOUT_SECONDS", "60"))
+_SEARXNG_DEFAULT_BASE_URL = "http://localhost:8888"
+_SEARXNG_PROBE_PATH = "/search?q=multi-agents-healthcheck&format=json&categories=general"
 
 
 # ==================== DASHBOARD ====================
@@ -64,7 +67,96 @@ def _start_dashboard_watcher():
         print(f"[dashboard] No se pudo iniciar el watcher: {e}")
 
 
-def _default_node_bin() -> str | None:
+def _searxng_auto_start_enabled() -> bool:
+    value = (os.getenv("SEARXNG_AUTO_START") or "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _searxng_base_url() -> str:
+    return (os.getenv("SEARXNG_BASE_URL") or _SEARXNG_DEFAULT_BASE_URL).strip()
+
+
+def _searxng_is_local_url(base_url: str) -> bool:
+    lowered = base_url.strip().lower()
+    return lowered.startswith(
+        (
+            "http://localhost",
+            "https://localhost",
+            "http://127.0.0.1",
+            "https://127.0.0.1",
+            "http://host.docker.internal",
+            "https://host.docker.internal",
+        )
+    )
+
+
+def _wait_for_searxng(base_url: str, timeout_seconds: int = 45) -> bool:
+    import urllib.request
+
+    probe_url = f"{base_url.rstrip('/')}{_SEARXNG_PROBE_PATH}"
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Optional[Exception] = None
+    probe_headers = {
+        "User-Agent": "Mozilla/5.0 (Multi-Agents)",
+        "Accept": "application/json, text/plain, */*",
+        "X-Forwarded-For": "127.0.0.1",
+        "X-Real-IP": "127.0.0.1",
+    }
+
+    while time.monotonic() < deadline:
+        try:
+            request = urllib.request.Request(probe_url, headers=probe_headers)
+            with urllib.request.urlopen(request, timeout=3) as response:
+                if 200 <= int(getattr(response, "status", 0)) < 300:
+                    print(f"[searxng] listo en {base_url}")
+                    return True
+        except Exception as exc:  # pragma: no cover - depends on docker startup timing
+            last_error = exc
+            time.sleep(2)
+
+    print(f"[searxng] no respondió a tiempo en {base_url}: {last_error}")
+    return False
+
+
+def _bootstrap_searxng() -> None:
+    if not _searxng_auto_start_enabled():
+        return
+
+    base_url = _searxng_base_url()
+    os.environ.setdefault("SEARXNG_BASE_URL", base_url)
+
+    if not _searxng_is_local_url(base_url):
+        print(f"[searxng] SEARXNG_BASE_URL apunta a un host remoto ({base_url}); no auto-levanto un contenedor local.")
+        return
+
+    compose_file = Path(__file__).resolve().parent / "docker-compose.yml"
+    if not compose_file.exists():
+        print("[searxng] No encontré docker-compose.yml; no puedo auto-levantar SearXNG.")
+        return
+
+    try:
+        print("[searxng] Levantando SearXNG con docker compose...")
+        subprocess.run(
+            ["docker", "compose", "up", "-d", "searxng"],
+            cwd=str(compose_file.parent),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print("[searxng] Docker no está instalado o no está en PATH; seguí con un SearXNG externo.")
+        return
+    except subprocess.CalledProcessError as exc:
+        output = (exc.stdout or "").strip()
+        error_output = (exc.stderr or "").strip()
+        detail = "\n".join(part for part in [output, error_output] if part)
+        print(f"[searxng] No se pudo levantar SearXNG:\n{detail}")
+        return
+
+    _wait_for_searxng(base_url)
+
+
+def _default_node_bin() -> Optional[str]:
     candidate = Path.home() / ".local" / "bin" / "node"
     return str(candidate) if candidate.exists() else None
 
@@ -550,6 +642,7 @@ def main():
         _run_ui_bridge()
         return
 
+    _bootstrap_searxng()
     validate_env()
     runtime = AgentRuntime()
     use_legacy = os.getenv("CLI_MODE", "").lower() == "legacy"
