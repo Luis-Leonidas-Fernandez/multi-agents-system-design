@@ -8,19 +8,27 @@ Sistema multi-agentes implementado con LangGraph siguiendo el patrón supervisor
 06_multi_agents/
 ├── README.md
 ├── requirements.txt
-├── application/           # Casos de uso y helpers de aplicación
-│   ├── use_cases/         # Flujos de aplicación
+├── main.py                # Punto de entrada (REPL interactivo)
+├── application/           # Capa de aplicación
+│   ├── use_cases/         # Flujos y casos de uso
 │   ├── services/          # Registries, factories y gateway
 │   ├── helpers/           # Helpers compartidos
 │   ├── policies/          # Guardrails, HITL y seguridad
 │   └── composition/       # Composition root y wiring
-│       └── graph.py       # Grafo supervisor y wiring
-├── docs/                  # Documentación larga y material educativo
+│       └── graph.py       # Grafo supervisor
 ├── domain/                # Modelos puros del dominio
-├── ports/                 # Contratos/puertos
+├── infra/                 # Infraestructura (persistence, scraping, memory)
+├── ports/                 # Contratos/puertos (LLM, confirmación)
+├── nodes/                 # Nodos del grafo (adaptadores finos)
 ├── tools/                 # Tools reutilizables para agentes
-├── ops/                  # Dashboards y scripts de observabilidad
-├── main.py                # Punto de entrada
+├── agents/                # System prompts en Markdown por agente
+├── prompts/               # Snapshots de prompts versionados
+├── ops/                   # Dashboards y scripts de observabilidad
+├── analytics/             # Queries DuckDB sobre sesiones
+├── ui/                    # Frontend alternativo (claude_app)
+├── sessions/              # Historial persistido de sesiones (SQLite)
+├── docs/                  # Documentación larga y material educativo
+├── flujo/                 # Diagramas de flujo del sistema
 ├── tests/                 # Suite de tests y fixtures
 └── .env.example           # Ejemplo de variables de entorno
 ```
@@ -165,9 +173,8 @@ Este proyecto incluye guías completas para enseñanza:
 
 ### Estado de verificación
 
-- Suite verificada: **66 tests passing**
-- Warnings conocidos: deprecación de `create_react_agent` en LangGraph
-- No se migró aún ese factory porque el repositorio indica esperar un reemplazo drop-in equivalente
+- Suite verificada: **399 tests passing**
+- Sin warnings conocidos
 
 ### Release notes
 
