@@ -9,13 +9,21 @@
       "requires_credential": true
     },
     {
-      "name": "duckduckgo",
-      "label": "DuckDuckGo Search",
-      "kind": "duckduckgo",
+      "name": "google_news_rss",
+      "label": "Google News RSS",
+      "kind": "google_news_rss",
       "env_vars": [],
-      "auto_detect_order": 100,
+      "auto_detect_order": 150,
+      "requires_credential": false
+    },
+    {
+      "name": "searxng",
+      "label": "SearXNG Search",
+      "kind": "searxng",
+      "env_vars": ["SEARXNG_BASE_URL"],
+      "auto_detect_order": 200,
       "requires_credential": false
     }
   ],
-  "fallback_provider": "duckduckgo"
+  "fallback_provider": "tavily"
 }

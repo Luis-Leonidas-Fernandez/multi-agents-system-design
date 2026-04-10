@@ -3,9 +3,10 @@
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Annotated, Optional, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
@@ -21,6 +22,7 @@ from application.helpers.scraping_flow_helpers import (
     _build_result, _extract_text, _extract_links,
 )
 from application.services.web_search_registry import (
+    get_web_search_provider_spec,
     resolve_web_search_provider_candidates,
 )
 from infra import scraping_infra
@@ -378,6 +380,22 @@ def _normalize_search_hits(raw_hits: Any) -> list[dict[str, str]]:
     return hits
 
 
+def _filter_search_hits_by_domains(
+    hits: list[dict[str, str]],
+    allowed_domains: Optional[list[str]],
+    blocked_domains: Optional[list[str]],
+) -> list[dict[str, str]]:
+    filtered_hits: list[dict[str, str]] = []
+    for hit in hits:
+        url = str(hit.get("url") or hit.get("link") or "").strip()
+        if not url:
+            continue
+        if not _domain_allowed(url, allowed=allowed_domains, blocked=blocked_domains):
+            continue
+        filtered_hits.append(hit)
+    return filtered_hits
+
+
 def _run_tavily_search(
     query: str,
     allowed_domains: Optional[list[str]],
@@ -409,28 +427,108 @@ def _run_tavily_search(
     elif max_age_days is not None:
         search_kwargs["days"] = max_age_days
     response = client.search(**search_kwargs)
-    return _normalize_search_hits(response.get("results") or [])
+    hits = _normalize_search_hits(response.get("results") or [])
+    hits = _filter_search_hits_by_domains(hits, allowed_domains, blocked_domains)
+    return hits[:num_results]
 
 
-def _run_duckduckgo_search(
+def _run_searxng_search(
     query: str,
     allowed_domains: Optional[list[str]],
     blocked_domains: Optional[list[str]],
     num_results: int,
+    max_age_days: Optional[int],
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
 ) -> list[dict[str, str]]:
-    from langchain_community.tools import DuckDuckGoSearchResults
+    base_url = (os.getenv("SEARXNG_BASE_URL") or "").strip()
+    if not base_url:
+        raise ValueError("SEARXNG_BASE_URL no configurada. Agregá la URL base de tu instancia SearXNG.")
 
-    raw_hits = DuckDuckGoSearchResults(output_format="list", num_results=num_results).invoke({"query": query})
-    hits = _normalize_search_hits(raw_hits)
-    if allowed_domains or blocked_domains:
-        filtered: list[dict[str, str]] = []
-        for hit in hits:
-            link = hit.get("url") or hit.get("link") or ""
-            if link and not _domain_allowed(link, allowed=allowed_domains, blocked=blocked_domains):
-                continue
-            filtered.append(hit)
-        hits = filtered
-    return hits
+    try:
+        import requests
+    except Exception as exc:  # pragma: no cover - optional provider dependency
+        raise ValueError("requests no está instalado en este entorno.") from exc
+
+    search_url = urljoin(base_url.rstrip("/") + "/", "search")
+    categories = (os.getenv("SEARXNG_CATEGORIES") or "").strip() or ("news" if topic == "news" else "general")
+    params: dict[str, Any] = {
+        "q": query,
+        "format": "json",
+        "categories": categories,
+    }
+    language = (os.getenv("SEARXNG_LANGUAGE") or "").strip()
+    if language:
+        params["language"] = language
+    if time_range:
+        params["time_range"] = time_range
+
+    response = requests.get(search_url, params=params, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    hits = _normalize_search_hits(payload.get("results") or [])
+    hits = _filter_search_hits_by_domains(hits, allowed_domains, blocked_domains)
+    return hits[:num_results]
+
+
+def _run_google_news_rss_search(
+    query: str,
+    allowed_domains: Optional[list[str]],
+    blocked_domains: Optional[list[str]],
+    num_results: int,
+    max_age_days: Optional[int],
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
+) -> list[dict[str, str]]:
+    try:
+        import requests
+    except Exception as exc:  # pragma: no cover - optional provider dependency
+        raise ValueError("requests no está instalado en este entorno.") from exc
+
+    try:
+        import socket
+        socket.getaddrinfo("news.google.com", 443)
+    except Exception as exc:
+        raise ValueError("news.google.com no responde en este entorno.") from exc
+
+    hl = (os.getenv("GOOGLE_NEWS_HL") or "es-419").strip()
+    gl = (os.getenv("GOOGLE_NEWS_GL") or "US").strip()
+    ceid = (os.getenv("GOOGLE_NEWS_CEID") or "US:es-419").strip()
+    response = requests.get(
+        "https://news.google.com/rss/search",
+        params={
+            "q": query,
+            "hl": hl,
+            "gl": gl,
+            "ceid": ceid,
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+
+    hits: list[dict[str, str]] = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        description = (item.findtext("description") or "").strip()
+        source_elem = item.find("source")
+        source_text = (source_elem.text or "").strip() if source_elem is not None else ""
+        source_url = (source_elem.attrib.get("url") or "").strip() if source_elem is not None else ""
+        url = link or source_url
+        if not title and not url:
+            continue
+        hits.append({
+            "title": title or url or "result",
+            "url": url,
+            "link": url,
+            "content": description or source_text,
+            "snippet": description or source_text,
+        })
+
+    hits = _normalize_search_hits(hits)
+    hits = _filter_search_hits_by_domains(hits, allowed_domains, blocked_domains)
+    return hits[:num_results]
 
 
 def _run_web_search_provider(
@@ -445,8 +543,10 @@ def _run_web_search_provider(
 ) -> list[dict[str, str]]:
     if provider_kind == "tavily":
         return _run_tavily_search(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
-    if provider_kind == "duckduckgo":
-        return _run_duckduckgo_search(query, allowed_domains, blocked_domains, num_results)
+    if provider_kind == "google_news_rss":
+        return _run_google_news_rss_search(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
+    if provider_kind == "searxng":
+        return _run_searxng_search(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
     raise ValueError(f"Proveedor de web search desconocido: {provider_kind}")
 
 
@@ -454,6 +554,8 @@ def _resolve_web_search_plan(
     provider: Optional[str],
     runtime_selected_provider: Optional[str],
     runtime_provider_configured: Optional[str],
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
 ) -> WebSearchResolution:
     explicit_provider = (provider or "").strip().lower() or None
     runtime_selected_provider = (runtime_selected_provider or "").strip().lower() or None
@@ -463,12 +565,32 @@ def _resolve_web_search_plan(
         runtime_selected_provider=runtime_selected_provider,
         runtime_provider_configured=runtime_provider_configured,
     )
-    provider_explicit = bool(
-        explicit_provider
-        or runtime_selected_provider
-        or runtime_provider_configured
-        or (os.getenv("WEB_SEARCH_PROVIDER") or "").strip()
-    )
+    provider_explicit = bool(explicit_provider)
+
+    if not provider_explicit:
+        news_related = (topic == "news" or time_range)
+        if news_related:
+            provider_map = {spec.name: spec for spec in provider_candidates}
+            news_provider = provider_map.get("google_news_rss")
+            if news_provider is not None:
+                prioritized = [spec for spec in provider_candidates if spec.name != "google_news_rss"]
+                reordered: list[WebSearchProviderSpec] = []
+                inserted = False
+                for spec in prioritized:
+                    if spec.name == "searxng" and not inserted:
+                        reordered.append(news_provider)
+                        inserted = True
+                    reordered.append(spec)
+                if not inserted:
+                    reordered.append(news_provider)
+                provider_candidates = tuple(reordered)
+        else:
+            filtered = tuple(spec for spec in provider_candidates if spec.name != "google_news_rss")
+            if filtered:
+                provider_candidates = filtered
+            else:
+                provider_candidates = (get_web_search_provider_spec("tavily"),)
+
     return WebSearchResolution(
         selected_provider=provider_candidates[0].name,
         provider_candidates=provider_candidates,
@@ -640,6 +762,8 @@ def search_web(
         provider,
         runtime_selected_provider,
         runtime_provider_configured,
+        topic=topic,
+        time_range=time_range,
     )
     return _execute_web_search_plan(
         plan,

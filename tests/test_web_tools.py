@@ -3,11 +3,10 @@ Tests for search_web and scrape helpers in tools/web_tools.py.
 
 search_web now resolves providers through the registry and can fall back from a
 configured provider to the next available one when no explicit provider was selected.
-Mocks patch tools.web_tools.TavilyClient so the underlying network call is controlled.
-Hits use Tavily format:
+Mocks patch tools.web_tools.TavilyClient and requests.get so the underlying
+network calls are controlled. Hits use provider format:
   {"title": "...", "url": "...", "content": "..."}
 """
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,6 +28,24 @@ def _tavily_article(title: str, url: str, content: str = "") -> dict:
     return {"title": title, "url": url, "content": content}
 
 
+def _searxng_article(title: str, url: str, content: str = "") -> dict:
+    return {"title": title, "url": url, "content": content}
+
+
+def _make_searxng_response(results: list[dict]) -> MagicMock:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"results": results}
+    return response
+
+
+def _make_google_news_response(xml_text: str) -> MagicMock:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.text = xml_text
+    return response
+
+
 # ── validation ────────────────────────────────────────────────────────────────
 
 def test_search_web_rejects_allowed_and_blocked_together():
@@ -41,122 +58,205 @@ def test_search_web_rejects_allowed_and_blocked_together():
     assert "Cannot specify both allowed_domains and blocked_domains" in result
 
 
-def test_search_web_falls_back_to_duckduckgo_when_no_tavily_key(monkeypatch):
+def test_search_web_requires_tavily_key_when_no_provider_override(monkeypatch):
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("WEB_SEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("SEARXNG_BASE_URL", raising=False)
 
-    hits = [_tavily_article("DuckDuckGo fallback", "https://example.com/fallback", "Fallback content")]
+    result = search_web.invoke({"query": "test", "use_cache": False})
 
-    with patch("langchain_community.tools.DuckDuckGoSearchResults.invoke", return_value=hits) as duck_mock:
-        result = search_web.invoke({"query": "test", "use_cache": False})
-
-    assert duck_mock.call_count == 1
-    assert "DuckDuckGo fallback" in result
-    assert "[article]" in result
+    assert "TAVILY_API_KEY no configurada" in result
 
 
-def test_search_web_honors_explicit_duckduckgo_provider(monkeypatch):
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "duckduckgo")
+def test_search_web_honors_explicit_tavily_provider(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
 
     hits = [_tavily_article("Explicit provider", "https://example.com/explicit", "Explicit content")]
 
-    with patch("langchain_community.tools.DuckDuckGoSearchResults.invoke", return_value=hits) as duck_mock:
-        result = search_web.invoke({"query": "explicit provider", "use_cache": False})
+    with patch("tools.web_tools.TavilyClient", _make_tavily_client(hits)) as tavily_mock:
+        result = search_web.invoke({"query": "explicit provider", "provider": "tavily", "use_cache": False})
 
-    assert duck_mock.call_count == 1
+    assert tavily_mock.return_value.search.call_count == 1
     assert "Explicit provider" in result
 
 
-def test_search_web_honors_runtime_selected_provider_over_env(monkeypatch):
+def test_search_web_honors_runtime_selected_provider_and_keeps_fallback(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     monkeypatch.setenv("WEB_SEARCH_PROVIDER", "tavily")
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
 
     hits = [_tavily_article("Runtime provider", "https://example.com/runtime", "Runtime content")]
 
-    with patch("langchain_community.tools.DuckDuckGoSearchResults.invoke", return_value=hits) as duck_mock:
+    with patch("tools.web_tools.TavilyClient", _make_tavily_client(hits)) as tavily_mock:
         result = search_web.invoke({
             "query": "runtime provider",
-            "runtime_selected_provider": "duckduckgo",
+            "runtime_selected_provider": "tavily",
             "use_cache": False,
         })
 
-    assert duck_mock.call_count == 1
+    assert tavily_mock.return_value.search.call_count == 1
     assert "Runtime provider" in result
+    plan = _resolve_web_search_plan(provider=None, runtime_selected_provider="tavily", runtime_provider_configured="tavily")
+    assert [spec.name for spec in plan.provider_candidates] == ["tavily", "searxng"]
+    assert plan.provider_explicit is False
 
 
 def test_resolve_web_search_plan_prefers_runtime_selected_provider(monkeypatch):
     monkeypatch.setenv("WEB_SEARCH_PROVIDER", "tavily")
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
 
     plan = _resolve_web_search_plan(
         provider=None,
-        runtime_selected_provider="duckduckgo",
+        runtime_selected_provider="tavily",
         runtime_provider_configured="tavily",
     )
 
-    assert plan.selected_provider == "duckduckgo"
-    assert plan.provider_explicit is True
-    assert plan.provider_candidates[0].name == "duckduckgo"
+    assert plan.selected_provider == "tavily"
+    assert plan.provider_explicit is False
+    assert plan.provider_candidates[0].name == "tavily"
+    assert plan.provider_candidates[1].name == "searxng"
 
 
 def test_resolve_web_search_plan_precedence_chain(monkeypatch, tmp_path):
     from application.helpers.config_flow_helpers import get_web_search_runtime_config
 
     config_path = tmp_path / "web-search.json"
-    config_path.write_text("{\"provider_configured\": \"duckduckgo\"}", encoding="utf-8")
+    config_path.write_text("{\"provider_configured\": \"tavily\"}", encoding="utf-8")
     monkeypatch.setenv("WEB_SEARCH_CONFIG", str(config_path))
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
     get_web_search_runtime_config.cache_clear()
 
     explicit = _resolve_web_search_plan(
-        provider="duckduckgo",
+        provider="tavily",
         runtime_selected_provider="tavily",
-        runtime_provider_configured="duckduckgo",
+        runtime_provider_configured="tavily",
     )
     runtime_selected = _resolve_web_search_plan(
         provider=None,
         runtime_selected_provider="tavily",
-        runtime_provider_configured="duckduckgo",
+        runtime_provider_configured="tavily",
     )
     runtime_configured = _resolve_web_search_plan(
         provider=None,
         runtime_selected_provider=None,
-        runtime_provider_configured="duckduckgo",
+        runtime_provider_configured="tavily",
     )
     auto_detected = _resolve_web_search_plan(provider=None, runtime_selected_provider=None, runtime_provider_configured=None)
 
-    assert explicit.selected_provider == "duckduckgo"
+    assert explicit.selected_provider == "tavily"
     assert runtime_selected.selected_provider == "tavily"
-    assert runtime_configured.selected_provider == "duckduckgo"
-    assert auto_detected.selected_provider == "duckduckgo"
+    assert runtime_configured.selected_provider == "tavily"
+    assert auto_detected.selected_provider == "tavily"
+    assert [spec.name for spec in runtime_selected.provider_candidates] == ["tavily", "searxng"]
+    assert [spec.name for spec in runtime_configured.provider_candidates] == ["tavily", "searxng"]
+    assert [spec.name for spec in auto_detected.provider_candidates] == ["tavily", "searxng"]
 
 
 def test_resolve_web_search_plan_uses_env_config_when_runtime_absent(monkeypatch):
-    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "duckduckgo")
+    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "tavily")
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
 
     plan = _resolve_web_search_plan(provider=None, runtime_selected_provider=None, runtime_provider_configured=None)
 
-    assert plan.selected_provider == "duckduckgo"
-    assert plan.provider_explicit is True
+    assert plan.selected_provider == "tavily"
+    assert plan.provider_explicit is False
+    assert [spec.name for spec in plan.provider_candidates] == ["tavily", "searxng"]
 
 
-def test_search_web_falls_back_to_duckduckgo_when_primary_provider_fails(monkeypatch):
+def test_search_web_falls_back_to_searxng_when_tavily_fails(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    monkeypatch.delenv("WEB_SEARCH_PROVIDER", raising=False)
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
 
-    hits = [_tavily_article("DuckDuckGo fallback", "https://example.com/fallback", "Fallback content")]
     mock_cls = _make_tavily_client([])
     mock_cls.return_value.search.side_effect = RuntimeError("tavily down")
+    searxng_results = [_searxng_article("SearXNG fallback", "https://example.org/searxng", "Fallback content")]
+    searxng_response = _make_searxng_response(searxng_results)
 
-    with (
-        patch("tools.web_tools.TavilyClient", mock_cls) as tavily_cls,
-        patch("langchain_community.tools.DuckDuckGoSearchResults.invoke", return_value=hits) as duck_mock,
-    ):
+    with patch("tools.web_tools.TavilyClient", mock_cls) as tavily_cls, patch(
+        "requests.get", return_value=searxng_response
+    ) as searxng_get:
         result = search_web.invoke({"query": "fallback", "use_cache": False})
 
-    assert duck_mock.call_count == 1
-    assert "DuckDuckGo fallback" in result
     assert tavily_cls.return_value.search.call_count == 1
+    assert searxng_get.call_count == 1
+    assert "SearXNG fallback" in result
+
+
+def test_search_web_prefers_google_news_rss_for_news_queries(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
+
+    rss_xml = """<?xml version='1.0' encoding='UTF-8'?>
+    <rss><channel>
+      <item>
+        <title>Italia refuerza la seguridad esta semana</title>
+        <link>https://news.example.com/italia-seguridad</link>
+        <description>La cobertura local describe medidas de seguridad en Italia.</description>
+        <source url="https://news.example.com">Example News</source>
+      </item>
+    </channel></rss>"""
+
+    with patch("requests.get", return_value=_make_google_news_response(rss_xml)) as rss_get, patch(
+        "socket.getaddrinfo", return_value=[(None, None, None, None, None)]
+    ):
+        result = search_web.invoke({
+            "query": "seguridad en italia esta semana",
+            "topic": "news",
+            "time_range": "week",
+            "use_cache": False,
+        })
+
+    assert rss_get.call_count == 1
+    assert "Italia refuerza la seguridad esta semana" in result
+    assert "news.example.com" in result
+
+
+def test_search_web_uses_searxng_without_tavily_key(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
+
+    searxng_results = [_searxng_article("SearXNG only", "https://example.org/searxng-only", "SearXNG content")]
+    searxng_response = _make_searxng_response(searxng_results)
+
+    with patch("requests.get", return_value=searxng_response) as searxng_get:
+        result = search_web.invoke({"query": "only searxng", "use_cache": False})
+
+    assert searxng_get.call_count == 1
+    assert "SearXNG only" in result
+
+
+def test_search_web_honors_explicit_searxng_provider(monkeypatch):
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
+
+    searxng_results = [_searxng_article("Explicit SearXNG", "https://example.org/explicit", "Explicit content")]
+    searxng_response = _make_searxng_response(searxng_results)
+
+    with patch("requests.get", return_value=searxng_response) as searxng_get:
+        result = search_web.invoke({"query": "explicit searxng", "provider": "searxng", "use_cache": False})
+
+    assert searxng_get.call_count == 1
+    assert "Explicit SearXNG" in result
+
+
+def test_search_web_filters_searxng_results_by_domain(monkeypatch):
+    monkeypatch.setenv("SEARXNG_BASE_URL", "http://localhost:8888")
+
+    searxng_results = [
+        _searxng_article("Allowed", "https://news.example.com/article", "Allowed content"),
+        _searxng_article("Blocked", "https://blocked.example.com/article", "Blocked content"),
+    ]
+    searxng_response = _make_searxng_response(searxng_results)
+
+    with patch("requests.get", return_value=searxng_response):
+        result = search_web.invoke({
+            "query": "domain filtering",
+            "allowed_domains": ["news.example.com"],
+            "use_cache": False,
+        })
+
+    assert "Allowed" in result
+    assert "Blocked" not in result
 
 
 # ── output format ─────────────────────────────────────────────────────────────
