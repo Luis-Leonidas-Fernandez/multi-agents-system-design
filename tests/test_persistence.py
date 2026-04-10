@@ -1,14 +1,14 @@
 """
-Tests unitarios para persistence.py.
+Tests unitarios para infra/persistence.py.
 
 Usa tmp_path (SQLite en archivo temporal) para aislar cada test.
-No testea la migración JSONL — TODO: test de migración requiere setup de filesystem complejo.
+La migración JSONL queda fuera de esta suite; requiere un fixture de filesystem separado.
 """
 import os
 import sqlite3
 import pytest
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 
 # ==================== FIXTURES ====================
@@ -16,12 +16,12 @@ from langchain_core.messages import HumanMessage, AIMessage
 @pytest.fixture(autouse=True)
 def _isolate_persistence(tmp_path, monkeypatch):
     """
-    Aisla el módulo persistence para cada test:
+    Aisla el módulo infra.persistence para cada test:
     - Apunta _SESSIONS_DIR y _DB_PATH al tmp_path único del test
     - Resetea el singleton _conn y el set _migrated
     - Fuerza USE_SQLITE=true
     """
-    import persistence
+    import infra.persistence as persistence
 
     sessions_dir = tmp_path / "sessions"
     db_path = sessions_dir / "sessions.db"
@@ -46,7 +46,7 @@ def _isolate_persistence(tmp_path, monkeypatch):
 # ==================== ROUND-TRIP save/load ====================
 
 def test_save_and_load_messages_round_trip_human():
-    import persistence
+    import infra.persistence as persistence
     persistence.save_message("sess-1", "human", "Hola mundo")
     msgs = persistence.load_messages("sess-1")
     assert len(msgs) == 1
@@ -55,7 +55,7 @@ def test_save_and_load_messages_round_trip_human():
 
 
 def test_save_and_load_messages_round_trip_ai():
-    import persistence
+    import infra.persistence as persistence
     persistence.save_message("sess-1", "ai", "Respuesta del agente")
     msgs = persistence.load_messages("sess-1")
     assert len(msgs) == 1
@@ -64,7 +64,7 @@ def test_save_and_load_messages_round_trip_ai():
 
 
 def test_save_and_load_multiple_roles():
-    import persistence
+    import infra.persistence as persistence
     persistence.save_message("sess-2", "human", "¿Qué es el BTC?")
     persistence.save_message("sess-2", "ai",    "Bitcoin es...")
     persistence.save_message("sess-2", "human", "¿Y el ETH?")
@@ -80,7 +80,7 @@ def test_save_and_load_multiple_roles():
 
 def test_multiple_messages_cargados_en_orden():
     """Los mensajes deben cargarse en orden de inserción (ts, id ASC)."""
-    import persistence
+    import infra.persistence as persistence
     contents = [f"mensaje {i}" for i in range(5)]
     for i, c in enumerate(contents):
         role = "human" if i % 2 == 0 else "ai"
@@ -92,7 +92,7 @@ def test_multiple_messages_cargados_en_orden():
 # ==================== Sesión inexistente ====================
 
 def test_load_messages_sesion_inexistente_retorna_lista_vacia():
-    import persistence
+    import infra.persistence as persistence
     msgs = persistence.load_messages("sesion-que-no-existe-abc123")
     assert msgs == []
 
@@ -100,7 +100,7 @@ def test_load_messages_sesion_inexistente_retorna_lista_vacia():
 # ==================== list_sessions ====================
 
 def test_list_sessions_retorna_sesiones_guardadas():
-    import persistence
+    import infra.persistence as persistence
     persistence.save_message("alfa", "human", "msg1")
     persistence.save_message("beta", "ai",    "msg2")
     sessions = persistence.list_sessions()
@@ -109,7 +109,7 @@ def test_list_sessions_retorna_sesiones_guardadas():
 
 
 def test_list_sessions_orden_alfabetico():
-    import persistence
+    import infra.persistence as persistence
     persistence.save_message("zeta",   "human", "z")
     persistence.save_message("alfa",   "human", "a")
     persistence.save_message("medios", "human", "m")
@@ -120,7 +120,7 @@ def test_list_sessions_orden_alfabetico():
 
 
 def test_list_sessions_sin_duplicados():
-    import persistence
+    import infra.persistence as persistence
     for _ in range(3):
         persistence.save_message("unica", "human", "msg")
     sessions = persistence.list_sessions()
@@ -128,7 +128,7 @@ def test_list_sessions_sin_duplicados():
 
 
 def test_list_sessions_vacio_cuando_no_hay_sesiones():
-    import persistence
+    import infra.persistence as persistence
     sessions = persistence.list_sessions()
     # Con el directorio vacío (tmp_path nuevo), no debe haber sesiones
     assert isinstance(sessions, list)
@@ -139,7 +139,7 @@ def test_list_sessions_vacio_cuando_no_hay_sesiones():
 
 def test_sesiones_aisladas():
     """Mensajes de una sesión no aparecen en otra."""
-    import persistence
+    import infra.persistence as persistence
     persistence.save_message("sess-A", "human", "solo en A")
     persistence.save_message("sess-B", "human", "solo en B")
 
@@ -155,7 +155,7 @@ def test_sesiones_aisladas():
 # ==================== save_message con request_id ====================
 
 def test_save_message_con_request_id_no_falla():
-    import persistence
+    import infra.persistence as persistence
     persistence.save_message("sess-rid", "human", "msg", request_id="req-uuid-123")
     msgs = persistence.load_messages("sess-rid")
     assert len(msgs) == 1
@@ -166,8 +166,8 @@ def test_save_message_con_request_id_no_falla():
 
 def test_save_session_en_modo_sqlite_es_noop():
     """save_session en modo SQLite no debe escribir nada ni fallar."""
-    import persistence
-    msgs = [HumanMessage(content="test")]
+    import infra.persistence as persistence
+    msgs: list[BaseMessage] = [HumanMessage(content="test")]
     # No debe lanzar excepción
     persistence.save_session("sess-noop", msgs)
     # El único mensaje guardado vía save_message es el que guardamos explícitamente
@@ -176,17 +176,56 @@ def test_save_session_en_modo_sqlite_es_noop():
     assert len(loaded) == 1
 
 
+def test_session_persistence_wrapper_delega_en_infra(monkeypatch):
+    from application.services.session_persistence import SessionPersistence
+
+    calls = []
+
+    monkeypatch.setattr("infra.persistence.list_sessions", lambda: ["a"])
+    monkeypatch.setattr("infra.persistence.load_messages", lambda session_id: [HumanMessage(content=session_id)])
+    monkeypatch.setattr("infra.persistence.save_message", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr("infra.persistence.save_session", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    backend = SessionPersistence()
+    assert backend.list_sessions() == ["a"]
+    assert backend.load_messages("abc")[0].content == "abc"
+    backend.save_message("abc", "human", "hola", request_id="rid")
+    backend.save_session("abc", [HumanMessage(content="hola")])
+    assert len(calls) == 2
+
+
+def test_session_memory_wrapper_delega_en_infra(monkeypatch):
+    from application.services.session_memory import SessionMemory
+
+    calls = []
+
+    monkeypatch.setattr("infra.memory.load_memory_context", lambda session_id: f"mem:{session_id}")
+
+    async def fake_distill(state, session_id):
+        calls.append((state, session_id))
+        return True
+
+    monkeypatch.setattr("infra.memory.distill_memory", fake_distill)
+
+    backend = SessionMemory()
+    assert backend.load_memory_context("abc") == "mem:abc"
+
+    import asyncio
+    assert asyncio.run(backend.distill_memory({}, "abc")) is True
+    assert len(calls) == 1
+
+
 # ==================== _row_to_msg ====================
 
 def test_row_to_msg_human():
-    from persistence import _row_to_msg
+    from infra.persistence import _row_to_msg
     msg = _row_to_msg("human", "contenido")
     assert isinstance(msg, HumanMessage)
     assert msg.content == "contenido"
 
 
 def test_row_to_msg_ai():
-    from persistence import _row_to_msg
+    from infra.persistence import _row_to_msg
     msg = _row_to_msg("ai", "contenido ai")
     assert isinstance(msg, AIMessage)
     assert msg.content == "contenido ai"
@@ -194,11 +233,6 @@ def test_row_to_msg_ai():
 
 def test_row_to_msg_unknown_role_retorna_ai():
     """Roles desconocidos caen a AIMessage."""
-    from persistence import _row_to_msg
+    from infra.persistence import _row_to_msg
     msg = _row_to_msg("tool", "msg herramienta")
     assert isinstance(msg, AIMessage)
-
-
-# ==================== TODO ====================
-# test_maybe_migrate_jsonl: requiere setup de filesystem JSONL complejo.
-# Dejar para un fixture de integración separado.

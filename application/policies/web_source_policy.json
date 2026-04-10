@@ -1,0 +1,76 @@
+{
+  "source_groups": [
+    {
+      "name": "japan",
+      "entity_terms": ["japan", "japón", "japon"],
+      "preferred_domains": [
+        "nhk.or.jp",
+        "nhkworld",
+        "japannews.yomiuri.co.jp",
+        "japantimes.co.jp",
+        "kyodonews.net",
+        "mainichi.jp",
+        "asahi.com",
+        "nippon.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "argentina",
+      "entity_terms": ["argentina", "argentino", "argentinos", "argentinas"],
+      "preferred_domains": [
+        "lanacion.com.ar",
+        "clarin.com",
+        "infobae.com",
+        "pagina12.com.ar",
+        "tycsports.com",
+        "ole.com.ar",
+        "afa.com.ar",
+        "ambito.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "south_korea",
+      "entity_terms": ["south korea", "korea del sur", "corea del sur", "surcorea", "surcoreano", "surcoreana", "coreano", "coreana"],
+      "preferred_domains": [
+        "yonhapnews.co.kr",
+        "english.yonhapnews.co.kr",
+        "koreaherald.com",
+        "koreatimes.co.kr",
+        "joongang.co.kr",
+        "hani.co.kr",
+        "donga.com"
+      ],
+      "preferred_boost": 8
+    }
+  ],
+  "global_trusted_domains": ["reuters.com", "apnews.com", "afp.com", "efe.com"],
+  "global_trusted_boost": 5,
+  "recent_query_profiles": {
+    "today": {
+      "min_score": 8,
+      "min_body_lines": 2,
+      "min_sources": 1,
+      "min_candidates": 1,
+      "candidate_min_score": 8,
+      "candidate_min_sources": 1
+    },
+    "latest": {
+      "min_score": 8,
+      "min_body_lines": 2,
+      "min_sources": 1,
+      "min_candidates": 1,
+      "candidate_min_score": 8,
+      "candidate_min_sources": 1
+    },
+    "week": {
+      "min_score": 12,
+      "min_body_lines": 3,
+      "min_sources": 2,
+      "min_candidates": 4,
+      "candidate_min_score": 6,
+      "candidate_min_sources": 1
+    }
+  }
+}

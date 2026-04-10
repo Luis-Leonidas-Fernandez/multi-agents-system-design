@@ -30,6 +30,8 @@ def _fresh_tracker() -> dict:
     ("últimas noticias de tecnología",    "news"),
     ("noticias del día",                  "news"),
     ("latest headlines",                  "news"),
+    ("resultados del futbol de hoy",      "sports"),
+    ("partidos de primera division",      "sports"),
     ("clima en Buenos Aires mañana",      "weather"),
     ("weather forecast for NYC",          "weather"),
     ("receta de pasta carbonara",         "general"),
@@ -37,18 +39,18 @@ def _fresh_tracker() -> dict:
     ("best restaurants in Madrid",        "general"),
 ])
 def test_detect_query_category_clasifica_correctamente(query, expected):
-    from scrape_tracker import _detect_query_category
+    from application.policies.scrape_tracker import _detect_query_category
     assert _detect_query_category(query) == expected
 
 
 def test_detect_query_category_case_insensitive():
-    from scrape_tracker import _detect_query_category
+    from application.policies.scrape_tracker import _detect_query_category
     assert _detect_query_category("BITCOIN PRICE TODAY") == "crypto_price"
     assert _detect_query_category("STOCK MARKET") == "finance"
 
 
 def test_detect_query_category_empty_string_returns_general():
-    from scrape_tracker import _detect_query_category
+    from application.policies.scrape_tracker import _detect_query_category
     assert _detect_query_category("") == "general"
 
 
@@ -65,25 +67,25 @@ def test_detect_query_category_empty_string_returns_general():
     (500, "ok_strong"),
 ])
 def test_scrape_reliability_niveles_correctos(raw_words, expected_level):
-    from scrape_tracker import _scrape_reliability
+    from application.policies.scrape_tracker import _scrape_reliability
     assert _scrape_reliability(raw_words) == expected_level
 
 
 # ==================== _get_category_score ====================
 
 def test_get_category_score_tracker_vacio_retorna_cero():
-    from scrape_tracker import _get_category_score
+    from application.policies.scrape_tracker import _get_category_score
     assert _get_category_score({}, "crypto_price", 1) == 0.0
 
 
 def test_get_category_score_categoria_inexistente_retorna_cero():
-    from scrape_tracker import _get_category_score
+    from application.policies.scrape_tracker import _get_category_score
     tracker = {"finance": {"score": 1.5, "last_turn": 3}}
     assert _get_category_score(tracker, "crypto_price", 3) == 0.0
 
 
 def test_get_category_score_retorna_score_actual():
-    from scrape_tracker import _get_category_score
+    from application.policies.scrape_tracker import _get_category_score
     tracker = {"crypto_price": {"score": 2.0, "last_turn": 5}}
     result = _get_category_score(tracker, "crypto_price", 5)
     assert result == 2.0
@@ -91,7 +93,7 @@ def test_get_category_score_retorna_score_actual():
 
 def test_get_category_score_decae_despues_de_decay_turns():
     """Después de _SCORE_DECAY_TURNS (3) turnos sin actividad, retorna 0."""
-    from scrape_tracker import _get_category_score, _SCORE_DECAY_TURNS
+    from application.policies.scrape_tracker import _get_category_score, _SCORE_DECAY_TURNS
     tracker = {"crypto_price": {"score": 2.5, "last_turn": 1}}
     current_turn = 1 + _SCORE_DECAY_TURNS + 1  # un turno más allá del límite
     result = _get_category_score(tracker, "crypto_price", current_turn)
@@ -99,7 +101,7 @@ def test_get_category_score_decae_despues_de_decay_turns():
 
 
 def test_get_category_score_dentro_de_ventana_decay_mantiene_score():
-    from scrape_tracker import _get_category_score, _SCORE_DECAY_TURNS
+    from application.policies.scrape_tracker import _get_category_score, _SCORE_DECAY_TURNS
     tracker = {"crypto_price": {"score": 1.5, "last_turn": 1}}
     current_turn = 1 + _SCORE_DECAY_TURNS  # exactamente en el límite
     result = _get_category_score(tracker, "crypto_price", current_turn)
@@ -112,7 +114,7 @@ _VALID_STRATEGIES = {"free", "prefer_search", "force_search", "api_price"}
 
 
 def test_get_strategy_sin_explorar_score_neutral_retorna_free():
-    from scrape_tracker import _get_strategy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import _get_strategy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     os.environ["POLICY_CONFIG"] = ""  # sin policy file
     result = _get_strategy({}, "general", 0.0, exploring=False)
@@ -120,7 +122,7 @@ def test_get_strategy_sin_explorar_score_neutral_retorna_free():
 
 
 def test_get_strategy_explorando_retorna_estrategia_valida():
-    from scrape_tracker import _get_strategy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import _get_strategy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     # exploring=True debe retornar una de las estrategias de exploración
     resultados = set()
@@ -132,7 +134,7 @@ def test_get_strategy_explorando_retorna_estrategia_valida():
 
 
 def test_get_strategy_score_muy_bajo_sin_policy_retorna_force_search():
-    from scrape_tracker import _get_strategy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import _get_strategy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     # score <= -2 → "very_low" band → force_search para crypto_price
     result = _get_strategy({}, "crypto_price", -2.5, exploring=False)
@@ -140,7 +142,7 @@ def test_get_strategy_score_muy_bajo_sin_policy_retorna_force_search():
 
 
 def test_get_strategy_score_bajo_sin_policy_retorna_prefer_search():
-    from scrape_tracker import _get_strategy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import _get_strategy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     # -2 < score < 0 → "low" band → prefer_search para crypto_price
     result = _get_strategy({}, "crypto_price", -1.0, exploring=False)
@@ -148,7 +150,7 @@ def test_get_strategy_score_bajo_sin_policy_retorna_prefer_search():
 
 
 def test_get_strategy_cooldown_activo_retorna_free():
-    from scrape_tracker import _get_strategy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import _get_strategy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     tracker = {"crypto_price": {"score": -3.0, "last_turn": 1, "cooldown_turns": 2}}
     # cooldown activo → ignora el score malo y retorna "free"
@@ -159,7 +161,7 @@ def test_get_strategy_cooldown_activo_retorna_free():
 # ==================== _update_scrape_tracker ====================
 
 def test_update_scrape_tracker_resultado_ok_strong_incrementa_score():
-    from scrape_tracker import _update_scrape_tracker
+    from application.policies.scrape_tracker import _update_scrape_tracker
     tracker = {}
     new_tracker, analytics = _update_scrape_tracker(
         tracker, "crypto_price", raw_words=150, current_turn=1,
@@ -171,7 +173,7 @@ def test_update_scrape_tracker_resultado_ok_strong_incrementa_score():
 
 def test_update_scrape_tracker_resultado_unreliable_reduce_score():
     """Con raw_words bajos, latencia alta y costo real, el delta debe ser negativo."""
-    from scrape_tracker import _update_scrape_tracker
+    from application.policies.scrape_tracker import _update_scrape_tracker
     tracker = {}
     # raw_words=5 → quality_score=5/120=0.042, latencia alta → penalización mayor
     new_tracker, analytics = _update_scrape_tracker(
@@ -183,7 +185,7 @@ def test_update_scrape_tracker_resultado_unreliable_reduce_score():
 
 
 def test_update_scrape_tracker_score_clampado_en_max():
-    from scrape_tracker import _update_scrape_tracker, _SCORE_MAX
+    from application.policies.scrape_tracker import _update_scrape_tracker, _SCORE_MAX
     # Partir con score ya muy alto
     tracker = {"crypto_price": {"score": _SCORE_MAX - 0.1, "last_turn": 1}}
     new_tracker, _ = _update_scrape_tracker(
@@ -194,7 +196,7 @@ def test_update_scrape_tracker_score_clampado_en_max():
 
 
 def test_update_scrape_tracker_score_clampado_en_min():
-    from scrape_tracker import _update_scrape_tracker, _SCORE_MIN
+    from application.policies.scrape_tracker import _update_scrape_tracker, _SCORE_MIN
     tracker = {"crypto_price": {"score": _SCORE_MIN + 0.1, "last_turn": 1}}
     new_tracker, _ = _update_scrape_tracker(
         tracker, "crypto_price", raw_words=0, current_turn=2,
@@ -204,7 +206,7 @@ def test_update_scrape_tracker_score_clampado_en_min():
 
 
 def test_update_scrape_tracker_ok_strong_activa_cooldown():
-    from scrape_tracker import _update_scrape_tracker, _COOLDOWN_TURNS
+    from application.policies.scrape_tracker import _update_scrape_tracker, _COOLDOWN_TURNS
     tracker = {}
     new_tracker, _ = _update_scrape_tracker(
         tracker, "news", raw_words=200, current_turn=1,
@@ -214,7 +216,7 @@ def test_update_scrape_tracker_ok_strong_activa_cooldown():
 
 
 def test_update_scrape_tracker_failure_incrementa_consecutive_failures():
-    from scrape_tracker import _update_scrape_tracker
+    from application.policies.scrape_tracker import _update_scrape_tracker
     tracker = {"finance": {"score": 0.0, "last_turn": 1, "consecutive_failures": 1}}
     new_tracker, _ = _update_scrape_tracker(
         tracker, "finance", raw_words=5, current_turn=2,
@@ -223,7 +225,7 @@ def test_update_scrape_tracker_failure_incrementa_consecutive_failures():
 
 
 def test_update_scrape_tracker_success_resetea_consecutive_failures():
-    from scrape_tracker import _update_scrape_tracker
+    from application.policies.scrape_tracker import _update_scrape_tracker
     tracker = {"finance": {"score": 0.0, "last_turn": 1, "consecutive_failures": 3}}
     new_tracker, _ = _update_scrape_tracker(
         tracker, "finance", raw_words=150, current_turn=2,
@@ -232,7 +234,7 @@ def test_update_scrape_tracker_success_resetea_consecutive_failures():
 
 
 def test_update_scrape_tracker_analytics_quality_target():
-    from scrape_tracker import _update_scrape_tracker
+    from application.policies.scrape_tracker import _update_scrape_tracker
     tracker = {}
     _, analytics = _update_scrape_tracker(
         tracker, "news", raw_words=200, current_turn=1,
@@ -246,7 +248,7 @@ def test_update_scrape_tracker_analytics_quality_target():
 
 
 def test_update_scrape_tracker_recovery_turns_calculado():
-    from scrape_tracker import _update_scrape_tracker
+    from application.policies.scrape_tracker import _update_scrape_tracker
     # Simular racha mala iniciada en turno 3
     tracker = {"finance": {"score": -1.0, "last_turn": 3, "last_bad_turn": 3, "consecutive_failures": 2}}
     _, analytics = _update_scrape_tracker(
@@ -258,7 +260,7 @@ def test_update_scrape_tracker_recovery_turns_calculado():
 
 def test_update_scrape_tracker_no_modifica_tracker_original():
     """_update_scrape_tracker debe retornar una copia, no mutar el original."""
-    from scrape_tracker import _update_scrape_tracker
+    from application.policies.scrape_tracker import _update_scrape_tracker
     original = {"crypto_price": {"score": 1.0, "last_turn": 1}}
     original_score_before = original["crypto_price"]["score"]
     _update_scrape_tracker(original, "crypto_price", raw_words=50, current_turn=2)
@@ -269,7 +271,7 @@ def test_update_scrape_tracker_no_modifica_tracker_original():
 # ==================== Runtime Policy Cache ====================
 
 def test_get_runtime_policy_retorna_dict():
-    from scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     os.environ["POLICY_CONFIG"] = ""
     policy = get_runtime_policy()
@@ -278,7 +280,7 @@ def test_get_runtime_policy_retorna_dict():
 
 def test_get_runtime_policy_es_lazy_y_cached():
     """Llamadas sucesivas retornan el mismo objeto (identidad)."""
-    from scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     os.environ["POLICY_CONFIG"] = ""
     p1 = get_runtime_policy()
@@ -287,7 +289,7 @@ def test_get_runtime_policy_es_lazy_y_cached():
 
 
 def test_reset_runtime_policy_cache_limpia_cache():
-    from scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
     reset_runtime_policy_cache()
     os.environ["POLICY_CONFIG"] = ""
     p1 = get_runtime_policy()
@@ -300,7 +302,7 @@ def test_reset_runtime_policy_cache_limpia_cache():
 def test_get_runtime_policy_desde_tmp_file(tmp_path):
     """get_runtime_policy carga correctamente desde un policy.json válido."""
     import time as time_mod
-    from scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
+    from application.policies.scrape_tracker import get_runtime_policy, reset_runtime_policy_cache
 
     policy_data = {
         "version": "1.0",
@@ -335,7 +337,7 @@ def test_policy_time_decay_no_se_acumula_en_cache(tmp_path):
     """
     import time as time_mod
     import math
-    from scrape_tracker import (
+    from application.policies.scrape_tracker import (
         _load_runtime_policy,
         reset_runtime_policy_cache,
         _POLICY_DECAY_TAU,

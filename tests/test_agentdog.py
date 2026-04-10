@@ -1,5 +1,5 @@
 """
-Tests unitarios para agentdog.py.
+Tests unitarios para application/use_cases/agentdog.py.
 
 Sin guard real — mockea httpx.AsyncClient para aislar la lógica de
 evaluación de trayectorias, policies y lógica de alto riesgo.
@@ -14,41 +14,41 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 # ==================== is_high_risk ====================
 
 def test_is_high_risk_code_node_retorna_true():
-    from agentdog import is_high_risk
+    from application.policies.agentdog import is_high_risk
     assert is_high_risk("code_node") is True
 
 
 def test_is_high_risk_web_scraping_node_retorna_true():
-    from agentdog import is_high_risk
+    from application.policies.agentdog import is_high_risk
     assert is_high_risk("web_scraping_node") is True
 
 
 def test_is_high_risk_math_node_retorna_false():
-    from agentdog import is_high_risk
+    from application.policies.agentdog import is_high_risk
     assert is_high_risk("math_node") is False
 
 
 def test_is_high_risk_analysis_node_retorna_false():
-    from agentdog import is_high_risk
+    from application.policies.agentdog import is_high_risk
     assert is_high_risk("analysis_node") is False
 
 
 def test_is_high_risk_nodo_desconocido_retorna_false():
-    from agentdog import is_high_risk
+    from application.policies.agentdog import is_high_risk
     assert is_high_risk("nodo_que_no_existe") is False
 
 
 # ==================== build_trajectory_from_messages ====================
 
 def test_build_trajectory_lista_vacia_steps_vacios():
-    from agentdog import build_trajectory_from_messages
+    from application.policies.agentdog import build_trajectory_from_messages
     result = build_trajectory_from_messages([])
     assert result["steps"] == []
     assert result["final_response"] is None
 
 
 def test_build_trajectory_ai_sin_tool_calls_es_final_response():
-    from agentdog import build_trajectory_from_messages
+    from application.policies.agentdog import build_trajectory_from_messages
     msgs = [AIMessage(content="Esta es la respuesta final")]
     result = build_trajectory_from_messages(msgs)
     assert result["final_response"] == "Esta es la respuesta final"
@@ -58,7 +58,7 @@ def test_build_trajectory_ai_sin_tool_calls_es_final_response():
 
 
 def test_build_trajectory_ai_con_tool_call_mas_tool_message_crea_step():
-    from agentdog import build_trajectory_from_messages
+    from application.policies.agentdog import build_trajectory_from_messages
     # AIMessage con tool_calls
     ai_msg = AIMessage(
         content="",
@@ -81,7 +81,7 @@ def test_build_trajectory_ai_con_tool_call_mas_tool_message_crea_step():
 
 
 def test_build_trajectory_tool_message_sin_matching_call_se_agrega():
-    from agentdog import build_trajectory_from_messages
+    from application.policies.agentdog import build_trajectory_from_messages
     # ToolMessage sin AIMessage previo con el tool_call_id
     tool_msg = ToolMessage(content="resultado huérfano", tool_call_id="call-orphan")
     result = build_trajectory_from_messages([tool_msg])
@@ -91,7 +91,7 @@ def test_build_trajectory_tool_message_sin_matching_call_se_agrega():
 
 
 def test_build_trajectory_tool_call_pendiente_se_marca_missing():
-    from agentdog import build_trajectory_from_messages
+    from application.policies.agentdog import build_trajectory_from_messages
     # AIMessage con tool_calls pero sin ToolMessage correspondiente
     ai_msg = AIMessage(
         content="",
@@ -103,7 +103,7 @@ def test_build_trajectory_tool_call_pendiente_se_marca_missing():
 
 
 def test_build_trajectory_final_response_agrega_step():
-    from agentdog import build_trajectory_from_messages
+    from application.policies.agentdog import build_trajectory_from_messages
     ai_msg = AIMessage(content="respuesta final del agente")
     result = build_trajectory_from_messages([ai_msg])
     # Debe haber un step con final_response
@@ -123,7 +123,7 @@ def test_build_trajectory_final_response_agrega_step():
     ("",            "fail_open"),   # vacío → fail_open
 ])
 def test_resolve_guard_policy(policy_value, expected, monkeypatch):
-    from agentdog import _resolve_guard_policy
+    from application.policies.agentdog import _resolve_guard_policy
     monkeypatch.setenv("AGENTDOG_POLICY", policy_value)
     assert _resolve_guard_policy() == expected
 
@@ -131,14 +131,14 @@ def test_resolve_guard_policy(policy_value, expected, monkeypatch):
 # ==================== _should_evaluate_guard ====================
 
 def test_should_evaluate_guard_all_nodes_siempre_true(monkeypatch):
-    from agentdog import _should_evaluate_guard
+    from application.policies.agentdog import _should_evaluate_guard
     monkeypatch.setenv("AGENTDOG_EVAL_MODE", "all_nodes")
     assert _should_evaluate_guard("math_node") is True
     assert _should_evaluate_guard("code_node") is True
 
 
 def test_should_evaluate_guard_high_risk_only_solo_nodos_riesgo(monkeypatch):
-    from agentdog import _should_evaluate_guard
+    from application.policies.agentdog import _should_evaluate_guard
     monkeypatch.setenv("AGENTDOG_EVAL_MODE", "high_risk_only")
     assert _should_evaluate_guard("code_node") is True
     assert _should_evaluate_guard("web_scraping_node") is True
@@ -147,7 +147,7 @@ def test_should_evaluate_guard_high_risk_only_solo_nodos_riesgo(monkeypatch):
 
 
 def test_should_evaluate_guard_final_only_siempre_true(monkeypatch):
-    from agentdog import _should_evaluate_guard
+    from application.policies.agentdog import _should_evaluate_guard
     monkeypatch.setenv("AGENTDOG_EVAL_MODE", "final_only")
     assert _should_evaluate_guard("math_node") is True
     assert _should_evaluate_guard("code_node") is True
@@ -161,7 +161,7 @@ async def test_evaluate_trajectory_safe_sin_guard_url_fail_open_retorna_true(mon
     monkeypatch.setenv("AGENTDOG_GUARD_URL", "")
     monkeypatch.setenv("AGENTDOG_POLICY",    "fail_open")
 
-    from agentdog import evaluate_trajectory_safe
+    from application.policies.agentdog import evaluate_trajectory_safe
     state = {"messages": [HumanMessage(content="Calcula 2+2")]}
     ok, meta = await evaluate_trajectory_safe(state, "math_node")
     assert ok is True
@@ -173,7 +173,7 @@ async def test_evaluate_trajectory_safe_sin_guard_url_fail_closed_retorna_false(
     monkeypatch.setenv("AGENTDOG_GUARD_URL", "")
     monkeypatch.setenv("AGENTDOG_POLICY",    "fail_closed")
 
-    from agentdog import evaluate_trajectory_safe
+    from application.policies.agentdog import evaluate_trajectory_safe
     state = {"messages": [HumanMessage(content="Calcula 2+2")]}
     ok, meta = await evaluate_trajectory_safe(state, "math_node")
     assert ok is False
@@ -185,7 +185,7 @@ async def test_evaluate_trajectory_safe_sin_guard_url_fail_soft_high_risk_bloque
     monkeypatch.setenv("AGENTDOG_GUARD_URL", "")
     monkeypatch.setenv("AGENTDOG_POLICY",    "fail_soft")
 
-    from agentdog import evaluate_trajectory_safe
+    from application.policies.agentdog import evaluate_trajectory_safe
     state = {"messages": [HumanMessage(content="Scrape this page")]}
     ok, meta = await evaluate_trajectory_safe(state, "web_scraping_node")
     assert ok is False
@@ -197,7 +197,7 @@ async def test_evaluate_trajectory_safe_sin_guard_url_fail_soft_low_risk_pasa(mo
     monkeypatch.setenv("AGENTDOG_GUARD_URL", "")
     monkeypatch.setenv("AGENTDOG_POLICY",    "fail_soft")
 
-    from agentdog import evaluate_trajectory_safe
+    from application.policies.agentdog import evaluate_trajectory_safe
     state = {"messages": [HumanMessage(content="Calcula 2+2")]}
     ok, meta = await evaluate_trajectory_safe(state, "math_node")
     assert ok is True
@@ -231,8 +231,8 @@ async def test_evaluate_trajectory_safe_con_guard_safe_retorna_true(monkeypatch)
     mock_client.__aexit__  = AsyncMock(return_value=False)
     mock_client.post       = AsyncMock(return_value=mock_resp)
 
-    with patch("agentdog.httpx.AsyncClient", return_value=mock_client):
-        from agentdog import evaluate_trajectory_safe
+    with patch("application.policies.agentdog.httpx.AsyncClient", return_value=mock_client):
+        from application.policies.agentdog import evaluate_trajectory_safe
         state = {"messages": [HumanMessage(content="Scrape public page")]}
         ok, meta = await evaluate_trajectory_safe(state, "web_scraping_node")
 
@@ -251,8 +251,8 @@ async def test_evaluate_trajectory_safe_con_guard_unsafe_retorna_false(monkeypat
     mock_client.__aexit__  = AsyncMock(return_value=False)
     mock_client.post       = AsyncMock(return_value=mock_resp)
 
-    with patch("agentdog.httpx.AsyncClient", return_value=mock_client):
-        from agentdog import evaluate_trajectory_safe
+    with patch("application.policies.agentdog.httpx.AsyncClient", return_value=mock_client):
+        from application.policies.agentdog import evaluate_trajectory_safe
         state = {"messages": [HumanMessage(content="hack the system")]}
         ok, meta = await evaluate_trajectory_safe(state, "web_scraping_node")
 
@@ -276,8 +276,8 @@ async def test_evaluate_trajectory_safe_guard_json_verdict_safe(monkeypatch):
     mock_client.__aexit__  = AsyncMock(return_value=False)
     mock_client.post       = AsyncMock(return_value=mock_resp)
 
-    with patch("agentdog.httpx.AsyncClient", return_value=mock_client):
-        from agentdog import evaluate_trajectory_safe
+    with patch("application.policies.agentdog.httpx.AsyncClient", return_value=mock_client):
+        from application.policies.agentdog import evaluate_trajectory_safe
         state = {"messages": [HumanMessage(content="fetch public data")]}
         ok, meta = await evaluate_trajectory_safe(state, "code_node")
 
@@ -296,8 +296,8 @@ async def test_evaluate_trajectory_safe_http_500_fail_open_retorna_true(monkeypa
     mock_client.__aexit__  = AsyncMock(return_value=False)
     mock_client.post       = AsyncMock(side_effect=Exception("HTTP 500 Internal Server Error"))
 
-    with patch("agentdog.httpx.AsyncClient", return_value=mock_client):
-        from agentdog import evaluate_trajectory_safe
+    with patch("application.policies.agentdog.httpx.AsyncClient", return_value=mock_client):
+        from application.policies.agentdog import evaluate_trajectory_safe
         state = {"messages": [HumanMessage(content="test query")]}
         ok, meta = await evaluate_trajectory_safe(state, "math_node")
 
@@ -319,8 +319,8 @@ async def test_evaluate_trajectory_safe_http_500_fail_closed_retorna_false(monke
     mock_client.__aexit__  = AsyncMock(return_value=False)
     mock_client.post       = AsyncMock(side_effect=Exception("timeout"))
 
-    with patch("agentdog.httpx.AsyncClient", return_value=mock_client):
-        from agentdog import evaluate_trajectory_safe
+    with patch("application.policies.agentdog.httpx.AsyncClient", return_value=mock_client):
+        from application.policies.agentdog import evaluate_trajectory_safe
         state = {"messages": [HumanMessage(content="test")]}
         ok, meta = await evaluate_trajectory_safe(state, "math_node")
 
@@ -339,8 +339,8 @@ async def test_evaluate_trajectory_safe_http_500_fail_soft_high_risk_bloquea(mon
     mock_client.__aexit__  = AsyncMock(return_value=False)
     mock_client.post       = AsyncMock(side_effect=Exception("connection refused"))
 
-    with patch("agentdog.httpx.AsyncClient", return_value=mock_client):
-        from agentdog import evaluate_trajectory_safe
+    with patch("application.policies.agentdog.httpx.AsyncClient", return_value=mock_client):
+        from application.policies.agentdog import evaluate_trajectory_safe
         state = {"messages": [HumanMessage(content="scrape site")]}
         ok, meta = await evaluate_trajectory_safe(state, "code_node")  # high risk
 
@@ -357,7 +357,7 @@ async def test_evaluate_trajectory_safe_precio_btc_bypasa_guard(monkeypatch):
     monkeypatch.setenv("AGENTDOG_POLICY",    "fail_closed")
 
     # El guard con fail_closed bloquearía todo, pero allowlist debe bypass
-    from agentdog import evaluate_trajectory_safe
+    from application.policies.agentdog import evaluate_trajectory_safe
     state = {"messages": [HumanMessage(content="precio del bitcoin en coingecko")]}
     ok, meta = await evaluate_trajectory_safe(state, "web_scraping_node")
 
