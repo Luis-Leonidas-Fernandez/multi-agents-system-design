@@ -13,3 +13,18 @@ services:
     volumes:
       - ./data_trading:/app/data_trading
     restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    environment:
+      SEARXNG_BIND_ADDRESS: 0.0.0.0
+      SEARXNG_BASE_URL: http://localhost:8888
+      SEARXNG_LIMITER: "false"
+      SEARXNG_PUBLIC_INSTANCE: "false"
+      SEARXNG_SECRET: 4b7c8d2e0f1a9b3c5d6e7f8091a2b3c4
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng
+    restart: unless-stopped
