@@ -22,9 +22,6 @@ services:
       SEARXNG_BASE_URL: http://localhost:8888
       SEARXNG_LIMITER: "false"
       SEARXNG_PUBLIC_INSTANCE: "false"
-      SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
     ports:
       - "8888:8080"
-    volumes:
-      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     restart: unless-stopped

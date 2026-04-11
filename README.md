@@ -53,7 +53,6 @@ python ops/analytics.py [audit.jsonl]    # strategy ranking + learning curve
 ```
 
 `python main.py` intenta levantar `searxng` automáticamente vía `docker compose up -d searxng` cuando `SEARXNG_AUTO_START=true` y `SEARXNG_BASE_URL` apunta a un host local.
-El contenedor monta `searxng/settings.yml`, que habilita `html`, `json` y `rss` porque la app consulta `format=json`.
 
 ## Variables de entorno
 
