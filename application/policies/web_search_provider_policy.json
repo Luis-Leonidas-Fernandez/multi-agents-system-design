@@ -5,7 +5,7 @@
       "label": "SearXNG Search",
       "kind": "searxng",
       "env_vars": ["SEARXNG_BASE_URL"],
-      "auto_detect_order": 200,
+      "auto_detect_order": 10,
       "requires_credential": false
     }
   ],

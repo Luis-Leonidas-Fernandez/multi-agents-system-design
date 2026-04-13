@@ -4,10 +4,12 @@ Coordina HITL, estrategia, guardrails, retry y postcondiciones.
 El nodo LangGraph queda como adaptador fino.
 """
 import asyncio
+import os
 import re
 import time
 import uuid
-from urllib.parse import urlparse
+from dataclasses import dataclass
+from urllib.parse import urljoin, urlparse
 from typing import Any, Optional, Callable, Awaitable, Mapping, cast
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -35,6 +37,7 @@ from application.policies.scrape_tracker import (
 from application.policies.web_source_policy import (
     detect_query_source_group,
     detect_recent_query_horizon,
+    get_preferred_domains_for_group,
     get_query_source_terms,
     get_recent_query_requirements,
     get_source_domain_priority,
@@ -48,7 +51,28 @@ from application.helpers.price_flow_helpers import (
     _extract_structured_price,
     _get_crypto_price_fn,
 )
+from application.services.web_runtime import (
+    WebFetchRequest,
+    WebFetchRuntime,
+    WebSearchRequest,
+    WebSearchRuntime,
+)
+from application.services.web_response_post_filter import apply_web_response_post_filter
 from domain.models import AgentState
+
+
+def _web_debug_enabled() -> bool:
+    return (os.getenv("WEB_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _web_debug(label: str, **data: Any) -> None:
+    if not _web_debug_enabled():
+        return
+    payload = " ".join(
+        f"{key}={repr(value)}"
+        for key, value in data.items()
+    )
+    print(f"[WEB_DEBUG] {label}{(' ' + payload) if payload else ''}", flush=True)
 
 
 def _extract_urls_from_text(text: str) -> list[str]:
@@ -112,9 +136,347 @@ def _build_source_backed_response(summary_lines: list[str], sources: list[dict[s
     return "\n".join(body).strip()
 
 
+def _finalize_web_user_summary(
+    summary: str,
+    last_message: str,
+    sources: Optional[list[dict[str, str]]] = None,
+) -> tuple[str, Optional[list[dict[str, str]]], list[str]]:
+    filtered_summary, filtered_sources = apply_web_response_post_filter(
+        summary=summary,
+        query=last_message,
+        sources=sources,
+    )
+    final_words = filtered_summary.split()
+    return filtered_summary, filtered_sources, final_words
+
+
+@dataclass(frozen=True)
+class WebCandidateRecord:
+    title: str
+    url: str
+    snippet: str
+    source_kind: str
+    evidence_kind: str
+    recency: str
+    specificity: str
+    source_label: str = ""
+
+    def as_candidate(self) -> dict[str, str]:
+        return {
+            "title": self.title,
+            "url": self.url,
+            "snippet": self.snippet,
+            "source_kind": self.source_kind,
+            "source_label": self.source_label,
+        }
+
+
+def _candidate_record_from_dict(candidate: dict[str, str], *, query: str, query_horizon: Optional[str]) -> WebCandidateRecord:
+    source_kind = _classify_candidate_source_kind(candidate)
+    evidence_kind = "section_lines" if source_kind == "section_hit" else "search_snippet"
+    recency = _classify_candidate_recency(candidate, query_horizon)
+    specificity = _classify_candidate_specificity(candidate, query)
+    return WebCandidateRecord(
+        title=str(candidate.get("title") or candidate.get("url") or "result"),
+        url=str(candidate.get("url") or ""),
+        snippet=str(candidate.get("snippet") or ""),
+        source_kind=source_kind,
+        evidence_kind=evidence_kind,
+        recency=recency,
+        specificity=specificity,
+        source_label=str(candidate.get("source_label") or ""),
+    )
+
+
+def _classify_candidate_source_kind(candidate: dict[str, str]) -> str:
+    if _is_hub_like_candidate(candidate):
+        return "hub_hit"
+    if candidate.get("source_kind") == "section_fallback":
+        return "section_hit"
+    if candidate.get("source_kind") == "homepage_fallback":
+        return "homepage_hit"
+    if _is_specific_article_hit(candidate):
+        return "article_hit"
+    return "topic_hit"
+
+
+def _classify_candidate_recency(candidate: dict[str, str], query_horizon: Optional[str]) -> str:
+    url = str(candidate.get("url") or "")
+    if _candidate_url_has_date(url):
+        threshold = 45 if query_horizon == "month" else 14 if query_horizon == "week" else 2 if query_horizon == "today" else 30
+        return "dated_recent" if _candidate_url_is_recent(url, threshold) else "dated_old"
+    if candidate.get("source_kind") == "section_fallback":
+        return "dated_recent"
+    return "undated"
+
+
+def _classify_candidate_specificity(candidate: dict[str, str], query: str) -> str:
+    if _is_invalid_news_candidate(candidate, query):
+        return "structural"
+    if candidate.get("source_kind") == "section_fallback" or _is_specific_article_hit(candidate):
+        return "concrete"
+    return "broad"
+
+
+def _candidate_strategy_priority(candidate: dict[str, str], *, query: str, query_horizon: Optional[str]) -> tuple[int, int, int, int]:
+    record = _candidate_record_from_dict(candidate, query=query, query_horizon=query_horizon)
+    source_rank = {
+        "section_hit": 0,
+        "article_hit": 1,
+        "homepage_hit": 2,
+        "topic_hit": 3,
+        "hub_hit": 4,
+    }.get(record.source_kind, 5)
+    specificity_rank = {"concrete": 0, "broad": 1, "structural": 2}.get(record.specificity, 3)
+    recency_rank = {"dated_recent": 0, "undated": 1, "dated_old": 2}.get(record.recency, 3)
+    return (source_rank, specificity_rank, recency_rank, -len(record.snippet.split()))
+
+
+class CountryRecentNewsStrategy:
+    """Estrategia principal para noticias locales recientes basadas en secciones."""
+
+    def __init__(self, *, search_runtime: WebSearchRuntime, fetch_runtime: WebFetchRuntime) -> None:
+        self._search_runtime = search_runtime
+        self._fetch_runtime = fetch_runtime
+
+    async def execute(
+        self,
+        last_message: str,
+        web_search_runtime_args: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        query_source_group = detect_query_source_group(last_message)
+        query_horizon = detect_recent_query_horizon(last_message) if _is_recent_web_information_query(last_message) else None
+        if not _should_use_country_recent_news_strategy(last_message, query_source_group, query_horizon):
+            return None
+
+        source_terms = list(get_query_source_terms(last_message))
+        query_terms = _extract_generic_query_terms(last_message)
+        for term in source_terms:
+            if term not in query_terms:
+                query_terms.append(term)
+
+        country_press_domains, country_press_names = await _discover_country_press_sources(
+            last_message,
+            query_source_group,
+            source_terms,
+            web_search_runtime_args,
+        )
+        if not country_press_domains:
+            return None
+
+        country_press_sources = _country_press_source_cache_get(query_source_group, source_terms)
+        discovery_strategy = _country_press_strategy_cache_get(query_source_group, source_terms)
+        if discovery_strategy == "none" and not country_press_sources:
+            return None
+        sources_by_domain: dict[str, dict[str, str]] = {}
+        for source in country_press_sources:
+            url = source.get("url", "")
+            hostname = (urlparse(url).hostname or "").lower().removeprefix("www.")
+            if hostname and hostname not in sources_by_domain:
+                sources_by_domain[hostname] = source
+
+        structured_candidates: list[WebCandidateRecord] = []
+        seen_urls: set[str] = set()
+        dynamic_fetch_available = True
+        _sec_topic = _detect_news_topic(last_message)
+        _topic_terms_for_filter: dict[str, set[str]] = {
+            "security": {
+                "seguridad", "sicurezza", "crime", "crimen", "cronaca", "polizia", "policia",
+                "policiales", "detenid", "arrestad", "operativo", "homicidio", "asesin",
+                "robo", "narco", "violencia", "sucesos", "delito", "fiscal", "tribunal",
+                "ertzaintza", "mossos", "guardia civil", "omicid", "arrest", "blitz",
+            },
+            "economy": {
+                "econom", "mercad", "mercato", "finanz", "inflac", "presupuesto",
+                "negocios", "empresa", "bolsa", "pib", "deuda",
+            },
+            "politics": {
+                "politic", "govern", "parlament", "elecci", "presidente", "ministro",
+                "congreso", "senado", "partido", "decreto",
+            },
+        }
+        _filter_terms_for_section = _topic_terms_for_filter.get(_sec_topic, set())
+
+        for idx, domain in enumerate(country_press_domains):
+            press_name = country_press_names[idx] if idx < len(country_press_names) else domain
+            source_meta = sources_by_domain.get(domain, {"title": press_name, "url": _default_press_homepage_url(domain)})
+            if not _is_press_source_relevant_for_query(source_meta, last_message):
+                continue
+            fallback_url = (source_meta.get("url") or "").strip()
+            if not fallback_url:
+                continue
+            for section_url, section_label in _build_country_press_section_targets(domain, fallback_url, last_message):
+                section_prompt = _build_newspaper_section_fetch_prompt(
+                    last_message,
+                    source_meta.get("title") or press_name,
+                    section_label,
+                )
+                try:
+                    fetch_response = await self._fetch_runtime.fetch(
+                        WebFetchRequest(
+                            url=section_url,
+                            prompt=section_prompt,
+                            mode="static",
+                            use_cache=False,
+                        )
+                    )
+                except Exception:
+                    continue
+                section_text = fetch_response.content
+                issue = _classify_fetch_error(section_text)
+                if issue == "missing_playwright":
+                    dynamic_fetch_available = False
+                if issue in {"not_found", "blocked", "dns", "fetch_error"}:
+                    continue
+                lines = _filter_section_lines_for_query(
+                    _extract_section_content_lines(section_text, last_message, section_label),
+                    last_message,
+                    section_label,
+                )
+                lines = _dedupe_homepage_lines(lines)
+                if not lines and dynamic_fetch_available:
+                    try:
+                        dynamic_response = await self._fetch_runtime.fetch(
+                            WebFetchRequest(
+                                url=section_url,
+                                prompt=section_prompt,
+                                mode="dynamic",
+                                use_cache=False,
+                            )
+                        )
+                    except Exception:
+                        continue
+                    dynamic_issue = _classify_fetch_error(dynamic_response.content)
+                    if dynamic_issue == "missing_playwright":
+                        dynamic_fetch_available = False
+                    if dynamic_issue not in {"not_found", "blocked", "dns", "fetch_error", "missing_playwright"}:
+                        lines = _filter_section_lines_for_query(
+                            _extract_section_content_lines(dynamic_response.content, last_message, section_label),
+                            last_message,
+                            section_label,
+                        )
+                        lines = _dedupe_homepage_lines(lines)
+                        section_text = dynamic_response.content
+                if not lines:
+                    continue
+                # Extraemos TODOS los párrafos válidos de la sección (separados por \n\n).
+                # Cada párrafo es una noticia distinta reportada por el LLM.
+                # Luego el dedup cross-fuente al final selecciona las 4 mejores globalmente.
+                raw_blocks = [
+                    " ".join(ln.strip() for ln in block.splitlines() if ln.strip())
+                    for block in (section_text or "").split("\n\n")
+                    if block.strip()
+                ]
+                section_items: list[str] = []
+                seen_block_prefixes: set[str] = set()
+                for block_text in raw_blocks:
+                    if len(block_text) < 20:
+                        continue
+                    if _is_no_info_response(block_text):
+                        continue
+                    block_norm = _strip_accents(block_text.lower())
+                    if not _filter_terms_for_section or any(term in block_norm for term in _filter_terms_for_section):
+                        prefix = " ".join(block_norm.split()[:4])
+                        if prefix and prefix not in seen_block_prefixes:
+                            seen_block_prefixes.add(prefix)
+                            section_items.append(block_text)
+                # Fallback: si el LLM no usó párrafos separados, usamos las líneas filtradas
+                if not section_items:
+                    section_items = [ln for ln in lines if len(ln) > 20]
+                for item_idx, item_text in enumerate(section_items):
+                    candidate_url = section_url if item_idx == 0 else f"{section_url}#n{item_idx}"
+                    if candidate_url in seen_urls:
+                        continue
+                    seen_urls.add(candidate_url)
+                    structured_candidates.append(WebCandidateRecord(
+                        title=f"{source_meta.get('title') or press_name} — {section_label}",
+                        url=candidate_url,
+                        snippet=item_text,
+                        source_kind="section_hit",
+                        evidence_kind="section_lines",
+                        recency="dated_recent",
+                        specificity="concrete",
+                        source_label=section_label,
+                    ))
+
+        if structured_candidates:
+            ordered = sorted(
+                structured_candidates,
+                key=lambda candidate: _candidate_strategy_priority(
+                    candidate.as_candidate(),
+                    query=last_message,
+                    query_horizon=query_horizon,
+                ),
+            )
+            # Dedup cross-candidatos: descartamos párrafos que comparten el núcleo
+            # de la misma noticia (primeras 6 palabras normalizadas en común)
+            def _para_key(text: str) -> str:
+                words = re.sub(r"[^\w\s]", "", _strip_accents(text.lower())).split()
+                return " ".join(words[:6])
+
+            seen_para_keys: set[str] = set()
+            deduped_candidates: list[WebCandidateRecord] = []
+            for c in ordered:
+                key = _para_key(c.snippet)
+                if key and key not in seen_para_keys:
+                    seen_para_keys.add(key)
+                    deduped_candidates.append(c)
+                if len(deduped_candidates) >= 4:
+                    break
+
+            top = deduped_candidates
+            sources = [
+                {"title": candidate.title, "url": candidate.url.split("#")[0]}
+                for candidate in top
+            ]
+            if top and sources:
+                geography = _extract_query_geography(last_message) or ""
+                topic = _detect_news_topic(last_message)
+                topic_label = {
+                    "security": "Seguridad",
+                    "politics": "Política",
+                    "economy": "Economía",
+                }.get(topic, "Noticias")
+                header = f"**{topic_label} en {geography}**" if geography else f"**{topic_label}**"
+
+                paragraphs = [candidate.snippet for candidate in top if candidate.snippet]
+                # El header va embebido en el primer párrafo para sobrevivir el post-filter
+                if paragraphs:
+                    paragraphs[0] = f"{header}\n\n{paragraphs[0]}"
+                body = "\n\n".join(paragraphs)
+                sources_block = _format_sources(sources)
+                summary = body
+                if sources_block:
+                    summary = f"{summary}\n\n{sources_block}"
+                return {
+                    "summary": summary,
+                    "words": summary.split(),
+                    "source_type": "search",
+                    "sources": sources,
+                    "pre_synthesized": True,
+                }
+        return None
+
+
+class GenericWebSearchStrategy:
+    """Estrategia generalista search+fetch con runtime encapsulado."""
+
+    def __init__(self, *, search_runtime: WebSearchRuntime, fetch_runtime: WebFetchRuntime) -> None:
+        self._search_runtime = search_runtime
+        self._fetch_runtime = fetch_runtime
+
+    async def execute(
+        self,
+        last_message: str,
+        web_search_runtime_args: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        return await _run_generic_web_search_strategy_impl(last_message, web_search_runtime_args)
+
+
 _COUNTRY_PRESS_CACHE: dict[str, tuple[float, tuple[list[str], list[str]]]] = {}
 _COUNTRY_PRESS_CACHE_TTL_SECONDS = 60 * 60 * 24
 _COUNTRY_PRESS_SOURCE_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
+_COUNTRY_PRESS_DISCOVERY_STRATEGY_CACHE: dict[str, tuple[float, str]] = {}
 
 
 def _country_press_cache_key(query_source_group: Optional[str], source_terms: list[str]) -> str:
@@ -155,6 +517,68 @@ def _country_press_source_cache_get(query_source_group: Optional[str], source_te
 def _country_press_source_cache_set(query_source_group: Optional[str], source_terms: list[str], sources: list[dict[str, str]]) -> None:
     cache_key = _country_press_cache_key(query_source_group, source_terms)
     _COUNTRY_PRESS_SOURCE_CACHE[cache_key] = (time.time(), [dict(source) for source in sources])
+
+
+def _country_press_strategy_cache_get(query_source_group: Optional[str], source_terms: list[str]) -> str:
+    cache_key = _country_press_cache_key(query_source_group, source_terms)
+    cached = _COUNTRY_PRESS_DISCOVERY_STRATEGY_CACHE.get(cache_key)
+    if not cached:
+        return "none"
+    cached_at, value = cached
+    if (time.time() - cached_at) > _COUNTRY_PRESS_CACHE_TTL_SECONDS:
+        _COUNTRY_PRESS_DISCOVERY_STRATEGY_CACHE.pop(cache_key, None)
+        return "none"
+    return value
+
+
+def _country_press_strategy_cache_set(query_source_group: Optional[str], source_terms: list[str], strategy: str) -> None:
+    cache_key = _country_press_cache_key(query_source_group, source_terms)
+    _COUNTRY_PRESS_DISCOVERY_STRATEGY_CACHE[cache_key] = (time.time(), strategy)
+
+
+def _build_policy_country_press_sources(query_source_group: Optional[str]) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    for domain in get_preferred_domains_for_group(query_source_group):
+        hostname = domain.strip().lower()
+        if not hostname:
+            continue
+        sources.append({
+            "title": hostname,
+            "url": _default_press_homepage_url(hostname),
+            "domain": hostname,
+        })
+    return sources
+
+
+def _default_press_homepage_url(domain: str) -> str:
+    hostname = (domain or "").strip().lower().removeprefix("www.")
+    if not hostname:
+        return ""
+    return f"https://www.{hostname}/"
+
+
+def _build_no_local_sources_response(last_message: str) -> dict[str, Any]:
+    geography = _extract_query_geography(last_message) or "ese país"
+    summary = (
+        f"No encontré fuentes locales confiables de {geography} para esta semana. "
+        "Prefiero no mezclar resultados globales ruidosos o tangenciales."
+    )
+    return {
+        "summary": summary,
+        "words": summary.split(),
+        "source_type": "search",
+        "sources": [],
+        "pre_synthesized": True,
+    }
+
+
+def _debug_periodicos_fetch(url: str, stage: str) -> bytes:
+    from infra import scraping_infra
+
+    _web_debug("country_press.directory.fetch_start", stage=stage, url=url)
+    html = scraping_infra._fetch_html(url)
+    _web_debug("country_press.directory.fetch_success", stage=stage, url=url, bytes=len(html))
+    return html
 
 
 def _web_search_runtime_args(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -478,7 +902,7 @@ async def _legacy_run_web_scraping_flow(
                     summary = _disc_raw
                 else:
                     summary = await _synthesize_search_summary(_disc_raw, last_message, get_llm_fn, _disc_sources)
-                words = cast(list[str], discovery.get("words") or summary.split())
+                summary, _disc_sources, words = _finalize_web_user_summary(summary, last_message, _disc_sources)
                 duration_ms = int((time.time() - t0) * 1000)
                 reliability = _scrape_reliability(len(words))
                 source_type = cast(str, discovery.get("source_type") or "webfetch")
@@ -525,8 +949,8 @@ async def _legacy_run_web_scraping_flow(
                 if not fallback_sources:
                     fallback_sources = [{"title": "search result", "url": ""}]
                 summary = _build_source_backed_response(fallback_lines[:8], fallback_sources)
+                summary, fallback_sources, words = _finalize_web_user_summary(summary, last_message, fallback_sources)
                 duration_ms = int((time.time() - t0) * 1000)
-                words = summary.split()
                 reliability = _scrape_reliability(len(words))
                 new_tracker, analytics = cast(tuple[dict[str, Any], dict[str, Any]], _update_scrape_tracker(
                     tracker, category, len(words), turn_count,
@@ -560,7 +984,7 @@ async def _legacy_run_web_scraping_flow(
                     summary = _disc_raw
                 else:
                     summary = await _synthesize_search_summary(_disc_raw, last_message, get_llm_fn, _disc_sources)
-                words = cast(list[str], discovery.get("words") or summary.split())
+                summary, _disc_sources, words = _finalize_web_user_summary(summary, last_message, _disc_sources)
                 duration_ms = int((time.time() - t0) * 1000)
                 reliability = _scrape_reliability(len(words))
                 source_type = cast(str, discovery.get("source_type") or "webfetch")
@@ -758,6 +1182,7 @@ async def _legacy_run_web_scraping_flow(
             ml_would_succeed=ml_would_succeed,
             **tokens, **quality, **followup, **analytics, **meta,
         )
+        summary, _, _ = _finalize_web_user_summary(summary, last_message, None)
         return {
             "messages": [AIMessage(content=summary)],
             "scrape_tracker": new_tracker,
@@ -814,6 +1239,23 @@ def _is_recent_web_information_query(text: str) -> bool:
     if any(term in lowered for term in ("price", "precio", "cotiza", "cotización", "cotizacion")):
         return False
     return True
+
+
+def _should_use_country_recent_news_strategy(
+    text: str,
+    query_source_group: Optional[str],
+    query_horizon: Optional[str],
+) -> bool:
+    if not query_source_group or query_horizon not in {"today", "week", "month"}:
+        return False
+    lowered = (text or "").lower()
+    if any(term in lowered for term in ("resultado", "resultados", "partido", "partidos", "futbol", "football", "soccer", "nba", "nfl")):
+        return False
+    if not _is_recent_web_information_query(text):
+        return False
+    topic = _detect_news_topic(text)
+    has_news_word = any(term in lowered for term in ("noticia", "noticias", "news", "headline", "headlines"))
+    return topic in {"security", "economy", "politics"} or has_news_word
 
 
 _GEOGRAPHY_TERMS: tuple[tuple[str, str], ...] = (
@@ -1022,6 +1464,88 @@ _GEO_ENGLISH: dict[str, str] = {
     "Brasil": "Brazil",
 }
 
+_PERIODICOS_CONTINENT_SLUG_BY_COUNTRY: dict[str, str] = {
+    # Latin America
+    "Argentina": "sudamerica",
+    "Bolivia": "sudamerica",
+    "Brasil": "sudamerica",
+    "Chile": "sudamerica",
+    "Colombia": "sudamerica",
+    "Ecuador": "sudamerica",
+    "Paraguay": "sudamerica",
+    "Perú": "sudamerica",
+    "Uruguay": "sudamerica",
+    "Venezuela": "sudamerica",
+    # North/Central America + Caribbean
+    "Canadá": "norteamerica",
+    "Costa Rica": "centroamerica",
+    "Cuba": "centroamerica",
+    "El Salvador": "centroamerica",
+    "Estados Unidos": "norteamerica",
+    "Guatemala": "centroamerica",
+    "Haití": "centroamerica",
+    "Honduras": "centroamerica",
+    "México": "norteamerica",
+    "Nicaragua": "centroamerica",
+    "Panamá": "centroamerica",
+    "República Dominicana": "centroamerica",
+    # Europe
+    "Alemania": "europa",
+    "Bélgica": "europa",
+    "Dinamarca": "europa",
+    "España": "europa",
+    "Finlandia": "europa",
+    "Francia": "europa",
+    "Grecia": "europa",
+    "Hungría": "europa",
+    "Italia": "europa",
+    "Noruega": "europa",
+    "Países Bajos": "europa",
+    "Polonia": "europa",
+    "Portugal": "europa",
+    "Reino Unido": "europa",
+    "República Checa": "europa",
+    "Rumanía": "europa",
+    "Rusia": "europa",
+    "Serbia": "europa",
+    "Suecia": "europa",
+    "Suiza": "europa",
+    "Turquía": "europa",
+    "Ucrania": "europa",
+    # Asia-Pacific
+    "Australia": "asia",
+    "Bangladesh": "asia",
+    "China": "asia",
+    "Corea": "asia",
+    "Corea del Norte": "asia",
+    "Corea del Sur": "asia",
+    "Filipinas": "asia",
+    "India": "asia",
+    "Indonesia": "asia",
+    "Japón": "asia",
+    "Malasia": "asia",
+    "Nueva Zelanda": "asia",
+    "Pakistán": "asia",
+    "Singapur": "asia",
+    "Tailandia": "asia",
+    "Vietnam": "asia",
+    # Middle East & Africa
+    "Arabia Saudita": "medio-oriente",
+    "Egipto": "africa",
+    "Emiratos Árabes": "medio-oriente",
+    "Etiopía": "africa",
+    "Irak": "medio-oriente",
+    "Irán": "medio-oriente",
+    "Israel": "medio-oriente",
+    "Kenia": "africa",
+    "Líbano": "medio-oriente",
+    "Marruecos": "africa",
+    "Nigeria": "africa",
+    "Palestina": "medio-oriente",
+    "Siria": "medio-oriente",
+    "Sudáfrica": "africa",
+}
+
 
 def _detect_news_topic(query: str) -> str:
     lowered = query.lower()
@@ -1032,6 +1556,602 @@ def _detect_news_topic(query: str) -> str:
     if any(k in lowered for k in ["política", "politica", "gobierno", "elección", "eleccion", "presidente", "congreso", "partido", "ministro"]):
         return "politics"
     return "default"
+
+
+def _country_press_query_terms(last_message: str) -> list[str]:
+    geography = _extract_query_geography(last_message) or ""
+    geo_en = _GEO_ENGLISH.get(geography, geography)
+    topic = _detect_news_topic(last_message)
+    horizon = detect_recent_query_horizon(last_message)
+
+    topic_terms_map = {
+        "security": ["seguridad", "sicurezza", "cronaca", "polizia"],
+        "economy": ["economia", "mercato", "finanza"],
+        "politics": ["politica", "governo", "parlamento"],
+        "default": ["noticias", "attualita"],
+    }
+    terms: list[str] = []
+    for value in [geography, geo_en, *topic_terms_map.get(topic, topic_terms_map["default"])]:
+        cleaned = str(value or "").strip()
+        if cleaned and cleaned.lower() not in {term.lower() for term in terms}:
+            terms.append(cleaned)
+    if horizon == "week":
+        for value in ["esta semana", "week"]:
+            if value.lower() not in {term.lower() for term in terms}:
+                terms.append(value)
+    return terms
+
+
+def _build_country_press_search_query(last_message: str, domain: str, press_name: str) -> str:
+    query_terms = _country_press_query_terms(last_message)
+    query = " ".join([f"site:{domain}", *query_terms]).strip()
+    normalized_press = _strip_accents((press_name or "").lower())
+    if (
+        press_name
+        and len(press_name.split()) <= 4
+        and not any(noise in normalized_press for noise in ("deportivo", "sport", "stadio"))
+    ):
+        query = f"{query} {press_name.strip()}".strip()
+    return query
+
+
+def _build_country_press_search_queries(last_message: str, domain: str, press_name: str) -> list[str]:
+    geography = _extract_query_geography(last_message) or ""
+    geo_en = _GEO_ENGLISH.get(geography, geography)
+    topic = _detect_news_topic(last_message)
+    horizon = detect_recent_query_horizon(last_message)
+
+    variants_by_topic = {
+        "security": [
+            [geography, "sicurezza"],
+            [geography, "cronaca"],
+            [geo_en, "security"],
+            [geography, "polizia"],
+        ],
+        "economy": [
+            [geography, "economia"],
+            [geo_en, "economy"],
+            [geography, "mercato"],
+        ],
+        "politics": [
+            [geography, "politica"],
+            [geo_en, "politics"],
+            [geography, "governo"],
+        ],
+        "default": [
+            [geography, "noticias"],
+            [geo_en, "news"],
+        ],
+    }
+    variants = variants_by_topic.get(topic, variants_by_topic["default"])
+    queries: list[str] = []
+    seen: set[str] = set()
+    normalized_press = _strip_accents((press_name or "").lower())
+    short_press_name = (
+        press_name.strip()
+        if press_name
+        and len(press_name.split()) <= 4
+        and not any(noise in normalized_press for noise in ("deportivo", "sport", "stadio"))
+        else ""
+    )
+    for variant in variants:
+        parts = [f"site:{domain}", *[part for part in variant if part]]
+        if horizon == "week":
+            parts.append("week")
+        if short_press_name:
+            parts.append(short_press_name)
+        query = " ".join(str(part).strip() for part in parts if str(part).strip())
+        if query and query not in seen:
+            seen.add(query)
+            queries.append(query)
+    if not queries:
+        queries.append(_build_country_press_search_query(last_message, domain, press_name))
+    return queries
+
+
+def _build_country_press_search_invoke_args(
+    query: str,
+    domain: str,
+    *,
+    search_age_days: Optional[int],
+    query_horizon: Optional[str],
+    web_search_runtime_args: Optional[dict[str, Any]],
+    broad: bool = False,
+) -> dict[str, Any]:
+    invoke_args: dict[str, Any] = {
+        "query": query,
+        "use_cache": False,
+        **(web_search_runtime_args or {}),
+    }
+    invoke_args["allowed_domains"] = [domain]
+    if search_age_days is not None:
+        invoke_args["max_age_days"] = search_age_days
+    if not broad:
+        invoke_args["topic"] = "news"
+        if query_horizon == "today":
+            invoke_args["time_range"] = "day"
+        elif query_horizon == "week":
+            invoke_args["time_range"] = "week"
+    else:
+        invoke_args.pop("topic", None)
+        invoke_args.pop("time_range", None)
+    return invoke_args
+
+
+def _is_press_source_relevant_for_query(source: dict[str, str], last_message: str) -> bool:
+    topic = _detect_news_topic(last_message)
+    title_blob = _strip_accents(f"{source.get('title', '')} {source.get('url', '')}".lower())
+    if topic != "security":
+        return True
+    disallowed = ("deportivo", "sport", "calcio", "football", "futbol", "stadio")
+    return not any(token in title_blob for token in disallowed)
+
+
+def _filter_homepage_lines_for_query(lines: list[str], last_message: str, query_terms: list[str]) -> list[str]:
+    if not lines:
+        return []
+    topic = _detect_news_topic(last_message)
+    normalized_terms = {_strip_accents(term.lower()) for term in query_terms if len(term) >= 4}
+    topical_terms_map = {
+        "security": {
+            "seguridad", "sicurezza", "crime", "crimen", "cronaca", "polizia", "policia", "ciber", "cyber",
+            "difesa", "defensa", "migr", "attacco", "ataque", "policiales", "detenid", "arrestad",
+            "operativo", "homicidio", "asesinato", "robo", "hurto", "narco", "violencia", "sucesos",
+        },
+        "economy": {
+            "economia", "mercato", "finanza", "inflacion", "inflazione", "presupuesto",
+            "negocios", "mercados", "finanzas", "empresa", "bolsa",
+        },
+        "politics": {
+            "politica", "governo", "parlamento", "elezioni", "gobierno", "elecciones",
+            "presidente", "ministro", "congreso", "senado", "decreto", "partido",
+        },
+        "default": set(),
+    }
+    topical_terms = topical_terms_map.get(topic, set())
+    geography = _extract_query_geography(last_message) or ""
+    geo_en = _GEO_ENGLISH.get(geography, geography)
+    geo_terms = {
+        _strip_accents(term.lower())
+        for term in (geography, geo_en)
+        if term
+    }
+    geo_norm = _strip_accents(geography.lower()) if geography else ""
+    _city_map: dict[str, set[str]] = {
+        "italia": {"roma", "milan", "milano", "napoli", "palermo", "torino", "firenze", "bologna", "genova", "venezia", "sicilia"},
+        "espana": {"madrid", "barcelona", "valencia", "sevilla", "bilbao", "malaga", "zaragoza"},
+        "argentina": {"buenos aires", "cordoba", "rosario", "mendoza", "tucuman", "salta"},
+        "chile": {"santiago", "valparaiso", "concepcion"},
+        "mexico": {"ciudad de mexico", "guadalajara", "monterrey", "puebla"},
+    }
+    italian_city_terms = _city_map.get(geo_norm, set())
+    foreign_noise = {
+        "islamabad", "iran", "pakistan", "gaza", "ucrania", "ukraine", "russia",
+        "washington", "trump", "hormuz",
+    }
+    meta_phrases = (
+        "estos titulares reflejan",
+        "estos titulares destacan",
+        "estos temas reflejan",
+        "estas notas reflejan",
+        "situacion actual",
+        "temas relevantes",
+        "abordando temas",
+        "destacando eventos recientes",
+        "temas de preocupacion",
+        "en el ambito de",
+        "en italia y en el extranjero",
+    )
+    filtered: list[str] = []
+    for line in lines:
+        normalized = _strip_accents(line.lower())
+        if normalized.startswith(("aqui tienes", "el contenido proporcionado", "no se encontraron", "however,", "sin embargo", "lo siento")):
+            continue
+        if "puedes visitar el sitio web" in normalized:
+            continue
+        if any(phrase in normalized for phrase in meta_phrases):
+            continue
+        if _is_no_info_response(normalized):
+            continue
+        if topical_terms and not any(term in normalized for term in topical_terms):
+            continue
+        if foreign_noise and any(term in normalized for term in foreign_noise):
+            continue
+        if geo_terms and not any(term in normalized for term in geo_terms.union(italian_city_terms)):
+            continue
+        if normalized_terms and not any(term in normalized for term in normalized_terms.union(topical_terms)):
+            continue
+        filtered.append(line)
+    return filtered
+
+
+def _is_homepage_meta_line(line: str) -> bool:
+    normalized = _strip_accents((line or "").lower())
+    meta_patterns = (
+        "estos titulares",
+        "estos temas",
+        "estas notas",
+        "temas de preocupacion",
+        "en el ambito de",
+        "situacion actual",
+        "temas relevantes",
+        "actualidad del pais",
+        "actualidad y la cronica",
+        "en italia y en el extranjero",
+    )
+    if any(pattern in normalized for pattern in meta_patterns):
+        return True
+    if any(verb in normalized for verb in ("destacan", "reflejan", "abordan")) and any(
+        token in normalized for token in ("temas", "titulares", "notas", "ambito", "actualidad")
+    ):
+        return True
+    return False
+
+
+def _is_concrete_homepage_line(line: str) -> bool:
+    normalized = _strip_accents((line or "").lower()).strip()
+    if not normalized or _is_homepage_meta_line(normalized):
+        return False
+    if _is_no_info_response(normalized):
+        return False
+    vague_buckets = (
+        "seguridad y politica",
+        "politica y seguridad",
+        "cronica y seguridad",
+        "actualidad del pais",
+        "actualidad y la cronica",
+        "en italia y en el extranjero",
+    )
+    if any(bucket in normalized for bucket in vague_buckets):
+        return False
+    if "se discute" in normalized and not re.search(r"\b\d+\b", normalized):
+        return False
+    if '"' in line or ":" in line:
+        return True
+    if re.search(r"\b\d+\b", normalized):
+        return True
+    if re.search(r"\b(?:roma|milano|napoli|palermo|torino|firenze|bologna|genova|venezia|sicilia)\b", normalized):
+        return True
+    if re.search(
+        r"\b(?:detenido|detenida|murio|murieron|accidente|ataque|operativo|decreto|arresto|investigacion|polizia|policia|ciberataque|explosion|incendio|tribunal|condena|allanamiento|control(?:es)?|medida(?:s)?|refuerza|reporta|novedades)\b",
+        normalized,
+    ):
+        return True
+    return False
+
+
+def _normalize_homepage_line(line: str) -> str:
+    cleaned = (line or "").strip()
+    cleaned = re.sub(r"^\d+\.\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _dedupe_homepage_lines(lines: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        normalized = _normalize_homepage_line(line)
+        if not normalized:
+            continue
+        key = _strip_accents(normalized.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
+_COUNTRY_PRESS_SECTION_PATHS: dict[str, dict[str, list[tuple[str, str]]]] = {
+    # ── ITALIA ─────────────────────────────────────────────────────────────
+    "ansa.it": {
+        "security": [("/sito/notizie/cronaca/cronaca.shtml", "cronaca")],
+        "politics": [("/sito/notizie/politica/politica.shtml", "politica")],
+        "economy": [("/sito/notizie/economia/economia.shtml", "economia")],
+        "default": [("/sito/notizie/cronaca/cronaca.shtml", "cronaca")],
+    },
+    "repubblica.it": {
+        "security": [("/cronaca/", "cronaca")],
+        "politics": [("/politica/", "politica")],
+        "default": [("/cronaca/", "cronaca")],
+    },
+    "ilmessaggero.it": {
+        "security": [("/italia/", "italia"), ("/roma/", "roma")],
+        "politics": [("/politica/", "politica"), ("/italia/", "italia")],
+        "default": [("/italia/", "italia")],
+    },
+    "ilfattoquotidiano.it": {
+        "security": [("/cronaca/", "cronaca"), ("/", "homepage-cronaca")],
+        "politics": [("/politica/", "politica"), ("/", "homepage-politica")],
+        "default": [("/", "homepage")],
+    },
+    "ilfoglio.it": {
+        "security": [("/cronaca/", "cronaca"), ("/", "homepage-cronaca")],
+        "politics": [("/politica/", "politica"), ("/", "homepage-politica")],
+        "default": [("/", "homepage")],
+    },
+    "ilmanifesto.it": {
+        "security": [("/", "homepage-cronaca")],
+        "politics": [("/sezioni/politica/", "politica"), ("/", "homepage-politica")],
+        "default": [("/", "homepage")],
+    },
+    "huffingtonpost.it": {
+        "security": [("/news/cronaca/", "cronaca"), ("/", "homepage-cronaca")],
+        "politics": [("/politica/", "politica"), ("/", "homepage-politica")],
+        "default": [("/", "homepage")],
+    },
+    # ── ESPAÑA ─────────────────────────────────────────────────────────────
+    "elpais.com": {
+        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
+        "politics": [("/espana/", "españa"), ("/politica/", "política")],
+        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
+        "default": [("/espana/", "españa"), ("/actualidad/", "actualidad")],
+    },
+    "elmundo.es": {
+        "security": [("/espana/", "españa"), ("/cronica/", "crónica")],
+        "politics": [("/espana/", "españa"), ("/politica/", "política")],
+        "economy": [("/economia/", "economía"), ("/mercados/", "mercados")],
+        "default": [("/espana/", "españa")],
+    },
+    "abc.es": {
+        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
+        "politics": [("/espana/", "españa"), ("/politica/", "política")],
+        "economy": [("/economia/", "economía")],
+        "default": [("/espana/", "españa")],
+    },
+    "lavanguardia.com": {
+        "security": [("/sucesos/", "sucesos"), ("/vida/sucesos-y-tribunales/", "sucesos")],
+        "politics": [("/politica/", "política"), ("/internacional/", "internacional")],
+        "economy": [("/economia/", "economía"), ("/finanzas/", "finanzas")],
+        "default": [("/politica/", "política"), ("/vida/", "vida")],
+    },
+    "elconfidencial.com": {
+        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
+        "politics": [("/espana/", "españa"), ("/politica/", "política")],
+        "economy": [("/economia/", "economía"), ("/mercados/", "mercados")],
+        "default": [("/espana/", "españa")],
+    },
+    "20minutos.es": {
+        "security": [("/nacional/", "nacional"), ("/sociedad/", "sociedad")],
+        "politics": [("/politica/", "política"), ("/nacional/", "nacional")],
+        "economy": [("/economia/", "economía")],
+        "default": [("/nacional/", "nacional")],
+    },
+    "eldiario.es": {
+        "security": [("/sociedad/", "sociedad"), ("/espana/", "españa")],
+        "politics": [("/politica/", "política"), ("/espana/", "españa")],
+        "economy": [("/economia/", "economía")],
+        "default": [("/espana/", "españa")],
+    },
+    "publico.es": {
+        "security": [("/sociedad/", "sociedad"), ("/espana/", "españa")],
+        "politics": [("/politica/", "política"), ("/espana/", "españa")],
+        "economy": [("/economia/", "economía")],
+        "default": [("/espana/", "españa")],
+    },
+    "larazon.es": {
+        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
+        "politics": [("/espana/", "españa"), ("/politica/", "política")],
+        "default": [("/espana/", "españa")],
+    },
+    "cadenaser.com": {
+        "security": [("/noticias/nacional/", "nacional"), ("/noticias/sociedad/", "sociedad")],
+        "politics": [("/noticias/politica/", "política"), ("/noticias/nacional/", "nacional")],
+        "default": [("/noticias/", "noticias")],
+    },
+    "rtve.es": {
+        "security": [("/noticias/espana/", "españa"), ("/noticias/sociedad/", "sociedad")],
+        "politics": [("/noticias/politica/", "política"), ("/noticias/espana/", "españa")],
+        "economy": [("/noticias/economia/", "economía")],
+        "default": [("/noticias/", "noticias")],
+    },
+    # ── ARGENTINA ──────────────────────────────────────────────────────────
+    "lanacion.com.ar": {
+        "security": [("/seguridad/", "seguridad"), ("/politica/", "política")],
+        "politics": [("/politica/", "política"), ("/el-mundo/", "el-mundo")],
+        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
+        "default": [("/ultimo-momento/", "último momento"), ("/", "homepage")],
+    },
+    "infobae.com": {
+        "security": [("/sociedad/", "sociedad"), ("/politica/", "política")],
+        "politics": [("/politica/", "política"), ("/america/america-latina/", "america")],
+        "economy": [("/economia/", "economía"), ("/finanzas/", "finanzas")],
+        "default": [("/sociedad/", "sociedad"), ("/", "homepage")],
+    },
+    "pagina12.com.ar": {
+        "security": [("/secciones/el-pais/", "el-país"), ("/secciones/sociedad/", "sociedad")],
+        "politics": [("/secciones/el-pais/", "el-país"), ("/secciones/", "secciones")],
+        "economy": [("/secciones/economia/", "economía"), ("/secciones/", "secciones")],
+        "default": [("/secciones/el-pais/", "el-país")],
+    },
+    "perfil.com": {
+        "security": [("/noticias/policial/", "policial"), ("/noticias/policial.html", "policial")],
+        "politics": [("/noticias/politica/", "política"), ("/noticias/politica.html", "política")],
+        "economy": [("/noticias/economia/", "economía")],
+        "default": [("/noticias/", "noticias")],
+    },
+    "cronica.com.ar": {
+        "security": [("/categoria/policiales/", "policiales"), ("/categoria/", "noticias")],
+        "politics": [("/categoria/politica/", "política")],
+        "economy": [("/categoria/economia/", "economía")],
+        "default": [("/categoria/policiales/", "policiales")],
+    },
+    "clarin.com": {
+        "security": [("/policiales/", "policiales"), ("/sociedad/", "sociedad")],
+        "politics": [("/politica/", "política"), ("/zona/", "zona")],
+        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
+        "default": [("/ultimo-momento/", "último momento")],
+    },
+    "ambito.com": {
+        "security": [("/politica/", "política"), ("/economia/", "economía")],
+        "politics": [("/politica/", "política")],
+        "economy": [("/economia/", "economía"), ("/finanzas/", "finanzas")],
+        "default": [("/politica/", "política")],
+    },
+    "tiempoar.com.ar": {
+        "security": [("/secciones/el-pais/", "el-país"), ("/", "homepage")],
+        "politics": [("/secciones/el-pais/", "el-país")],
+        "default": [("/", "homepage")],
+    },
+    # ── CHILE ──────────────────────────────────────────────────────────────
+    "emol.com": {
+        "security": [("/noticias/nacional/", "nacional"), ("/noticias/policial/", "policial")],
+        "politics": [("/noticias/nacional/", "nacional"), ("/noticias/politica/", "política")],
+        "economy": [("/noticias/economia/", "economía")],
+        "default": [("/noticias/nacional/", "nacional")],
+    },
+    "latercera.com": {
+        "security": [("/nacional/", "nacional"), ("/politica/", "política")],
+        "politics": [("/politica/", "política"), ("/nacional/", "nacional")],
+        "economy": [("/pulso/", "pulso"), ("/negocios/", "negocios")],
+        "default": [("/nacional/", "nacional")],
+    },
+    # ── MÉXICO ─────────────────────────────────────────────────────────────
+    "eluniversal.com.mx": {
+        "security": [("/nacion/seguridad/", "seguridad"), ("/estados/", "estados")],
+        "politics": [("/nacion/politica/", "política"), ("/nacion/", "nación")],
+        "economy": [("/finanzas/", "finanzas"), ("/economia/", "economía")],
+        "default": [("/nacion/", "nación")],
+    },
+    "milenio.com": {
+        "security": [("/policia/", "policía"), ("/estados/", "estados")],
+        "politics": [("/politica/", "política"), ("/mexico/", "méxico")],
+        "economy": [("/negocios/", "negocios")],
+        "default": [("/policia/", "policía")],
+    },
+    # ── COLOMBIA ───────────────────────────────────────────────────────────
+    "eltiempo.com": {
+        "security": [("/justicia/", "justicia"), ("/colombia/", "colombia")],
+        "politics": [("/politica/", "política"), ("/colombia/", "colombia")],
+        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
+        "default": [("/colombia/", "colombia")],
+    },
+}
+
+_GENERIC_SECTION_PATHS: dict[str, list[tuple[str, str]]] = {
+    "security": [
+        ("/seguridad/", "seguridad"),
+        ("/policiales/", "policiales"),
+        ("/sociedad/", "sociedad"),
+        ("/sucesos/", "sucesos"),
+        ("/espana/", "españa"),
+        ("/nacional/", "nacional"),
+        ("/cronaca/", "cronaca"),
+        ("/", "homepage"),
+    ],
+    "politics": [
+        ("/politica/", "política"),
+        ("/espana/", "españa"),
+        ("/nacional/", "nacional"),
+        ("/gobierno/", "gobierno"),
+        ("/nacion/", "nación"),
+        ("/secciones/el-pais/", "el-país"),
+        ("/", "homepage"),
+    ],
+    "economy": [
+        ("/economia/", "economía"),
+        ("/finanzas/", "finanzas"),
+        ("/negocios/", "negocios"),
+        ("/mercados/", "mercados"),
+        ("/", "homepage"),
+    ],
+    "default": [
+        ("/noticias/", "noticias"),
+        ("/actualidad/", "actualidad"),
+        ("/ultimo-momento/", "último momento"),
+        ("/nacional/", "nacional"),
+        ("/espana/", "españa"),
+        ("/", "homepage"),
+    ],
+}
+
+_SECTION_LOCAL_LABELS = {
+    "cronaca", "italia", "roma", "politica", "interni", "economia", "mercati",
+    "seguridad", "policiales", "sociedad", "sucesos", "españa", "nacional",
+    "política", "noticias", "actualidad", "último momento",
+}
+
+
+def _build_newspaper_homepage_fetch_prompt(last_message: str, press_name: str) -> str:
+    topic = _detect_news_topic(last_message)
+    geography = _extract_query_geography(last_message) or ""
+    geo_line = f"País objetivo: {geography}. " if geography else ""
+    topic_line = {
+        "security": "Tema objetivo: seguridad, crimen, policía, ciberseguridad, migración, defensa.",
+        "politics": "Tema objetivo: política, gobierno, parlamento, elecciones, decretos.",
+        "economy": "Tema objetivo: economía, finanzas, inflación, mercado, empresas.",
+    }.get(topic, "Tema objetivo: noticias y actualidad.")
+    return (
+        f"Leé la homepage del diario {press_name}. "
+        f"{geo_line}{topic_line} "
+        "Extraé SOLO titulares o notas concretas y recientes que respondan la consulta. "
+        "Devolvé una línea por noticia, sin introducciones, sin resúmenes editoriales, sin frases meta, sin repetir líneas. "
+        "Conservá nombres propios, ciudades, fechas, números y hechos verificables. "
+        "No escribas frases como 'estos titulares destacan' o 'estos temas reflejan'. "
+        "Si no hay noticias concretas relevantes, devolvé exactamente: 'No hay noticias concretas relevantes.'\n\n"
+        f"Consulta original: {last_message}"
+    )
+
+
+def _build_newspaper_section_fetch_prompt(last_message: str, press_name: str, section_label: str) -> str:
+    topic = _detect_news_topic(last_message)
+    geography = _extract_query_geography(last_message) or ""
+    geo_line = f"País objetivo: {geography}. " if geography else ""
+    topic_line = {
+        "security": "Tema objetivo: seguridad, crimen, policía, policiales, cronaca, ciberseguridad, migración, defensa.",
+        "politics": "Tema objetivo: política, gobierno, parlamento, elecciones, decretos, coaliciones.",
+        "economy": "Tema objetivo: economía, finanzas, inflación, mercado, empresas, presupuesto.",
+    }.get(topic, "Tema objetivo: noticias y actualidad.")
+    return (
+        f"Leé la sección {section_label} del diario {press_name}. "
+        f"{geo_line}{topic_line} "
+        "Identificá TODAS las noticias distintas que encuentres en la sección (pueden ser 1, 2, 3 o más). "
+        "Por cada noticia escribí UN PÁRRAFO separado. Cada párrafo debe tener entre 2 y 5 oraciones que expliquen "
+        "claramente: qué ocurrió, quiénes están involucrados, cuándo y dónde. "
+        "Usá el suficiente detalle para que alguien que no leyó la nota original entienda qué pasó. "
+        "Separá CADA párrafo con UNA LÍNEA EN BLANCO (línea vacía entre párrafos). "
+        "No escribas títulos, subtítulos, numeración ni introducciones editoriales antes de los párrafos. "
+        "No uses frases como 'La noticia trata sobre...' o 'Este artículo informa...'. "
+        "Arrancá cada párrafo directamente con el hecho: quién hizo qué. "
+        "Preservá nombres propios, ciudades, fechas, números, cargos y datos verificables. "
+        "Si la sección no tiene noticias concretas sobre el tema, devolvé exactamente: 'No hay noticias concretas relevantes.'\n\n"
+        f"Consulta original: {last_message}"
+    )
+
+
+def _build_country_press_section_targets(domain: str, fallback_url: str, last_message: str) -> list[tuple[str, str]]:
+    topic = _detect_news_topic(last_message)
+    base = (fallback_url or f"https://{domain}/").strip() or f"https://{domain}/"
+    if not base.endswith("/"):
+        base = base + "/"
+    domain_map = _COUNTRY_PRESS_SECTION_PATHS.get(domain, {})
+    candidates = list(domain_map.get(topic) or domain_map.get("default") or [])
+    if not candidates:
+        candidates = list(_GENERIC_SECTION_PATHS.get(topic, _GENERIC_SECTION_PATHS["default"]))
+    built: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for path, label in candidates:
+        full_url = base if path == "/" else urljoin(base, path.lstrip("/"))
+        if full_url in seen:
+            continue
+        seen.add(full_url)
+        built.append((full_url, label))
+    return built[:4]
+
+
+def _classify_fetch_error(fetch_text: str) -> Optional[str]:
+    normalized = _strip_accents((fetch_text or "").lower())
+    if "no module named 'playwright'" in normalized:
+        return "missing_playwright"
+    if "404 client error" in normalized or "not found" in normalized:
+        return "not_found"
+    if "403 client error" in normalized or "forbidden" in normalized:
+        return "blocked"
+    if "nameresolutionerror" in normalized or "failed to resolve" in normalized:
+        return "dns"
+    if normalized.startswith("error al procesar la pagina web:"):
+        return "fetch_error"
+    return None
 
 
 def _build_angle_queries(last_message: str, search_age_days: Optional[int]) -> list[dict]:
@@ -1301,9 +2421,19 @@ def _score_generic_candidate(candidate: dict[str, str], query_terms: list[str], 
     # Stopword-only terms (len < 4) are excluded from this check to avoid false
     # positives on queries with no long meaningful terms.
     title_lower = candidate.get("title", "").lower()
+    snippet_lower = candidate.get("snippet", "").lower()
     meaningful_terms = [t for t in query_terms if len(t) >= 4]
     if meaningful_terms and not any(t in title_lower for t in meaningful_terms):
-        score -= 6
+        if candidate.get("source_kind") == "section_fallback" and any(t in snippet_lower for t in meaningful_terms):
+            pass
+        else:
+            score -= 6
+    if candidate.get("source_kind") == "homepage_fallback":
+        score -= 8
+    if candidate.get("source_kind") == "section_fallback":
+        score -= 3
+    if _is_hub_like_candidate(candidate):
+        score -= 12
 
     return score
 
@@ -1344,6 +2474,103 @@ def _candidate_snippet_lines(candidate: dict[str, str]) -> list[str]:
     if len(snippet.split()) < 4:
         return []
     return [snippet]
+
+
+def _is_hub_like_candidate(candidate: dict[str, str]) -> bool:
+    url = (candidate.get("url") or "").lower()
+    hit_type = (candidate.get("hit_type") or "").lower()
+    if hit_type == "hub":
+        return True
+    path = urlparse(url).path.lower().rstrip("/")
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return True
+    structurally_invalid_segments = {
+        "edizioni",
+        "editioni",
+        "dalle_sezioni_mobile.html",
+        "gli-inserti-del-foglio",
+        "conosci-i-foglianti",
+        "ultima-ora",
+    }
+    if any(segment in structurally_invalid_segments for segment in segments):
+        return True
+    if any(token in path for token in ("/edizioni/", "/dalle_sezioni_mobile", "/gli-inserti-del-foglio", "/conosci-i-foglianti", "/t/")):
+        return True
+    if any(token in path for token in ("/tag/", "/tags/", "/autori/", "/authors/", "/argomenti/", "/rubriche/")):
+        return True
+    if path.endswith(("/news.shtml", "/index.shtml", "/cronaca.shtml", "/politica.shtml", "/economia.shtml")):
+        return True
+    if segments[-1] in {"politica", "cronaca", "economia", "sport", "archive", "archivio", "topnews", "ultimaora"}:
+        return True
+    if (
+        len(segments) <= 2
+        and any(seg in {"politica", "cronaca", "economia", "sport"} for seg in segments)
+        and not any("-" in seg or "_" in seg or re.search(r"\d", seg) for seg in segments)
+    ):
+        return True
+    return False
+
+
+def _query_targets_public_safety(query: str) -> bool:
+    normalized = _strip_accents((query or "").lower())
+    signals = (
+        "seguridad",
+        "security",
+        "sicurezza",
+        "policia",
+        "police",
+        "polizia",
+        "crime",
+        "crimen",
+        "cronaca",
+        "public safety",
+        "orden publico",
+        "orden público",
+    )
+    return any(signal in normalized for signal in signals)
+
+
+def _is_tangential_vertical_candidate(candidate: dict[str, str], query: str) -> bool:
+    if not _query_targets_public_safety(query):
+        return False
+    path = urlparse(candidate.get("url", "")).path.lower()
+    title = (candidate.get("title") or "").lower()
+    blob = f"{path} {title}"
+    return any(
+        token in blob
+        for token in (
+            "/canale_motori/",
+            "/motori/",
+            "/auto/",
+            "/sicurezza-informatica",
+            "sicurezza informatica",
+            "cybersecurity",
+            "ciberseguridad",
+            "motori",
+            "automotive",
+            "sicurezza stradale",
+            "sicurezza vial",
+            "road safety",
+        )
+    )
+
+
+def _is_invalid_news_candidate(candidate: dict[str, str], query: str) -> bool:
+    return _is_hub_like_candidate(candidate) or _is_tangential_vertical_candidate(candidate, query)
+
+
+def _candidate_url_has_date(url: str) -> bool:
+    lowered = (url or "").lower()
+    if re.search(r"[/\-](\d{4})[/\-](\d{2})[/\-](\d{2})", lowered):
+        return True
+    if re.search(r"(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])", lowered):
+        return True
+    all_months = {**_MONTH_NAMES_ES, **_MONTH_NAMES_EN}
+    month_pattern = "|".join(re.escape(m) for m in all_months)
+    return bool(
+        re.search(rf"(?:({month_pattern})[- ](\d{{4}})|(\d{{4}})[- ]({month_pattern}))", lowered)
+    )
 
 
 def _strip_accents(text: str) -> str:
@@ -1424,6 +2651,113 @@ def _extract_generic_content_lines(text: str, query_terms: list[str]) -> list[st
     return result
 
 
+def _extract_section_content_lines(text: str, last_message: str, section_label: str) -> list[str]:
+    if not text:
+        return []
+    issue = _classify_fetch_error(text)
+    if issue or _is_no_info_response(text):
+        return []
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    result: list[str] = []
+    for line in lines:
+        normalized = _strip_accents(line.lower())
+        if normalized.startswith(("url:", "sources:", "http", "<<<cite_this:")):
+            continue
+        if "<<<cite_this:" in normalized:
+            continue
+        if normalized.startswith("error al procesar la pagina web"):
+            continue
+        cleaned = re.sub(r"^\s*(?:[-*•]\s+|\d+\.\s+)", "", line).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        if len(cleaned) < 12:
+            continue
+        if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", cleaned):
+            continue
+        if _is_homepage_meta_line(cleaned) or _is_no_info_response(cleaned):
+            continue
+        if re.match(r'^[\"“].+[\"”]$', cleaned) or re.match(r'^[\"“].+[\"”]\s*[-:]\s*.+$', cleaned):
+            result.append(cleaned)
+            continue
+        if re.search(
+            r"\b(?:"
+            # italiano
+            r"accoltell|omicid|arrest|morti|morto|uccis|esplos|condann|indagat|rapin|furto|blitz|nas|polizia|carabini|droga|sparator|violenza|tribunal|decreto|parlament|governo"
+            r"|"
+            # español
+            r"detenid|arrestad|operativo|homicidio|asesin|robo|hurto|narco|policial|fiscal|juzgado|imputad|sentencia|condena|presidio|carcel|prision|ministro|presidente|congreso|senado|partido|eleccion|gobierno|decreto|presupuesto|inflacion|mercado|empresa|bolsa"
+            r")\w*\b",
+            normalized,
+        ):
+            result.append(cleaned)
+            continue
+        if '"' in cleaned or ":" in cleaned:
+            result.append(cleaned)
+            continue
+    if result:
+        return _dedupe_homepage_lines(result)
+    compact = " ".join(lines)
+    extracted = []
+    for match in re.finditer(r'(?:^|\s)(?:[-*•]|\d+\.)\s+([^-\n].{12,220}?)(?=(?:\s(?:[-*•]|\d+\.)\s+)|$)', compact):
+        cleaned = match.group(1).strip()
+        if cleaned and not _is_homepage_meta_line(cleaned) and not _is_no_info_response(cleaned):
+            extracted.append(cleaned)
+    return _dedupe_homepage_lines(extracted)
+
+
+def _filter_section_lines_for_query(lines: list[str], last_message: str, section_label: str) -> list[str]:
+    if not lines:
+        return []
+    topic = _detect_news_topic(last_message)
+    topical_terms_map = {
+        "security": {
+            "seguridad", "sicurezza", "crime", "crimen", "cronaca", "polizia", "policia", "ciber", "cyber",
+            "difesa", "defensa", "migr", "attacco", "ataque", "omicid", "arrest", "esplos", "accoltell",
+            "policiales", "detenid", "arrestad", "operativo", "homicidio", "asesinato", "robo", "narco",
+            "violencia", "sucesos", "delito", "fiscal", "tribunal",
+        },
+        "economy": {
+            "economia", "mercato", "finanza", "inflacion", "inflazione", "presupuesto",
+            "negocios", "mercados", "finanzas", "empresa", "bolsa", "pib", "deuda",
+        },
+        "politics": {
+            "politica", "governo", "parlamento", "elezioni", "coalizion", "decreto",
+            "gobierno", "elecciones", "presidente", "ministro", "congreso", "senado", "partido",
+        },
+        "default": set(),
+    }
+    topical_terms = topical_terms_map.get(topic, set())
+    geography = _extract_query_geography(last_message) or ""
+    geography_normalized = _strip_accents(geography.lower()) if geography else ""
+    _city_map: dict[str, set[str]] = {
+        "italia": {"roma", "milan", "milano", "napoli", "palermo", "torino", "firenze", "bologna", "genova", "venezia", "sicilia"},
+        "espana": {"madrid", "barcelona", "valencia", "sevilla", "bilbao", "malaga", "zaragoza"},
+        "argentina": {"buenos aires", "cordoba", "rosario", "mendoza", "tucuman"},
+        "chile": {"santiago", "valparaiso", "concepcion"},
+        "mexico": {"ciudad de mexico", "guadalajara", "monterrey", "puebla"},
+    }
+    italian_city_terms = _city_map.get(geography_normalized, set())
+    section_label_normalized = _strip_accents(section_label.lower())
+    is_local_section = section_label_normalized in _SECTION_LOCAL_LABELS or "homepage" in section_label_normalized
+    filtered: list[str] = []
+    for line in lines:
+        normalized = _strip_accents(line.lower())
+        if _is_homepage_meta_line(normalized) or _is_no_info_response(normalized):
+            continue
+        if any(term in normalized for term in ("islamabad", "iran", "pakistan", "gaza", "ukraine", "ucrania", "russia", "washington", "trump")):
+            continue
+        if topic == "security":
+            has_security_signal = any(term in normalized for term in topical_terms) or _is_concrete_homepage_line(line)
+            if not has_security_signal:
+                continue
+        elif topical_terms and not any(term in normalized for term in topical_terms):
+            continue
+        if geography_normalized == "italia" and not is_local_section:
+            if not any(term in normalized for term in italian_city_terms.union({"italia", "italy", "italiano", "italiana"})):
+                continue
+        filtered.append(line)
+    return _dedupe_homepage_lines(filtered)
+
+
 _NO_INFO_RE = re.compile(
     # Pattern A: "no/sin + verb + noticias/información/news/contenido"
     # Catches: "no proporciona noticias", "no incluye noticias recientes", "no hay noticias"
@@ -1482,6 +2816,148 @@ def _extract_sources_from_text(text: str) -> list[dict[str, str]]:
     return sources
 
 
+def _slugify_periodicos_label(value: str) -> str:
+    normalized = _strip_accents((value or "").lower())
+    normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    return normalized
+
+
+def _extract_periodicos_directory_links(html: str, *, base_url: str) -> list[dict[str, str]]:
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    links: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        absolute = href if href.startswith("http") else f"{base_url.rstrip('/')}/{href.lstrip('/')}"
+        absolute = re.sub(r"(?<!:)/{2,}", "/", absolute.replace(":/", "://"))
+        title = " ".join(anchor.get_text(" ", strip=True).split())
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        links.append({"title": title, "url": absolute})
+    return links
+
+
+def _match_periodicos_directory_url(
+    links: list[dict[str, str]],
+    *,
+    expected_slug: str,
+    must_contain_slug: Optional[str] = None,
+) -> Optional[str]:
+    normalized_expected = _slugify_periodicos_label(expected_slug)
+    normalized_must = _slugify_periodicos_label(must_contain_slug or "")
+
+    for link in links:
+        url = link.get("url", "").strip()
+        title = link.get("title", "").strip()
+        if "periodicos.com.ar/periodicos/" not in url:
+            continue
+        normalized_url = _slugify_periodicos_label(urlparse(url).path)
+        normalized_title = _slugify_periodicos_label(title)
+        haystack = f"{normalized_url} {normalized_title}".strip()
+        if normalized_expected and normalized_expected not in haystack:
+            continue
+        if normalized_must and normalized_must not in normalized_url:
+            continue
+        return url
+    return None
+
+
+async def _discover_country_press_sources_via_directory(
+    geography: str,
+) -> tuple[list[str], list[str], list[dict[str, str]]]:
+    continent_slug = _PERIODICOS_CONTINENT_SLUG_BY_COUNTRY.get(geography)
+    if not continent_slug:
+        _web_debug("country_press.directory.skip", geography=geography, reason="missing_continent_slug")
+        return [], [], []
+
+    country_slug = _slugify_periodicos_label(geography)
+    directory_root_url = "https://periodicos.com.ar/periodicos/"
+    current_url = directory_root_url
+    current_stage = "root"
+
+    try:
+        root_html = _debug_periodicos_fetch(directory_root_url, stage=current_stage).decode("utf-8", errors="ignore")
+        root_links = _extract_periodicos_directory_links(root_html, base_url="https://periodicos.com.ar")
+        continent_url = _match_periodicos_directory_url(root_links, expected_slug=continent_slug)
+        if not continent_url:
+            continent_url = f"{directory_root_url}{continent_slug}/"
+
+        current_url = continent_url
+        current_stage = "continent"
+        continent_html = _debug_periodicos_fetch(continent_url, stage=current_stage).decode("utf-8", errors="ignore")
+        continent_links = _extract_periodicos_directory_links(continent_html, base_url="https://periodicos.com.ar")
+        country_url = _match_periodicos_directory_url(
+            continent_links,
+            expected_slug=country_slug,
+            must_contain_slug=continent_slug,
+        )
+        if not country_url:
+            country_url = f"{continent_url.rstrip('/')}/{country_slug}/"
+
+        current_url = country_url
+        current_stage = "country"
+        country_html = _debug_periodicos_fetch(country_url, stage=current_stage).decode("utf-8", errors="ignore")
+    except Exception as exc:
+        _web_debug(
+            "country_press.directory.exception",
+            geography=geography,
+            stage=current_stage,
+            url=current_url,
+            error=repr(exc),
+        )
+        return [], [], []
+
+    country_links = _extract_periodicos_directory_links(country_html, base_url="https://periodicos.com.ar")
+    sources: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for source in country_links:
+        url = source.get("url", "").strip()
+        if not url or "periodicos.com.ar" in url:
+            continue
+        hostname = (urlparse(url).hostname or "").lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        if not hostname or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        sources.append({
+            "title": source.get("title") or hostname,
+            "url": url,
+            "domain": hostname,
+        })
+
+    domains: list[str] = []
+    titles: list[str] = []
+    seen_domains: set[str] = set()
+    for source in sources:
+        hostname = source.get("domain", "")
+        if hostname and hostname not in seen_domains:
+            seen_domains.add(hostname)
+            domains.append(hostname)
+            titles.append(source.get("title") or hostname)
+        if len(domains) >= 10:
+            break
+
+    _web_debug(
+        "country_press.directory.result",
+        geography=geography,
+        continent_slug=continent_slug,
+        country_slug=country_slug,
+        source_count=len(sources),
+        domains=domains,
+    )
+    return domains, titles, sources
+
+
 def _extract_country_press_sources(text: str) -> list[dict[str, str]]:
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -1505,18 +2981,33 @@ async def _discover_country_press_sources(
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> tuple[list[str], list[str]]:
     if not query_source_group or not source_terms:
+        _web_debug("country_press.discovery.skip", query_source_group=query_source_group, source_terms=source_terms)
+        _country_press_strategy_cache_set(query_source_group, source_terms, "none")
         return [], []
 
     cached = _country_press_cache_get(query_source_group, source_terms)
     if cached is not None:
+        _country_press_strategy_cache_set(query_source_group, source_terms, "cache")
+        _web_debug("country_press.discovery.cache_hit", query_source_group=query_source_group, source_terms=source_terms, domains=cached[0], titles=cached[1])
+        _web_debug("country_press.discovery.local_strategy_selected", query_source_group=query_source_group, strategy="cache", domains=cached[0])
         return cached
 
     from tools import search_web
     from tools.web_tools import fetch_web_page
 
+    geography = _extract_query_geography(last_message)
+    if geography:
+        directory_domains, directory_titles, directory_sources = await _discover_country_press_sources_via_directory(geography)
+        if directory_domains:
+            _country_press_source_cache_set(query_source_group, source_terms, directory_sources)
+            _country_press_cache_set(query_source_group, source_terms, directory_domains, directory_titles)
+            _country_press_strategy_cache_set(query_source_group, source_terms, "directory")
+            _web_debug("country_press.discovery.local_strategy_selected", query_source_group=query_source_group, strategy="directory", domains=directory_domains)
+            return directory_domains, directory_titles
+
     lookup_terms = [term for term in source_terms if len(term) >= 3][:4]
     if not lookup_terms:
-        return [], []
+        lookup_terms = [query_source_group]
 
     lookup_query = " ".join([
         'site:periodicos.com.ar',
@@ -1540,6 +3031,12 @@ async def _discover_country_press_sources(
     )
     if not isinstance(lookup_text, str):
         lookup_text = str(lookup_text)
+    _web_debug(
+        "country_press.discovery.lookup",
+        query=lookup_query,
+        lookup_args=lookup_args,
+        lookup_preview=lookup_text[:500],
+    )
 
     directory_urls = [
         source.get("url", "")
@@ -1625,8 +3122,42 @@ async def _discover_country_press_sources(
 
     domains = domains[:10]
     titles = titles[:10]
+    if not domains:
+        policy_sources = _build_policy_country_press_sources(query_source_group)
+        if policy_sources:
+            for source in policy_sources:
+                hostname = source.get("domain", "").strip().lower()
+                title = (source.get("title") or hostname).strip()
+                if hostname and hostname not in seen_domains:
+                    seen_domains.add(hostname)
+                    domains.append(hostname)
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    titles.append(title)
+                if source.get("url") and source.get("url") not in seen_urls:
+                    seen_urls.add(source["url"])
+                    discovered_sources.append(source)
+            domains = domains[:10]
+            titles = titles[:10]
+            _web_debug(
+                "country_press.discovery.policy_fallback",
+                query_source_group=query_source_group,
+                geography=geography,
+                domains=domains,
+            )
+    _web_debug(
+        "country_press.discovery.result",
+        query_source_group=query_source_group,
+        source_terms=source_terms,
+        domains=domains,
+        titles=titles,
+        discovered_count=len(discovered_sources),
+    )
     _country_press_source_cache_set(query_source_group, source_terms, discovered_sources)
     _country_press_cache_set(query_source_group, source_terms, domains, titles)
+    _country_press_strategy_cache_set(query_source_group, source_terms, "lookup" if domains else "none")
+    if domains:
+        _web_debug("country_press.discovery.local_strategy_selected", query_source_group=query_source_group, strategy="lookup", domains=domains)
     return domains, titles
 
 
@@ -1649,11 +3180,18 @@ async def _run_country_press_search_candidates(
         web_search_runtime_args,
     )
     if not country_press_domains:
+        _web_debug(
+            "country_press.search.no_domains",
+            query=last_message,
+            query_source_group=query_source_group,
+            source_terms=source_terms,
+        )
         return [], ""
 
     loop = asyncio.get_running_loop()
     combined_search_text: list[str] = []
     raw_candidates: list[dict[str, str]] = []
+    dynamic_fetch_available: Optional[bool] = None
     country_press_sources = _country_press_source_cache_get(query_source_group, source_terms)
     sources_by_domain: dict[str, dict[str, str]] = {}
     for source in country_press_sources:
@@ -1664,82 +3202,361 @@ async def _run_country_press_search_candidates(
         if hostname and hostname not in sources_by_domain:
             sources_by_domain[hostname] = source
 
-    max_targets = min(4, len(country_press_domains))
-    for idx in range(max_targets):
-        domain = country_press_domains[idx]
+    relevant_targets: list[tuple[str, str]] = []
+    for idx, domain in enumerate(country_press_domains):
         press_name = country_press_names[idx] if idx < len(country_press_names) else domain
-        query_parts = [
-            f"site:{domain}",
-            last_message.strip(),
-        ]
-        if press_name:
-            press_name_lower = press_name.strip().lower()
-            if press_name_lower and press_name_lower not in last_message.lower():
-                query_parts.append(press_name.strip())
-        if _is_recent_web_information_query(last_message):
-            query_parts.append("noticias")
-        query = " ".join(part for part in query_parts if part).strip()
-        invoke_args: dict[str, Any] = {
-            "query": query,
-            "use_cache": False,
-            **(web_search_runtime_args or {}),
-        }
-        invoke_args["allowed_domains"] = [domain]
-        if search_age_days is not None:
-            invoke_args["max_age_days"] = search_age_days
-        if _is_recent_web_information_query(last_message):
-            invoke_args["topic"] = "news"
-            if query_horizon == "today":
-                invoke_args["time_range"] = "day"
-            elif query_horizon == "week":
-                invoke_args["time_range"] = "week"
-        try:
-            search_text = await loop.run_in_executor(
-                None,
-                lambda q=invoke_args: search_web.invoke(q),
-            )
-        except Exception:
+        source_meta = sources_by_domain.get(domain, {"title": press_name, "url": _default_press_homepage_url(domain)})
+        if not _is_press_source_relevant_for_query(source_meta, last_message):
+            _web_debug("country_press.search.source_skipped", domain=domain, press_name=press_name, reason="irrelevant_for_query")
             continue
-        if not isinstance(search_text, str):
-            search_text = str(search_text)
-        combined_search_text.append(search_text)
-        diary_candidates = [
-            c for c in _extract_generic_search_candidates(search_text)
-            if not _is_non_news_candidate(c)
-        ]
+        relevant_targets.append((domain, press_name))
+        if len(relevant_targets) >= 8:
+            break
+
+    for domain, press_name in relevant_targets:
+        all_diary_candidates: list[dict[str, str]] = []
+        domain_search_texts: list[str] = []
+        queries = _build_country_press_search_queries(last_message, domain, press_name)
+        for query in queries:
+            query_attempts = [
+                ("news", _build_country_press_search_invoke_args(
+                    query,
+                    domain,
+                    search_age_days=search_age_days,
+                    query_horizon=query_horizon,
+                    web_search_runtime_args=web_search_runtime_args,
+                    broad=False,
+                )),
+                ("general", _build_country_press_search_invoke_args(
+                    query,
+                    domain,
+                    search_age_days=search_age_days,
+                    query_horizon=query_horizon,
+                    web_search_runtime_args=web_search_runtime_args,
+                    broad=True,
+                )),
+            ]
+            for attempt_label, invoke_args in query_attempts:
+                try:
+                    search_text = await loop.run_in_executor(
+                        None,
+                        lambda q=invoke_args: search_web.invoke(q),
+                    )
+                except Exception:
+                    _web_debug("country_press.search.exception", domain=domain, query=query, attempt=attempt_label)
+                    continue
+                if not isinstance(search_text, str):
+                    search_text = str(search_text)
+                domain_search_texts.append(search_text)
+                combined_search_text.append(search_text)
+                diary_candidates = [
+                    c for c in _extract_generic_search_candidates(search_text)
+                    if not _is_non_news_candidate(c)
+                ]
+                all_diary_candidates.extend(diary_candidates)
+                article_candidates = [c for c in diary_candidates if _is_specific_article_hit(c)]
+                _web_debug(
+                    "country_press.search.domain_result",
+                    domain=domain,
+                    press_name=press_name,
+                    query=query,
+                    attempt=attempt_label,
+                    invoke_args=invoke_args,
+                    candidate_count=len(diary_candidates),
+                    article_candidate_count=len(article_candidates),
+                    search_preview=search_text[:500],
+                )
+                if article_candidates or diary_candidates:
+                    break
+            if any(_is_specific_article_hit(c) for c in all_diary_candidates):
+                break
+
+        diary_candidates = _dedup_candidates_by_event(all_diary_candidates, query_terms) if all_diary_candidates else []
+        diary_candidates = [c for c in diary_candidates if not _is_invalid_news_candidate(c, last_message)]
+        if query_horizon == "week":
+            url_age_threshold = search_age_days or 14
+            recent_diary_candidates = [
+                c for c in diary_candidates
+                if _candidate_url_is_recent(c.get("url", ""), url_age_threshold)
+            ]
+            strict_recent_candidates = [
+                c for c in recent_diary_candidates
+                if _candidate_url_has_date(c.get("url", "")) or not _is_invalid_news_candidate(c, last_message)
+            ]
+            article_recent_candidates = [
+                c for c in strict_recent_candidates
+                if _is_specific_article_hit(c) and not _is_invalid_news_candidate(c, last_message)
+            ]
+            _web_debug(
+                "country_press.search.week_filter",
+                domain=domain,
+                deduped_candidate_count=len(diary_candidates),
+                recent_candidate_count=len(recent_diary_candidates),
+                strict_recent_candidate_count=len(strict_recent_candidates),
+                article_recent_candidate_count=len(article_recent_candidates),
+                recent_urls=[c.get("url", "") for c in strict_recent_candidates],
+            )
+            if article_recent_candidates:
+                diary_candidates = article_recent_candidates
+            else:
+                diary_candidates = [c for c in strict_recent_candidates if not _is_invalid_news_candidate(c, last_message)]
         article_candidates = [c for c in diary_candidates if _is_specific_article_hit(c)]
         if article_candidates:
             raw_candidates.extend(article_candidates)
         else:
             raw_candidates.extend(diary_candidates)
-            if not diary_candidates or search_text.startswith("Error en búsqueda:"):
-                fallback_source = sources_by_domain.get(domain)
+            combined_domain_text = "\n".join(domain_search_texts)
+            if not diary_candidates or combined_domain_text.startswith("Error en búsqueda:") or "No results found." in combined_domain_text:
+                fallback_source = sources_by_domain.get(
+                    domain,
+                    {"title": press_name, "url": _default_press_homepage_url(domain)},
+                )
                 fallback_url = (fallback_source or {}).get("url", "").strip()
                 if fallback_url:
+                    homepage_prompt = _build_newspaper_homepage_fetch_prompt(last_message, fallback_source.get("title") or domain)
                     try:
                         fetched_home = await fetch_web_page(
                             url=fallback_url,
-                            prompt=(
-                                "Extraé titulares y notas recientes relacionadas con seguridad, política, "
-                                "crónica o actualidad del diario. Devolvé solo texto útil para una búsqueda local."
-                            ),
+                            prompt=homepage_prompt,
                             use_dynamic=False,
                         )
                     except Exception:
                         fetched_home = ""
                     if not isinstance(fetched_home, str):
                         fetched_home = str(fetched_home)
-                    homepage_lines = _extract_generic_content_lines(fetched_home, query_terms)
-                    if homepage_lines:
+                    homepage_lines = _filter_homepage_lines_for_query(
+                        _extract_generic_content_lines(fetched_home, query_terms),
+                        last_message,
+                        query_terms,
+                    )
+                    homepage_lines = _dedupe_homepage_lines(homepage_lines)
+                    if not homepage_lines and dynamic_fetch_available is not False:
+                        try:
+                            _web_debug(
+                                "country_press.search.homepage_retry_dynamic",
+                                domain=domain,
+                                fallback_url=fallback_url,
+                            )
+                            fetched_home_dynamic = await fetch_web_page(
+                                url=fallback_url,
+                                prompt=homepage_prompt,
+                                use_dynamic=True,
+                            )
+                        except Exception:
+                            fetched_home_dynamic = ""
+                        if not isinstance(fetched_home_dynamic, str):
+                            fetched_home_dynamic = str(fetched_home_dynamic)
+                        dynamic_issue = _classify_fetch_error(fetched_home_dynamic)
+                        if dynamic_issue == "missing_playwright":
+                            dynamic_fetch_available = False
+                            _web_debug("country_press.search.dynamic_unavailable", reason="missing_playwright", domain=domain)
+                        homepage_lines = _filter_homepage_lines_for_query(
+                            _extract_generic_content_lines(fetched_home_dynamic, query_terms),
+                            last_message,
+                            query_terms,
+                        )
+                        homepage_lines = _dedupe_homepage_lines(homepage_lines)
+                    section_candidates: list[dict[str, str]] = []
+                    for section_url, section_label in _build_country_press_section_targets(domain, fallback_url, last_message):
+                        section_prompt = _build_newspaper_section_fetch_prompt(
+                            last_message,
+                            fallback_source.get("title") or domain,
+                            section_label,
+                        )
+                        _web_debug(
+                            "country_press.search.section_fetch_start",
+                            domain=domain,
+                            section_label=section_label,
+                            section_url=section_url,
+                        )
+                        fetched_section = ""
+                        dynamic_modes = (False, True) if dynamic_fetch_available is not False else (False,)
+                        for use_dynamic in dynamic_modes:
+                            try:
+                                fetched_section = await fetch_web_page(
+                                    url=section_url,
+                                    prompt=section_prompt,
+                                    use_dynamic=use_dynamic,
+                                )
+                            except Exception:
+                                fetched_section = ""
+                            if not isinstance(fetched_section, str):
+                                fetched_section = str(fetched_section)
+                            _web_debug(
+                                "country_press.search.section_fetch_result",
+                                domain=domain,
+                                section_label=section_label,
+                                section_url=section_url,
+                                use_dynamic=use_dynamic,
+                                content_length=len(fetched_section or ""),
+                                preview=(fetched_section or "")[:500],
+                            )
+                            fetch_issue = _classify_fetch_error(fetched_section)
+                            if fetch_issue == "missing_playwright":
+                                dynamic_fetch_available = False
+                                _web_debug("country_press.search.dynamic_unavailable", reason="missing_playwright", domain=domain)
+                            elif fetch_issue in {"not_found", "dns", "fetch_error"}:
+                                _web_debug(
+                                    "country_press.search.section_unavailable",
+                                    domain=domain,
+                                    section_label=section_label,
+                                    section_url=section_url,
+                                    use_dynamic=use_dynamic,
+                                    reason=fetch_issue,
+                                )
+                            elif fetch_issue == "blocked":
+                                _web_debug(
+                                    "country_press.search.section_blocked",
+                                    domain=domain,
+                                    section_label=section_label,
+                                    section_url=section_url,
+                                    use_dynamic=use_dynamic,
+                                    reason=fetch_issue,
+                                )
+                            extracted_section_lines = _extract_section_content_lines(
+                                fetched_section,
+                                last_message,
+                                section_label,
+                            )
+                            _web_debug(
+                                "country_press.search.section_lines_extracted",
+                                domain=domain,
+                                section_label=section_label,
+                                section_url=section_url,
+                                use_dynamic=use_dynamic,
+                                raw_line_count=len(extracted_section_lines),
+                                raw_lines=extracted_section_lines[:5],
+                            )
+                            section_lines = _filter_section_lines_for_query(
+                                extracted_section_lines,
+                                last_message,
+                                section_label,
+                            )
+                            section_lines = _dedupe_homepage_lines(section_lines)
+                            _web_debug(
+                                "country_press.search.section_lines_filtered",
+                                domain=domain,
+                                section_label=section_label,
+                                section_url=section_url,
+                                use_dynamic=use_dynamic,
+                                filtered_count=len(section_lines),
+                                filtered_lines=section_lines[:5],
+                            )
+                            if not fetched_section.strip():
+                                _web_debug(
+                                    "country_press.search.section_empty",
+                                    domain=domain,
+                                    section_label=section_label,
+                                    section_url=section_url,
+                                    use_dynamic=use_dynamic,
+                                    reason="empty_fetch",
+                                )
+                            elif _is_no_info_response(fetched_section):
+                                _web_debug(
+                                    "country_press.search.section_empty",
+                                    domain=domain,
+                                    section_label=section_label,
+                                    section_url=section_url,
+                                    use_dynamic=use_dynamic,
+                                    reason="no_info_response",
+                                )
+                            if any(_is_homepage_meta_line(line) for line in section_lines):
+                                _web_debug(
+                                    "country_press.search.section_rejected_meta",
+                                    domain=domain,
+                                    section_label=section_label,
+                                    section_url=section_url,
+                                    use_dynamic=use_dynamic,
+                                    section_lines=section_lines[:5],
+                                )
+                                section_lines = []
+                            else:
+                                section_lines = [line for line in section_lines if _is_concrete_homepage_line(line)]
+                                if extracted_section_lines and not section_lines:
+                                    _web_debug(
+                                        "country_press.search.section_rejected_non_concrete",
+                                        domain=domain,
+                                        section_label=section_label,
+                                        section_url=section_url,
+                                        use_dynamic=use_dynamic,
+                                        raw_lines=extracted_section_lines[:5],
+                                    )
+                            if section_lines:
+                                _web_debug(
+                                    "country_press.search.section_fallback",
+                                    domain=domain,
+                                    section_label=section_label,
+                                    section_url=section_url,
+                                    use_dynamic=use_dynamic,
+                                    section_lines=section_lines[:5],
+                                )
+                                section_candidates.append({
+                                    "title": f"{fallback_source.get('title') or domain} — {section_label}",
+                                    "url": section_url,
+                                    "snippet": " ".join(section_lines[:3]),
+                                    "source_kind": "section_fallback",
+                                })
+                                break
+                        if len(section_candidates) >= 2:
+                            break
+                    if section_candidates:
+                        raw_candidates.extend(section_candidates)
+                    elif homepage_lines:
+                        if any(_is_homepage_meta_line(line) for line in homepage_lines):
+                            _web_debug(
+                                "country_press.search.homepage_rejected_meta",
+                                domain=domain,
+                                fallback_url=fallback_url,
+                                homepage_lines=homepage_lines[:5],
+                            )
+                            homepage_lines = []
+                        else:
+                            homepage_lines = [line for line in homepage_lines if _is_concrete_homepage_line(line)]
+                            if not homepage_lines:
+                                _web_debug(
+                                    "country_press.search.homepage_rejected_non_concrete",
+                                    domain=domain,
+                                    fallback_url=fallback_url,
+                                )
+                    if not section_candidates and homepage_lines:
+                        _web_debug(
+                            "country_press.search.homepage_fallback",
+                            domain=domain,
+                            fallback_url=fallback_url,
+                            homepage_lines=homepage_lines[:5],
+                        )
                         raw_candidates.append({
                             "title": fallback_source.get("title") or domain,
                             "url": fallback_url,
                             "snippet": " ".join(homepage_lines[:3]),
+                            "source_kind": "homepage_fallback",
                         })
 
     ranked_candidates = _rank_candidates_by_source_policy(raw_candidates, query_terms, query_source_group)
+    ranked_candidates = [
+        c for c in ranked_candidates
+        if (
+            c.get("source_kind") in {"homepage_fallback", "section_fallback"}
+            or not _is_invalid_news_candidate(c, last_message)
+        )
+    ]
     diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)[:8]
-    return diverse_candidates, "\n".join(combined_search_text)
+    _web_debug(
+        "country_press.search.final",
+        raw_candidate_count=len(raw_candidates),
+        ranked_candidate_count=len(ranked_candidates),
+        diverse_candidate_count=len(diverse_candidates),
+        diverse_urls=[c.get("url", "") for c in diverse_candidates],
+    )
+    combined_search_entries: list[str] = []
+    seen_combined_entries: set[str] = set()
+    for entry in combined_search_text:
+        normalized_entry = (entry or "").strip()
+        if not normalized_entry or normalized_entry in seen_combined_entries:
+            continue
+        seen_combined_entries.add(normalized_entry)
+        combined_search_entries.append(normalized_entry)
+    return diverse_candidates, "\n".join(combined_search_entries)
 
 
 def _build_generic_fetch_prompt(query: str) -> str:
@@ -1791,8 +3608,25 @@ async def _run_week_search_candidates(
             c for c in country_press_candidates
             if _candidate_url_is_recent(c.get("url", ""), url_age_threshold)
         ]
+        _web_debug(
+            "week_search.country_press",
+            candidate_count=len(country_press_candidates),
+            filtered_candidate_count=len(filtered_candidates),
+            url_age_threshold=url_age_threshold,
+            urls=[c.get("url", "") for c in filtered_candidates[:8]],
+        )
         if filtered_candidates:
             return filtered_candidates[:8], country_press_search_text
+
+    local_source_strategy = _country_press_strategy_cache_get(query_source_group, source_terms)
+    if query_source_group and local_source_strategy in {"cache", "directory", "policy", "lookup"}:
+        _web_debug(
+            "week_search.global_skipped_no_local_sources",
+            query=last_message,
+            query_source_group=query_source_group,
+            local_source_strategy=local_source_strategy,
+        )
+        return [], country_press_search_text
 
     from tools import search_web
 
@@ -1812,9 +3646,20 @@ async def _run_week_search_candidates(
         c for c in _extract_generic_search_candidates(search_text)
         if not _is_non_news_candidate(c)
         and _candidate_url_is_recent(c.get("url", ""), url_age_threshold)
+        and not _is_invalid_news_candidate(c, last_message)
     ]
     ranked_candidates = _rank_candidates_by_source_policy(candidates, query_terms, query_source_group)
     diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)[:8]
+    _web_debug(
+        "week_search.generic",
+        invoke_args=search_invoke_args,
+        url_age_threshold=url_age_threshold,
+        extracted_candidate_count=len(candidates),
+        ranked_candidate_count=len(ranked_candidates),
+        diverse_candidate_count=len(diverse_candidates),
+        search_preview=search_text[:500],
+        diverse_urls=[c.get("url", "") for c in diverse_candidates],
+    )
 
     return diverse_candidates, search_text
 
@@ -1833,7 +3678,7 @@ async def _fetch_web_page_follow_redirect(url: str, prompt: str, *, use_dynamic:
     return result
 
 
-async def _run_generic_web_search_fetch(
+async def _run_generic_web_search_strategy_impl(
     last_message: str,
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
@@ -1867,6 +3712,8 @@ async def _run_generic_web_search_fetch(
     search_age_days: Optional[int] = None
     if query_horizon == "week":
         search_age_days = 14
+    elif query_horizon == "month":
+        search_age_days = 45
     elif _is_recent_web_information_query(last_message):
         search_age_days = 30
 
@@ -1876,6 +3723,17 @@ async def _run_generic_web_search_fetch(
         diverse_candidates, search_text = await _run_week_search_candidates(
             last_message, search_age_days, query_terms, query_source_group, web_search_runtime_args
         )
+        local_source_strategy = _country_press_strategy_cache_get(query_source_group, source_terms)
+        _web_debug(
+            "generic_fetch.week_candidates",
+            query=last_message,
+            search_age_days=search_age_days,
+            candidate_count=len(diverse_candidates),
+            local_source_strategy=local_source_strategy,
+            urls=[c.get("url", "") for c in diverse_candidates],
+        )
+        if query_source_group and not diverse_candidates and local_source_strategy in {"cache", "directory", "policy", "lookup"}:
+            return _build_no_local_sources_response(last_message)
     else:
         country_press_domains, country_press_names = await _discover_country_press_sources(
             last_message,
@@ -1904,12 +3762,25 @@ async def _run_generic_web_search_fetch(
 
         candidates = _extract_generic_search_candidates(search_text)
         ranked_candidates = _rank_candidates_by_source_policy(
-            [c for c in candidates if not _is_non_news_candidate(c)],
+            [
+                c for c in candidates
+                if not _is_non_news_candidate(c)
+                and not _is_invalid_news_candidate(c, last_message)
+            ],
             query_terms,
             query_source_group,
         )[:8]
 
         diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)
+        _web_debug(
+            "generic_fetch.initial_search",
+            query=last_message,
+            invoke_args=search_invoke_args,
+            candidate_count=len(candidates),
+            ranked_candidate_count=len(ranked_candidates),
+            diverse_candidate_count=len(diverse_candidates),
+            search_preview=search_text[:500],
+        )
 
         # Run second search if fewer than 3 distinct events found
         if len(diverse_candidates) < 3:
@@ -1930,15 +3801,34 @@ async def _run_generic_web_search_fetch(
             )
             if not isinstance(alt_search_text, str):
                 alt_search_text = str(alt_search_text)
-            alt_candidates = [c for c in _extract_generic_search_candidates(alt_search_text) if not _is_non_news_candidate(c)]
+            alt_candidates = [
+                c for c in _extract_generic_search_candidates(alt_search_text)
+                if not _is_non_news_candidate(c)
+                and not _is_invalid_news_candidate(c, last_message)
+            ]
             for c in _rank_candidates_by_source_policy(alt_candidates, query_terms, query_source_group):
                 if len(diverse_candidates) >= 4:
                     break
                 if not any(_same_event(c, d, query_terms) for d in diverse_candidates):
                     diverse_candidates.append(c)
             search_text = search_text + "\n" + alt_search_text
+            _web_debug(
+                "generic_fetch.alt_search",
+                query=alt_invoke_args["query"],
+                invoke_args=alt_invoke_args,
+                alt_candidate_count=len(alt_candidates),
+                diverse_candidate_count=len(diverse_candidates),
+                alt_preview=alt_search_text[:500],
+            )
 
     ranked_candidates = diverse_candidates[:4]
+    _web_debug(
+        "generic_fetch.ranked_candidates",
+        query=last_message,
+        query_horizon=query_horizon,
+        ranked_candidate_count=len(ranked_candidates),
+        urls=[c.get("url", "") for c in ranked_candidates],
+    )
 
     # For week queries: hybrid approach —
     # 1. Fetch specific article URLs (non-hub) without dynamic JS (faster, avoids hallucination)
@@ -2018,6 +3908,14 @@ async def _run_generic_web_search_fetch(
                 if from_snippet:
                     week_snippet_sources.append({"title": title, "url": url})
 
+        _web_debug(
+            "generic_fetch.week_entries",
+            entry_count=len(week_entry_lines),
+            snippet_count=len(week_snippet_lines),
+            entry_sources=week_entry_sources,
+            snippet_sources=week_snippet_sources,
+        )
+
         if len(week_entry_lines) >= 2:
             # Format bullets directly — each fetched entry is already LLM-processed.
             # Bypassing _synthesize_search_summary avoids the LLM merging distinct articles.
@@ -2070,11 +3968,23 @@ async def _run_generic_web_search_fetch(
     if not ranked_candidates:
         search_lines = _extract_generic_content_lines(search_text, query_terms)
         if not search_lines:
+            _web_debug(
+                "generic_fetch.no_ranked_candidates",
+                query=last_message,
+                search_preview=search_text[:500],
+                search_lines_count=0,
+            )
             return None
         sources = _extract_sources_from_text(search_text)
         if not sources:
             sources = [{"title": "search result", "url": ""}]
         summary = _build_source_backed_response(search_lines[:8], sources)
+        _web_debug(
+            "generic_fetch.search_only_fallback",
+            query=last_message,
+            search_lines_count=len(search_lines),
+            source_count=len(sources),
+        )
         return {
             "summary": summary,
             "words": summary.split(),
@@ -2087,7 +3997,9 @@ async def _run_generic_web_search_fetch(
 
     async def _fetch_candidate(candidate: dict[str, str]) -> tuple[dict[str, str], Any]:
         try:
-            result = await _fetch_web_page_follow_redirect(candidate["url"], fetch_prompt, use_dynamic=True)
+            # use_dynamic=False: requests HTTP es suficiente para artículos de noticias
+            # y evita lanzar N browsers Chromium en paralelo (que es lo que causaba el timeout)
+            result = await _fetch_web_page_follow_redirect(candidate["url"], fetch_prompt, use_dynamic=False)
             return candidate, result
         except Exception as exc:  # pragma: no cover - defensive
             return candidate, exc
@@ -2099,7 +4011,15 @@ async def _run_generic_web_search_fetch(
 
     eligible_entries: list[dict[str, Any]] = []
     for candidate, result in fetched_results:
+        if _is_invalid_news_candidate(candidate, last_message):
+            _web_debug(
+                "generic_fetch.entry_rejected_invalid_structure",
+                url=candidate.get("url", ""),
+                title=candidate.get("title", ""),
+            )
+            continue
         if isinstance(result, Exception):
+            _web_debug("generic_fetch.fetch_exception", url=candidate.get("url", ""), error=repr(result))
             snippet_lines = _candidate_snippet_lines(candidate)
             if not snippet_lines:
                 continue
@@ -2107,6 +4027,11 @@ async def _run_generic_web_search_fetch(
         if not isinstance(result, str):
             result = str(result)
         if result.startswith("Error") or result.startswith("URL rechazada") or _is_no_info_response(result):
+            _web_debug(
+                "generic_fetch.fetch_bad_result",
+                url=candidate.get("url", ""),
+                result_preview=result[:300],
+            )
             snippet_lines = _candidate_snippet_lines(candidate)
             if not snippet_lines:
                 continue
@@ -2132,6 +4057,14 @@ async def _run_generic_web_search_fetch(
             continue
         if _is_recent_web_information_query(last_message):
             if score < recent_min_score or len(body_lines) < recent_candidate_min_body_lines:
+                _web_debug(
+                    "generic_fetch.entry_rejected_recent_threshold",
+                    url=candidate.get("url", ""),
+                    score=score,
+                    min_score=recent_min_score,
+                    body_lines_count=len(body_lines),
+                    min_body_lines=recent_candidate_min_body_lines,
+                )
                 continue
 
         fallback_lines = [line.strip() for line in result.splitlines() if line.strip() and not line.strip().lower().startswith(("url:", "sources:", "http")) and "http" not in line.lower()]
@@ -2148,6 +4081,12 @@ async def _run_generic_web_search_fetch(
         if not sources:
             sources = [{"title": candidate.get("title") or candidate["url"], "url": candidate["url"]}]
         if _is_recent_web_information_query(last_message) and len(sources) < recent_candidate_min_sources:
+            _web_debug(
+                "generic_fetch.entry_rejected_sources",
+                url=candidate.get("url", ""),
+                source_count=len(sources),
+                min_sources=recent_candidate_min_sources,
+            )
             continue
 
         eligible_entries.append({
@@ -2157,7 +4096,52 @@ async def _run_generic_web_search_fetch(
             "candidate": candidate,
         })
 
+    _web_debug(
+        "generic_fetch.eligible_entries",
+        eligible_count=len(eligible_entries),
+        urls=[entry["candidate"].get("url", "") for entry in eligible_entries],
+    )
+
     if query_horizon == "week" and eligible_entries:
+        recent_article_entries = [
+            entry for entry in eligible_entries
+            if _candidate_url_is_recent(cast(dict[str, str], entry["candidate"]).get("url", ""), search_age_days or 14)
+            and _is_specific_article_hit(cast(dict[str, str], entry["candidate"]))
+            and not _is_invalid_news_candidate(cast(dict[str, str], entry["candidate"]), last_message)
+        ]
+        if recent_article_entries:
+            best_recent_entry = sorted(
+                recent_article_entries,
+                key=lambda entry: (
+                    _candidate_source_priority(cast(dict[str, str], entry["candidate"]), query_source_group),
+                    -cast(int, entry["score"]),
+                ),
+            )[0]
+            summary = _build_source_backed_response(
+                cast(list[str], best_recent_entry["summary_lines"]),
+                cast(list[dict[str, str]], best_recent_entry["sources"]),
+            )
+            _web_debug(
+                "generic_fetch.week_single_recent_article",
+                url=cast(dict[str, str], best_recent_entry["candidate"]).get("url", ""),
+                score=cast(int, best_recent_entry["score"]),
+                source_count=len(cast(list[dict[str, str]], best_recent_entry["sources"])),
+            )
+            return {
+                "summary": summary,
+                "words": summary.split(),
+                "source_type": "webfetch",
+                "sources": cast(list[dict[str, str]], best_recent_entry["sources"]),
+                "score": cast(int, best_recent_entry["score"]),
+            }
+
+    if query_horizon == "week" and eligible_entries:
+        eligible_entries = [
+            entry for entry in eligible_entries
+            if not _is_invalid_news_candidate(cast(dict[str, str], entry["candidate"]), last_message)
+        ]
+        if not eligible_entries:
+            return None
         ordered_entries = sorted(
             eligible_entries,
             key=lambda entry: (
@@ -2197,6 +4181,14 @@ async def _run_generic_web_search_fetch(
                             final_sources.append(extra)
                             seen_urls.add(extra_url)
                 summary = _build_source_backed_response(combined_lines[:20], final_sources)
+                _web_debug(
+                    "generic_fetch.week_success",
+                    selected_size=size,
+                    combined_score=combined_score,
+                    combined_lines_count=len(combined_lines),
+                    combined_sources_count=len(combined_sources),
+                    final_sources_count=len(final_sources),
+                )
                 return {
                     "summary": summary,
                     "words": summary.split(),
@@ -2224,6 +4216,12 @@ async def _run_generic_web_search_fetch(
             snippet_sources.append({"title": title, "url": url})
         if snippet_lines:
             summary = _build_source_backed_response(snippet_lines, snippet_sources)
+            _web_debug(
+                "generic_fetch.week_snippet_fallback",
+                snippet_count=len(snippet_lines),
+                source_count=len(snippet_sources),
+                urls=[source.get("url", "") for source in snippet_sources],
+            )
             return {
                 "summary": summary,
                 "words": summary.split(),
@@ -2233,6 +4231,12 @@ async def _run_generic_web_search_fetch(
             }
 
     if query_horizon != "week" and eligible_entries:
+        valid_entries = [
+            entry for entry in eligible_entries
+            if not _is_invalid_news_candidate(cast(dict[str, str], entry["candidate"]), last_message)
+        ]
+        if valid_entries:
+            eligible_entries = valid_entries
         best_entry = sorted(
             eligible_entries,
             key=lambda entry: (
@@ -2241,6 +4245,12 @@ async def _run_generic_web_search_fetch(
             ),
         )[0]
         summary = _build_source_backed_response(cast(list[str], best_entry["summary_lines"]), cast(list[dict[str, str]], best_entry["sources"]))
+        _web_debug(
+            "generic_fetch.non_week_success",
+            url=cast(dict[str, str], best_entry["candidate"]).get("url", ""),
+            score=cast(int, best_entry["score"]),
+            source_count=len(cast(list[dict[str, str]], best_entry["sources"])),
+        )
         return {
             "summary": summary,
             "words": summary.split(),
@@ -2251,6 +4261,7 @@ async def _run_generic_web_search_fetch(
 
     search_lines = _extract_generic_content_lines(search_text, query_terms)
     if not search_lines:
+        _web_debug("generic_fetch.search_lines_empty", query=last_message, search_preview=search_text[:500])
         return None
     if _is_recent_web_information_query(last_message):
         if len(search_lines) < recent_min_body_lines:
@@ -2265,9 +4276,22 @@ async def _run_generic_web_search_fetch(
                     "snippet": strongest_candidate.get("snippet") or "",
                 })
             ):
+                _web_debug(
+                    "generic_fetch.search_lines_rejected_recent",
+                    search_lines_count=len(search_lines),
+                    strongest_url=(strongest_candidate or {}).get("url", "") if strongest_candidate else "",
+                    strongest_score=strongest_score,
+                    min_score=recent_min_score,
+                    min_body_lines=recent_min_body_lines,
+                )
                 return None
         sources = _extract_sources_from_text(search_text)
         if len(sources) < recent_min_sources:
+            _web_debug(
+                "generic_fetch.search_sources_rejected_recent",
+                source_count=len(sources),
+                min_sources=recent_min_sources,
+            )
             return None
 
     sources = _extract_sources_from_text(search_text)
@@ -2284,6 +4308,12 @@ async def _run_generic_web_search_fetch(
                 break
 
     summary = _build_source_backed_response(search_lines[:8], sources)
+    _web_debug(
+        "generic_fetch.final_search_summary",
+        search_lines_count=len(search_lines),
+        source_count=len(sources),
+        urls=[source.get("url", "") for source in sources],
+    )
     return {
         "summary": summary,
         "words": summary.split(),
@@ -2291,6 +4321,41 @@ async def _run_generic_web_search_fetch(
         "sources": sources,
         "search_text": search_text,
     }
+
+
+async def _run_generic_web_search_fetch(
+    last_message: str,
+    web_search_runtime_args: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    search_runtime = WebSearchRuntime()
+    fetch_runtime = WebFetchRuntime()
+    country_strategy = CountryRecentNewsStrategy(
+        search_runtime=search_runtime,
+        fetch_runtime=fetch_runtime,
+    )
+    local_result = await country_strategy.execute(last_message, web_search_runtime_args)
+    if local_result is not None:
+        _web_debug(
+            "generic_fetch.strategy_selected",
+            strategy="country_recent_news",
+            query=last_message,
+            source_count=len(cast(list[dict[str, str]], local_result.get("sources") or [])),
+        )
+        return local_result
+
+    generic_strategy = GenericWebSearchStrategy(
+        search_runtime=search_runtime,
+        fetch_runtime=fetch_runtime,
+    )
+    result = await generic_strategy.execute(last_message, web_search_runtime_args)
+    if result is not None:
+        _web_debug(
+            "generic_fetch.strategy_selected",
+            strategy="generic_web_search",
+            query=last_message,
+            source_count=len(cast(list[dict[str, str]], result.get("sources") or [])),
+        )
+    return result
 
 
 def _enforce_synthesis_format(text: str) -> str:
@@ -2539,6 +4604,13 @@ async def run_web_scraping_flow(
     exploring = ctx["exploring"]
     exp_rate = ctx["exp_rate"]
     prediction_match = ctx["prediction_match"]
+    _web_debug(
+        "run_web_scraping_flow.start",
+        query=last_message,
+        category=category,
+        explicit_urls=explicit_urls,
+        web_search_runtime_args=web_search_runtime_args,
+    )
 
     try:
         if explicit_urls:
@@ -2567,6 +4639,7 @@ async def run_web_scraping_flow(
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
                     **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
+                summary, _, _ = _finalize_web_user_summary(summary, last_message, None)
                 return {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
@@ -2575,13 +4648,21 @@ async def run_web_scraping_flow(
         if category in {"sports", "news"}:
             discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
             if discovery is not None:
+                _web_debug(
+                    "run_web_scraping_flow.discovery_hit",
+                    category=category,
+                    source_type=discovery.get("source_type"),
+                    source_count=len(cast(list[dict[str, str]], discovery.get("sources") or [])),
+                    pre_synthesized=discovery.get("pre_synthesized"),
+                    branch="news_sports",
+                )
                 _disc_raw = cast(str, discovery["summary"])
                 _disc_sources = cast(list[dict[str, str]], discovery.get("sources") or [])
                 if discovery.get("pre_synthesized"):
                     summary = _disc_raw
                 else:
                     summary = await _synthesize_search_summary(_disc_raw, last_message, get_llm_fn, _disc_sources)
-                words = cast(list[str], discovery.get("words") or summary.split())
+                summary, _disc_sources, words = _finalize_web_user_summary(summary, last_message, _disc_sources)
                 duration_ms = int((time.time() - t0) * 1000)
                 reliability = _scrape_reliability(len(words))
                 source_type = cast(str, discovery.get("source_type") or "webfetch")
@@ -2608,6 +4689,7 @@ async def run_web_scraping_flow(
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
                 }
+            _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="news_sports")
 
             from tools import search_web
 
@@ -2624,6 +4706,12 @@ async def run_web_scraping_flow(
             fallback_terms = _extract_generic_query_terms(last_message)
             fallback_query_source_group = detect_query_source_group(last_message)
             fallback_lines = _extract_generic_content_lines(fallback_search, fallback_terms)
+            _web_debug(
+                "run_web_scraping_flow.search_fallback",
+                args=_fb2_args,
+                fallback_lines_count=len(fallback_lines),
+                search_preview=fallback_search[:500],
+            )
             if fallback_lines:
                 fallback_candidates = _extract_generic_search_candidates(fallback_search)
                 fallback_sources = _extract_sources_from_text(fallback_search)
@@ -2640,8 +4728,8 @@ async def run_web_scraping_flow(
                     fallback_sources = [{"title": "search result", "url": ""}]
                 _fallback_raw = _build_source_backed_response(fallback_lines[:10], fallback_sources)
                 summary = await _synthesize_search_summary(_fallback_raw, last_message, get_llm_fn, fallback_sources)
+                summary, fallback_sources, words = _finalize_web_user_summary(summary, last_message, fallback_sources)
                 duration_ms = int((time.time() - t0) * 1000)
-                words = summary.split()
                 reliability = _scrape_reliability(len(words))
                 new_tracker, analytics = cast(tuple[dict[str, Any], dict[str, Any]], _update_scrape_tracker(
                     tracker, category, len(words), turn_count,
@@ -2669,13 +4757,21 @@ async def run_web_scraping_flow(
         if is_web_information_query(last_message) or _is_recent_web_information_query(last_message):
             discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
             if discovery is not None:
+                _web_debug(
+                    "run_web_scraping_flow.discovery_hit",
+                    category=category,
+                    source_type=discovery.get("source_type"),
+                    source_count=len(cast(list[dict[str, str]], discovery.get("sources") or [])),
+                    pre_synthesized=discovery.get("pre_synthesized"),
+                    branch="generic_web_info",
+                )
                 _disc_raw = cast(str, discovery["summary"])
                 _disc_sources = cast(list[dict[str, str]], discovery.get("sources") or [])
                 if discovery.get("pre_synthesized"):
                     summary = _disc_raw
                 else:
                     summary = await _synthesize_search_summary(_disc_raw, last_message, get_llm_fn, _disc_sources)
-                words = cast(list[str], discovery.get("words") or summary.split())
+                summary, _disc_sources, words = _finalize_web_user_summary(summary, last_message, _disc_sources)
                 duration_ms = int((time.time() - t0) * 1000)
                 reliability = _scrape_reliability(len(words))
                 source_type = cast(str, discovery.get("source_type") or "webfetch")
@@ -2702,6 +4798,7 @@ async def run_web_scraping_flow(
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
                 }
+            _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="generic_web_info")
 
         agent_hint = (
             "[Sistema | web] Usa search_web para descubrir fuentes dinámicamente. "
@@ -2727,11 +4824,18 @@ async def run_web_scraping_flow(
                         "input_chars": len(last_message),
                         "prior_reliability": prior_reliability,
                     },
+                    recursion_limit=16,
                 ),
             )
         except Exception as exc:
+            _web_debug("run_web_scraping_flow.agent_exception", error=repr(exc))
             fallback_discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
             if fallback_discovery is not None:
+                _web_debug(
+                    "run_web_scraping_flow.agent_exception_recovered",
+                    source_type=fallback_discovery.get("source_type"),
+                    source_count=len(cast(list[dict[str, str]], fallback_discovery.get("sources") or [])),
+                )
                 summary = cast(str, fallback_discovery["summary"])
                 words = cast(list[str], fallback_discovery.get("words") or summary.split())
                 duration_ms = int((time.time() - t0) * 1000)
@@ -2795,6 +4899,11 @@ async def run_web_scraping_flow(
 
         raw_messages = raw_result.get("messages", [])
         raw_text = extract_final_ai_text(raw_messages)
+        _web_debug(
+            "run_web_scraping_flow.agent_final",
+            raw_text_preview=raw_text[:500],
+            message_count=len(cast(list[Any], raw_messages)),
+        )
         if not raw_text:
             _emit_node_outcome(
                 rid, "web_scraping_node", "error", phase="agent",
@@ -2811,6 +4920,7 @@ async def run_web_scraping_flow(
             summary = await _synthesize_search_summary(raw_text, last_message, get_llm_fn, sources_from_raw)
         else:
             summary = await _summarize_if_long(raw_text, rid, get_llm_fn)
+        summary, _, _ = _finalize_web_user_summary(summary, last_message, sources_from_raw or None)
         words = raw_text.split()
         summary_triggered = len(words) > 200
         duration_ms = int((time.time() - t0) * 1000)

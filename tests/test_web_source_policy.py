@@ -127,6 +127,31 @@ def test_suffix_only_matches_work_for_new_world_countries() -> None:
         assert score_domain_boost(country_group, suffix_url) > score_domain_boost(country_group, trusted_url)
 
 
+def test_detect_recent_query_horizon_supports_month_queries() -> None:
+    from application.policies.web_source_policy import detect_recent_query_horizon
+
+    assert detect_recent_query_horizon("noticias de seguridad en italia de este mes") == "month"
+    assert detect_recent_query_horizon("security news in italy last month") == "month"
+
+
+def test_topic_landings_are_treated_as_hubs_for_recent_news() -> None:
+    from application.use_cases.web_scraping_flow import _is_hub_like_candidate, _is_invalid_news_candidate
+
+    candidate = {
+        "title": "Ultima Ora, notizie in tempo reale - Il Messaggero",
+        "url": "https://www.ilmessaggero.it/t/ultima-ora",
+        "snippet": "Aggiornamenti in tempo reale",
+    }
+    tangential_candidate = {
+        "title": "SICUREZZA INFORMATICA - Il Messaggero",
+        "url": "https://www.ilmessaggero.it/t/sicurezza-informatica",
+        "snippet": "Notizie, foto e video su sicurezza informatica",
+    }
+
+    assert _is_hub_like_candidate(candidate) is True
+    assert _is_invalid_news_candidate(tangential_candidate, "dame las ultimas noticias sobre seguridad en italia de esta semana") is True
+
+
 @pytest.mark.asyncio
 async def test_country_press_discovery_is_cached_per_country() -> None:
     from application.use_cases import web_scraping_flow
@@ -169,6 +194,40 @@ async def test_country_press_discovery_is_cached_per_country() -> None:
 
     assert first == second
     assert len(lookup_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_country_recent_news_strategy_prioritizes_section_hits() -> None:
+    from application.use_cases.web_scraping_flow import CountryRecentNewsStrategy
+    from application.services.web_runtime import WebFetchRuntime, WebSearchRuntime
+
+    fetch_runtime = WebFetchRuntime()
+    fetch_runtime.fetch = AsyncMock(return_value=type("FetchResponse", (), {
+        "provider_name": "default",
+        "url": "https://www.huffingtonpost.it/news/cronaca/",
+        "content": (
+            '- "Quattordiceenne accoltellato nei bagni della scuola a Napoli, due minori denunciati."\n'
+            '- "Esplosione al parco degli Acquedotti, si segue la pista anarchica: due morti, preparavano un ordigno."'
+        ),
+        "fetch_kind": "static",
+        "status": "ok",
+    })())
+    search_runtime = WebSearchRuntime()
+
+    strategy = CountryRecentNewsStrategy(search_runtime=search_runtime, fetch_runtime=fetch_runtime)
+
+    with (
+        patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(return_value=(["huffingtonpost.it"], ["HuffPost Italia"]))),
+        patch("application.use_cases.web_scraping_flow._country_press_source_cache_get", return_value=[{"title": "HuffPost Italia", "url": "https://www.huffingtonpost.it/"}]),
+        patch("application.use_cases.web_scraping_flow._is_press_source_relevant_for_query", return_value=True),
+        patch("application.use_cases.web_scraping_flow._build_country_press_section_targets", return_value=[("https://www.huffingtonpost.it/news/cronaca/", "cronaca")]),
+    ):
+        result = await strategy.execute("dame las ultimas noticias sobre seguridad en italia de esta semana", {})
+
+    assert result is not None
+    assert result.get("pre_synthesized") is True
+    assert "Quattordiceenne accoltellato" in str(result.get("summary") or "")
+    assert fetch_runtime.fetch.await_count == 1
 
 
 @pytest.mark.asyncio

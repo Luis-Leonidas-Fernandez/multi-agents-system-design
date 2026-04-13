@@ -67,6 +67,24 @@ def test_web_search_registry_imports():
     assert callable(resolve_web_search_provider_name)
 
 
+def test_main_searxng_bootstrap_helpers(monkeypatch):
+    import main
+
+    monkeypatch.delenv("SEARXNG_AUTO_START", raising=False)
+    monkeypatch.delenv("SEARXNG_BASE_URL", raising=False)
+
+    assert main._searxng_auto_start_enabled() is True
+    assert main._searxng_base_url() == "http://localhost:8888"
+    assert main._searxng_is_local_url("http://localhost:8888") is True
+    assert main._searxng_is_local_url("https://search.example.com") is False
+
+    monkeypatch.setenv("SEARXNG_AUTO_START", "false")
+    monkeypatch.setenv("SEARXNG_BASE_URL", "https://search.example.com")
+
+    assert main._searxng_auto_start_enabled() is False
+    assert main._searxng_base_url() == "https://search.example.com"
+
+
 def test_tools_package_imports():
     from tools import (
         calculate,

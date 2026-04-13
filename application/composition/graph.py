@@ -15,8 +15,16 @@ from application.services.agent_registry import AGENT_NAMES, get_registered_node
 from application.services.coordinator_mode import is_coordinator_mode_enabled
 from application.services.coordinator_workers import coordinator_runtime_service
 from application.use_cases.supervisor_chain import build_supervisor_chain
+from application.policies.web_source_policy import detect_recent_query_horizon
+from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard
 from domain.models import AgentState
 from application.policies.security_flow import input_guard
+
+# Maps coordinator agent names to their guardrail node names
+_AGENT_TO_GUARDRAIL_NODE: dict[str, str] = {
+    "web_scraping_agent": "web_scraping_node",
+    "code_agent": "code_node",
+}
 
 
 
@@ -51,6 +59,33 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     return await run_supervisor_routing(state, chain_factory)
 
 
+async def _apply_agentdog_to_worker_response(
+    state: AgentState,
+    agent_name: str,
+    response_text: str,
+) -> "list[Any]":
+    """
+    Aplica AgentDoG al response de un worker antes de escribirlo al state.
+
+    Retorna la lista de mensajes a agregar: [AIMessage(response)] si safe,
+    [] si el guard bloqueó la respuesta.
+    """
+    from langchain_core.messages import AIMessage
+
+    node_name = _AGENT_TO_GUARDRAIL_NODE.get(agent_name, "")
+    if not node_name or not _should_evaluate_guard(node_name):
+        return [AIMessage(content=response_text)]
+
+    ai_msg = AIMessage(content=response_text)
+    eval_state: dict[str, Any] = {
+        "messages": list(state.get("messages", [])) + [ai_msg],
+        "request_id": state.get("request_id", ""),
+        "run_id": state.get("run_id", ""),
+    }
+    is_safe, _ = await evaluate_trajectory_safe(eval_state, node_name)
+    return [ai_msg] if is_safe else []
+
+
 async def coordinator_node(state: AgentState) -> dict[str, Any]:
     """Nodo coordinador que reutiliza la misma ruta base, pero queda como
     boundary explícita para evolucionar hacia spawn/messaging dinámico."""
@@ -60,6 +95,39 @@ async def coordinator_node(state: AgentState) -> dict[str, Any]:
     last_message = str(state.get("messages", [])[-1].content if state.get("messages") else "")
     if session_id and next_agent in AGENT_NAMES:
         if next_agent == "web_scraping_agent":
+            # Para consultas recientes/periodísticas, no queremos la probe round genérica:
+            # el flujo especializado de web_scraping ya implementa el patrón OpenClaw
+            # (topic=news + ventana temporal + fetch de artículos).
+            if detect_recent_query_horizon(last_message):
+                worker = await coordinator_runtime_service.spawn_worker(
+                    session_id,
+                    next_agent,
+                    worker_name=f"{next_agent}:{state.get('request_id', '')[:8]}" if state.get("request_id") else None,
+                    metadata={
+                        "request_id": state.get("request_id", ""),
+                        "reason": "coordinator_spawn_recent_web_query",
+                        "target_agent": next_agent,
+                    },
+                )
+                worker_result = await coordinator_runtime_service.execute_worker_turn(
+                    session_id,
+                    worker.worker_id,
+                    last_message,
+                    sender="coordinator",
+                )
+                route["coordinator_worker_id"] = worker.worker_id
+                route["coordinator_worker_agent"] = worker.agent_name
+                base_messages = list(state.get("messages", []))
+                if worker_result.get("response"):
+                    guard_msgs = await _apply_agentdog_to_worker_response(
+                        state, next_agent, str(worker_result["response"])
+                    )
+                    route["messages"] = base_messages + guard_msgs
+                else:
+                    route["messages"] = base_messages
+                route["next_agent"] = "__end__"
+                return route
+
             probe_result = await coordinator_runtime_service.execute_parallel_probe_round(
                 session_id,
                 "general",
@@ -70,11 +138,14 @@ async def coordinator_node(state: AgentState) -> dict[str, Any]:
             route["coordinator_worker_agent"] = next_agent
             route["coordinator_probe_best_source"] = probe_result.get("best_source", "")
             route["coordinator_probe_sources"] = [result.get("source_name", "") for result in probe_result.get("probe_results", [])]
-            route["messages"] = list(state.get("messages", []))
+            base_messages = list(state.get("messages", []))
             if probe_result.get("response"):
-                from langchain_core.messages import AIMessage
-
-                route["messages"] = list(state.get("messages", [])) + [AIMessage(content=str(probe_result["response"]))]
+                guard_msgs = await _apply_agentdog_to_worker_response(
+                    state, next_agent, str(probe_result["response"])
+                )
+                route["messages"] = base_messages + guard_msgs
+            else:
+                route["messages"] = base_messages
             route["next_agent"] = "__end__"
             return route
 
@@ -96,11 +167,14 @@ async def coordinator_node(state: AgentState) -> dict[str, Any]:
         )
         route["coordinator_worker_id"] = worker.worker_id
         route["coordinator_worker_agent"] = worker.agent_name
-        route["messages"] = state.get("messages", []) + []
+        base_messages = list(state.get("messages", []))
         if worker_result.get("response"):
-            from langchain_core.messages import AIMessage
-
-            route["messages"] = list(state.get("messages", [])) + [AIMessage(content=str(worker_result["response"]))]
+            guard_msgs = await _apply_agentdog_to_worker_response(
+                state, next_agent, str(worker_result["response"])
+            )
+            route["messages"] = base_messages + guard_msgs
+        else:
+            route["messages"] = base_messages
         route["next_agent"] = "__end__"
     return route
 

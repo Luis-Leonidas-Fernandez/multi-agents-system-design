@@ -283,3 +283,64 @@ async def _scrape_dynamic_async(
         finally:
             await context.close()
             await browser.close()
+
+
+# ==================== SYNC SCRAPING SIN CAPTURA JSON ====================
+
+def _scrape_page_sync(
+    url: str,
+    wait_for_selector: Optional[str] = None,
+    extract_selector: Optional[str] = None,
+    text_limit: int = 2000,
+    timeout_ms: int = 20000,
+    block_resources: bool = True,
+) -> Dict[str, Any]:
+    """
+    Scrapea una página con Playwright sync (sin captura JSON).
+
+    Usa el browser singleton sync (sync_playwright). Retorna el mismo
+    contrato de dict que _scrape_dynamic_async para que los callers puedan
+    intercambiar una implementación por la otra sin cambios adicionales.
+    """
+    from bs4 import BeautifulSoup
+
+    browser = _get_browser()
+    page = browser.new_page()
+    _configure_page(page, block_resources=block_resources)
+
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        if wait_for_selector:
+            page.wait_for_selector(wait_for_selector, timeout=timeout_ms)
+        else:
+            page.wait_for_timeout(800)
+
+        final_url = page.url
+        title = page.title()
+        html = page.content()
+    finally:
+        page.close()
+
+    soup = BeautifulSoup(html, "html.parser")
+    node = soup.select_one(extract_selector) if extract_selector else soup
+    main_text = node.get_text(" ", strip=True) if node else ""
+    main_text = " ".join(main_text.split())
+    if len(main_text) > text_limit:
+        main_text = main_text[:text_limit] + "... [texto truncado]"
+
+    links: List[Dict[str, Any]] = []
+    target = node if node else soup
+    for a in target.select("a[href]")[:30]:
+        t = " ".join(a.get_text(" ", strip=True).split())[:80]
+        href = a.get("href", "")
+        if href:
+            links.append({"text": t, "href": href})
+
+    return {
+        "requested_url": url,
+        "url": final_url,
+        "title": title,
+        "rendered": True,
+        "main_text": main_text,
+        "links": links,
+    }

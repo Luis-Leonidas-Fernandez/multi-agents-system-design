@@ -252,3 +252,42 @@ async def test_graph_uses_parallel_probe_round_for_web_scraping(monkeypatch):
     assert result["coordinator_worker_agent"] == "web_scraping_agent"
     assert result["coordinator_probe_best_source"] == "search_direct"
     assert result["messages"][-1].content.startswith("Fuente más confiable: search_direct")
+
+
+@pytest.mark.asyncio
+async def test_graph_routes_recent_news_queries_to_full_web_scraping_flow(monkeypatch):
+    monkeypatch.setenv("COORDINATOR_MODE", "true")
+
+    def fake_input_guard(state):
+        return {"request_id": "req-coord-news-1"}
+
+    async def fake_coordinator(state):
+        return {"next_agent": "web_scraping_agent"}
+
+    worker = type("W", (), {"worker_id": "w-news-1", "agent_name": "web_scraping_agent"})()
+
+    with (
+        patch("application.composition.graph.input_guard", side_effect=fake_input_guard),
+        patch("application.composition.graph.supervisor_node", side_effect=fake_coordinator),
+        patch("application.composition.graph.coordinator_runtime_service.spawn_worker", AsyncMock(return_value=worker)),
+        patch("application.composition.graph.coordinator_runtime_service.execute_worker_turn", AsyncMock(return_value={
+            "worker_id": "w-news-1",
+            "agent_name": "web_scraping_agent",
+            "response": "4 noticias de seguridad en Argentina esta semana",
+        })),
+        patch("application.composition.graph.coordinator_runtime_service.execute_parallel_probe_round", AsyncMock(side_effect=AssertionError("no debería usar probe round para noticias recientes"))),
+        patch("application.composition.graph.get_registered_nodes", return_value={
+            "math_agent": AsyncMock(side_effect=AssertionError("math no debería ejecutarse")),
+            "analysis_agent": AsyncMock(side_effect=AssertionError("analysis no debería ejecutarse")),
+            "code_agent": AsyncMock(side_effect=AssertionError("code no debería ejecutarse")),
+            "web_scraping_agent": AsyncMock(side_effect=AssertionError("web node no debería ejecutarse en modo coordinador")),
+        }),
+    ):
+        from application.composition.graph import create_supervisor_graph
+
+        compiled = create_supervisor_graph()
+        result = await compiled.ainvoke(cast(AgentState, _base_state("dame las ultimas noticias sobre seguridad en argentina de esta semana")))
+
+    assert result["coordinator_worker_id"] == "w-news-1"
+    assert result["coordinator_worker_agent"] == "web_scraping_agent"
+    assert result["messages"][-1].content == "4 noticias de seguridad en Argentina esta semana"

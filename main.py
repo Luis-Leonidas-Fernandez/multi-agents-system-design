@@ -45,7 +45,7 @@ from application.services.session_inspection import (
     format_session_selector,
 )
 
-TURN_TIMEOUT_SECONDS = float(os.getenv("TURN_TIMEOUT_SECONDS", "60"))
+TURN_TIMEOUT_SECONDS = float(os.getenv("TURN_TIMEOUT_SECONDS", "180"))
 _SEARXNG_DEFAULT_BASE_URL = "http://localhost:8888"
 _SEARXNG_PROBE_PATH = "/search?q=multi-agents-healthcheck&format=json&categories=general"
 
@@ -167,11 +167,14 @@ def _default_node_bin() -> Optional[str]:
     return str(candidate) if candidate.exists() else None
 
 
+_UI_ROLE_MAP: dict[str, str] = {"ai": "assistant", "human": "you"}
+
+
 def _ui_state_payload(lifecycle, runtime: AgentRuntime, status: str) -> dict[str, object]:
     artifact = runtime.build_session_artifact(lifecycle.session_id)
     transcript: list[str] = []
     for item in artifact.transcript:
-        role = str(item.get("role", "message")).lower()
+        role = _UI_ROLE_MAP.get(str(item.get("role", "message")).lower(), str(item.get("role", "message")).lower())
         content = str(item.get("content", ""))
         transcript.append(f"{role}: {content}".rstrip())
     view = lifecycle.view()
@@ -185,11 +188,57 @@ def _ui_state_payload(lifecycle, runtime: AgentRuntime, status: str) -> dict[str
     }
 
 
+def _merge_turn_response_into_ui_state(
+    state: dict[str, object],
+    response: str,
+    *,
+    message_count: Optional[int] = None,
+) -> dict[str, object]:
+    """Asegura que la UI vea la respuesta del turno aunque el artifact esté atrasado."""
+    normalized_response = (response or "").strip()
+    if not normalized_response:
+        return state
+
+    transcript = list(cast(list[str], state.get("transcript", [])))
+    ai_line = f"assistant: {normalized_response}"
+    if transcript and transcript[-1] == ai_line:
+        merged = dict(state)
+        if message_count is not None:
+            merged["message_count"] = max(int(merged.get("message_count", 0) or 0), int(message_count))
+        return merged
+
+    merged = dict(state)
+    merged["transcript"] = transcript + [ai_line]
+    if message_count is not None:
+        merged["message_count"] = max(int(merged.get("message_count", 0) or 0), int(message_count))
+    elif "message_count" in merged:
+        merged["message_count"] = int(merged.get("message_count", 0) or 0) + 1
+    return merged
+
+
+def _extract_latest_ai_text_from_live_state(live_state: Optional[dict[str, object]]) -> str:
+    if not live_state:
+        return ""
+    messages = live_state.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for item in reversed(messages):
+        role = str(getattr(item, "type", getattr(item, "role", ""))).lower()
+        if role in {"ai", "assistant"}:
+            content = str(getattr(item, "content", "")).strip()
+            if content:
+                return content
+    return ""
+
+
 def _emit_json(payload: dict[str, object]) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def _run_ui_bridge() -> None:
+    # HITL usa input() interactivo — incompatible con bridge (stdin es JSON del Node UI).
+    # Forzamos false antes de que hitl_flow se importe via AgentRuntime.
+    os.environ.setdefault("HITL_ENABLED", "false")
     validate_env()
     runtime = AgentRuntime()
     lifecycle = runtime.start_session_lifecycle(None)
@@ -240,7 +289,15 @@ def _run_ui_bridge() -> None:
                 continue
             try:
                 turn = asyncio.run(asyncio.wait_for(runtime.execute_turn(session.turn_context), timeout=TURN_TIMEOUT_SECONDS))
-                _emit_json({"type": "state", "state": _ui_state_payload(lifecycle, runtime, "listo")})
+                live_state = asyncio.run(runtime.get_live_state(lifecycle.session_id))
+                effective_response = (turn.response or "").strip() or _extract_latest_ai_text_from_live_state(cast(Optional[dict[str, object]], live_state))
+                state_payload = _ui_state_payload(lifecycle, runtime, "listo")
+                state_payload = _merge_turn_response_into_ui_state(
+                    state_payload,
+                    effective_response,
+                    message_count=turn.message_count,
+                )
+                _emit_json({"type": "state", "state": state_payload})
             except asyncio.TimeoutError:
                 _emit_json({"type": "error", "message": f"El turno superó {int(TURN_TIMEOUT_SECONDS)}s. Revisá proveedor/red/modelo."})
                 _emit_json({"type": "state", "state": _ui_state_payload(lifecycle, runtime, "listo")})

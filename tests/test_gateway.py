@@ -282,6 +282,22 @@ async def test_agentgateway_send_con_grafo_que_lanza_excepcion(mock_gateway):
 
 
 @pytest.mark.asyncio
+async def test_agentgateway_send_con_grafo_que_falla_persiste_ai_error(mock_gateway):
+    """Si el grafo falla, el error visible también debe persistirse como mensaje AI."""
+    gw, mock_graph = mock_gateway
+    mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("grafo falló"))
+
+    with patch("application.services.session_gateway.persistence.save_message") as mock_save:
+        result = await gw.send("sess-fail-persist", "msg que falla", request_id="req-fail-persist")
+
+    assert "Error: grafo falló" == result
+    assert mock_save.call_count == 2
+    assert mock_save.call_args_list[0][0][1] == "human"
+    assert mock_save.call_args_list[1][0][1] == "ai"
+    assert mock_save.call_args_list[1][0][2] == "Error: grafo falló"
+
+
+@pytest.mark.asyncio
 async def test_agentgateway_reusa_request_id_provisto(mock_gateway):
     """Si el runtime provee request_id, el gateway no debe reemplazarlo."""
     gw, _ = mock_gateway

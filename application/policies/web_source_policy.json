@@ -1,8 +1,267 @@
 {
+  "country_suffix_hints": [
+    {
+      "country_terms": [
+        "united states",
+        "estados unidos",
+        "eeuu",
+        "ee.uu.",
+        "ee uu",
+        "usa",
+        "u.s.a.",
+        "u.s."
+      ],
+      "suffixes": [
+        ".us"
+      ]
+    },
+    {
+      "country_terms": [
+        "brazil",
+        "brasil",
+        "brasileiro",
+        "brasileira",
+        "brasileiros",
+        "brasileiras"
+      ],
+      "suffixes": [
+        ".br"
+      ]
+    },
+    {
+      "country_terms": [
+        "uruguay",
+        "uruguayo",
+        "uruguaya",
+        "uruguayos",
+        "uruguayas"
+      ],
+      "suffixes": [
+        ".uy"
+      ]
+    },
+    {
+      "country_terms": [
+        "chile",
+        "chileno",
+        "chilenos",
+        "chilena",
+        "chilenas"
+      ],
+      "suffixes": [
+        ".cl"
+      ]
+    },
+    {
+      "country_terms": [
+        "argentina",
+        "argentino",
+        "argentinos",
+        "argentinas"
+      ],
+      "suffixes": [
+        ".ar"
+      ]
+    },
+    {
+      "country_terms": [
+        "mexico",
+        "méxico",
+        "mexicano",
+        "mexicana"
+      ],
+      "suffixes": [
+        ".mx"
+      ]
+    },
+    {
+      "country_terms": [
+        "colombia",
+        "colombiano",
+        "colombiana",
+        "colombianos",
+        "colombianas"
+      ],
+      "suffixes": [
+        ".co"
+      ]
+    },
+    {
+      "country_terms": [
+        "paraguay",
+        "paraguar",
+        "paraguayo",
+        "paraguaya",
+        "paraguayos",
+        "paraguayas"
+      ],
+      "suffixes": [
+        ".py"
+      ]
+    },
+    {
+      "country_terms": [
+        "bolivia",
+        "boliviano",
+        "boliviana",
+        "bolivianos",
+        "bolivianas"
+      ],
+      "suffixes": [
+        ".bo"
+      ]
+    },
+    {
+      "country_terms": [
+        "spain",
+        "españa",
+        "espana",
+        "español",
+        "espanol"
+      ],
+      "suffixes": [
+        ".es"
+      ]
+    },
+    {
+      "country_terms": [
+        "ireland",
+        "irlanda",
+        "irish"
+      ],
+      "suffixes": [
+        ".ie"
+      ]
+    },
+    {
+      "country_terms": [
+        "iceland",
+        "islandia",
+        "icelandic"
+      ],
+      "suffixes": [
+        ".is"
+      ]
+    },
+    {
+      "country_terms": [
+        "slovenia",
+        "eslovenia",
+        "slovenian",
+        "esloveno",
+        "eslovena"
+      ],
+      "suffixes": [
+        ".si"
+      ]
+    },
+    {
+      "country_terms": [
+        "italy",
+        "italia",
+        "italiano",
+        "italiana",
+        "italianos",
+        "italianas"
+      ],
+      "suffixes": [
+        ".it"
+      ]
+    },
+    {
+      "country_terms": [
+        "ukraine",
+        "ucrania",
+        "ukrainian",
+        "ucraniano",
+        "ucraniana"
+      ],
+      "suffixes": [
+        ".ua"
+      ]
+    },
+    {
+      "country_terms": [
+        "russia",
+        "rusia",
+        "russian",
+        "ruso",
+        "rusa",
+        "rusos",
+        "rusas"
+      ],
+      "suffixes": [
+        ".ru"
+      ]
+    },
+    {
+      "country_terms": [
+        "china",
+        "chino",
+        "china",
+        "chinese"
+      ],
+      "suffixes": [
+        ".cn"
+      ]
+    },
+    {
+      "country_terms": [
+        "japan",
+        "japón",
+        "japon"
+      ],
+      "suffixes": [
+        ".jp"
+      ]
+    },
+    {
+      "country_terms": [
+        "south korea",
+        "korea del sur",
+        "corea del sur",
+        "surcorea",
+        "surcoreano",
+        "surcoreana",
+        "coreano",
+        "coreana"
+      ],
+      "suffixes": [
+        ".kr",
+        ".co.kr"
+      ]
+    },
+    {
+      "country_terms": [
+        "north korea",
+        "corea del norte",
+        "corea norte",
+        "norcorea",
+        "norcoreano",
+        "norcoreana"
+      ],
+      "suffixes": [
+        ".kp"
+      ]
+    },
+    {
+      "country_terms": [
+        "new zealand",
+        "nueva zelanda"
+      ],
+      "suffixes": [
+        ".nz"
+      ]
+    }
+  ],
   "source_groups": [
     {
       "name": "japan",
-      "entity_terms": ["japan", "japón", "japon"],
+      "entity_terms": [
+        "japan",
+        "japón",
+        "japon"
+      ],
       "preferred_domains": [
         "nhk.or.jp",
         "nhkworld",
@@ -17,7 +276,12 @@
     },
     {
       "name": "argentina",
-      "entity_terms": ["argentina", "argentino", "argentinos", "argentinas"],
+      "entity_terms": [
+        "argentina",
+        "argentino",
+        "argentinos",
+        "argentinas"
+      ],
       "preferred_domains": [
         "lanacion.com.ar",
         "clarin.com",
@@ -31,8 +295,37 @@
       "preferred_boost": 8
     },
     {
+      "name": "chile",
+      "entity_terms": [
+        "chile",
+        "chileno",
+        "chilenos",
+        "chilena",
+        "chilenas"
+      ],
+      "preferred_domains": [
+        "latercera.com",
+        "cooperativa.cl",
+        "emol.com",
+        "t13.cl",
+        "biobiochile.cl",
+        "adnradio.cl",
+        "elmostrador.cl"
+      ],
+      "preferred_boost": 8
+    },
+    {
       "name": "south_korea",
-      "entity_terms": ["south korea", "korea del sur", "corea del sur", "surcorea", "surcoreano", "surcoreana", "coreano", "coreana"],
+      "entity_terms": [
+        "south korea",
+        "korea del sur",
+        "corea del sur",
+        "surcorea",
+        "surcoreano",
+        "surcoreana",
+        "coreano",
+        "coreana"
+      ],
       "preferred_domains": [
         "yonhapnews.co.kr",
         "english.yonhapnews.co.kr",
@@ -43,9 +336,322 @@
         "donga.com"
       ],
       "preferred_boost": 8
+    },
+    {
+      "name": "mexico",
+      "entity_terms": [
+        "mexico",
+        "méxico",
+        "mexicano",
+        "mexicana"
+      ],
+      "preferred_domains": [
+        "eluniversal.com.mx",
+        "reforma.com",
+        "milenio.com",
+        "animalpolitico.com",
+        "proceso.com.mx",
+        "aristeguinoticias.com",
+        "elnorte.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "united_states",
+      "entity_terms": [
+        "united states",
+        "estados unidos",
+        "eeuu",
+        "ee.uu.",
+        "ee uu",
+        "usa",
+        "u.s.a.",
+        "u.s."
+      ],
+      "preferred_domains": [
+        "nytimes.com",
+        "washingtonpost.com",
+        "cnn.com",
+        "nbcnews.com",
+        "abcnews.go.com",
+        "cbsnews.com",
+        "usatoday.com",
+        "pbs.org"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "brazil",
+      "entity_terms": [
+        "brazil",
+        "brasil",
+        "brasileiro",
+        "brasileira",
+        "brasileiros",
+        "brasileiras"
+      ],
+      "preferred_domains": [
+        "g1.globo.com",
+        "uol.com.br",
+        "folha.uol.com.br",
+        "estadao.com.br",
+        "terra.com.br",
+        "cnnbrasil.com.br",
+        "band.uol.com.br",
+        "metropoles.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "uruguay",
+      "entity_terms": [
+        "uruguay",
+        "uruguayo",
+        "uruguaya",
+        "uruguayos",
+        "uruguayas"
+      ],
+      "preferred_domains": [
+        "elpais.com.uy",
+        "montevideo.com.uy",
+        "subrayado.com.uy",
+        "elobservador.com.uy",
+        "ladiaria.com.uy"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "colombia",
+      "entity_terms": [
+        "colombia",
+        "colombiano",
+        "colombiana",
+        "colombianos",
+        "colombianas"
+      ],
+      "preferred_domains": [
+        "eltiempo.com",
+        "semana.com",
+        "elespectador.com",
+        "elcolombiano.com",
+        "wradio.com.co",
+        "pulzo.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "paraguay",
+      "entity_terms": [
+        "paraguay",
+        "paraguar",
+        "paraguayo",
+        "paraguaya",
+        "paraguayos",
+        "paraguayas"
+      ],
+      "preferred_domains": [
+        "abc.com.py",
+        "ultimahora.com",
+        "lanacion.com.py",
+        "launion.com.py"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "bolivia",
+      "entity_terms": [
+        "bolivia",
+        "boliviano",
+        "boliviana",
+        "bolivianos",
+        "bolivianas"
+      ],
+      "preferred_domains": [
+        "eldeber.com.bo",
+        "lostiempos.com",
+        "paginasiete.bo",
+        "erbol.com.bo"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "spain",
+      "entity_terms": [
+        "spain",
+        "españa",
+        "espana",
+        "español",
+        "espanol"
+      ],
+      "preferred_domains": [
+        "elpais.com",
+        "elmundo.es",
+        "abc.es",
+        "rtve.es",
+        "lavanguardia.com",
+        "20minutos.es",
+        "elconfidencial.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "ireland",
+      "entity_terms": [
+        "ireland",
+        "irlanda",
+        "irish"
+      ],
+      "preferred_domains": [
+        "rte.ie",
+        "irishtimes.com",
+        "independent.ie",
+        "thejournal.ie"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "iceland",
+      "entity_terms": [
+        "iceland",
+        "islandia",
+        "icelandic"
+      ],
+      "preferred_domains": [
+        "ruv.is",
+        "mbl.is",
+        "visir.is",
+        "icelandreview.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "slovenia",
+      "entity_terms": [
+        "slovenia",
+        "eslovenia",
+        "slovenian",
+        "esloveno",
+        "eslovena"
+      ],
+      "preferred_domains": [
+        "rtvslo.si",
+        "delo.si",
+        "24ur.com",
+        "siol.net"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "italy",
+      "entity_terms": [
+        "italy",
+        "italia",
+        "italiano",
+        "italiana",
+        "italianos",
+        "italianas"
+      ],
+      "preferred_domains": [
+        "ansa.it",
+        "repubblica.it",
+        "corriere.it",
+        "ilsole24ore.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "ukraine",
+      "entity_terms": [
+        "ukraine",
+        "ucrania",
+        "ukrainian",
+        "ucraniano",
+        "ucraniana"
+      ],
+      "preferred_domains": [
+        "pravda.com.ua",
+        "ukrinform.net",
+        "kyivpost.com",
+        "interfax.com.ua"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "russia",
+      "entity_terms": [
+        "russia",
+        "rusia",
+        "russian",
+        "ruso",
+        "rusa",
+        "rusos",
+        "rusas"
+      ],
+      "preferred_domains": [
+        "tass.com",
+        "interfax.ru",
+        "kommersant.ru",
+        "rbc.ru",
+        "meduza.io",
+        "rt.com"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "china",
+      "entity_terms": [
+        "china",
+        "chino",
+        "chinese"
+      ],
+      "preferred_domains": [
+        "xinhuanet.com",
+        "people.com.cn",
+        "chinadaily.com.cn",
+        "news.cn",
+        "cgtn.com",
+        "globaltimes.cn"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "north_korea",
+      "entity_terms": [
+        "north korea",
+        "corea del norte",
+        "corea norte",
+        "norcorea",
+        "norcoreano",
+        "norcoreana"
+      ],
+      "preferred_domains": [
+        "kcna.kp",
+        "naenara.com.kp"
+      ],
+      "preferred_boost": 8
+    },
+    {
+      "name": "new_zealand",
+      "entity_terms": [
+        "new zealand",
+        "nueva zelanda"
+      ],
+      "preferred_domains": [
+        "rnz.co.nz",
+        "stuff.co.nz",
+        "nzherald.co.nz",
+        "1news.co.nz",
+        "newshub.co.nz"
+      ],
+      "preferred_boost": 8
     }
   ],
-  "global_trusted_domains": ["reuters.com", "apnews.com", "afp.com", "efe.com"],
+  "global_trusted_domains": [
+    "reuters.com",
+    "apnews.com",
+    "afp.com",
+    "efe.com"
+  ],
   "global_trusted_boost": 5,
   "recent_query_profiles": {
     "today": {
@@ -70,6 +676,14 @@
       "min_sources": 2,
       "min_candidates": 4,
       "candidate_min_score": 6,
+      "candidate_min_sources": 1
+    },
+    "month": {
+      "min_score": 10,
+      "min_body_lines": 2,
+      "min_sources": 1,
+      "min_candidates": 2,
+      "candidate_min_score": 5,
       "candidate_min_sources": 1
     }
   }

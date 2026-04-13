@@ -105,12 +105,28 @@ def _provider_has_env_credential(spec: WebSearchProviderSpec) -> bool:
     return any(bool(os.getenv(env_var)) for env_var in spec.env_vars)
 
 
+def _provider_is_ready(spec: WebSearchProviderSpec) -> bool:
+    if spec.requires_credential:
+        return _provider_has_env_credential(spec)
+    if not spec.env_vars:
+        return True
+    return _provider_has_env_credential(spec)
+
+
+def _ordered_web_search_specs() -> tuple[WebSearchProviderSpec, ...]:
+    return tuple(sorted(list_web_search_provider_specs(), key=lambda spec: (spec.auto_detect_order, spec.name)))
+
+
+def _prepend_ready_specs(first: WebSearchProviderSpec, specs: tuple[WebSearchProviderSpec, ...]) -> tuple[WebSearchProviderSpec, ...]:
+    return (first,) + tuple(spec for spec in specs if spec.name != first.name and _provider_is_ready(spec))
+
+
 def resolve_web_search_provider_candidates(
     explicit_provider: Optional[str] = None,
     runtime_selected_provider: Optional[str] = None,
     runtime_provider_configured: Optional[str] = None,
 ) -> tuple[WebSearchProviderSpec, ...]:
-    specs = list_web_search_provider_specs()
+    specs = _ordered_web_search_specs()
     if not specs:
         raise ValueError("No hay providers de web search registrados")
 
@@ -118,22 +134,22 @@ def resolve_web_search_provider_candidates(
         return (get_web_search_provider_spec(explicit_provider),)
 
     if runtime_selected_provider:
-        return (get_web_search_provider_spec(runtime_selected_provider),)
+        return _prepend_ready_specs(get_web_search_provider_spec(runtime_selected_provider), specs)
 
     if runtime_provider_configured:
-        return (get_web_search_provider_spec(runtime_provider_configured),)
+        return _prepend_ready_specs(get_web_search_provider_spec(runtime_provider_configured), specs)
 
     runtime_cfg = get_web_search_runtime_config()
     configured = (runtime_cfg.provider_configured or os.getenv("WEB_SEARCH_PROVIDER") or "").strip().lower()
     if configured:
-        return (get_web_search_provider_spec(configured),)
+        return _prepend_ready_specs(get_web_search_provider_spec(configured), specs)
 
-    credentialed = tuple(spec for spec in specs if spec.requires_credential and _provider_has_env_credential(spec))
+    credentialed = tuple(spec for spec in specs if spec.requires_credential and _provider_is_ready(spec))
     if credentialed:
-        keyless_after = tuple(spec for spec in specs if not spec.requires_credential)
+        keyless_after = tuple(spec for spec in specs if not spec.requires_credential and _provider_is_ready(spec))
         return credentialed + keyless_after
 
-    keyless = tuple(spec for spec in specs if not spec.requires_credential)
+    keyless = tuple(spec for spec in specs if not spec.requires_credential and _provider_is_ready(spec))
     if keyless:
         return keyless
 

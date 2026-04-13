@@ -8,6 +8,27 @@ from dataclasses import dataclass
 from typing import Annotated, Optional, Any
 from urllib.parse import urlparse, urljoin
 
+# Circuit breaker: evita reintentar providers que fallaron con errores no-retriables
+# (ej: Tavily con plan excedido). TTL: 5 minutos por proceso.
+_PROVIDER_CIRCUIT_BREAKER: dict[str, float] = {}
+_CIRCUIT_BREAKER_TTL = 300
+
+
+def _is_non_retryable_provider_error(error: Exception) -> bool:
+    msg = str(error).lower()
+    return any(kw in msg for kw in ["forbidden", "usage limit", "403", "rate limit", "exceeded", "unauthorized", "invalid api key"])
+
+
+def _circuit_trip(provider: str) -> None:
+    _PROVIDER_CIRCUIT_BREAKER[provider] = time.time()
+
+
+def _circuit_open(provider: str) -> bool:
+    tripped_at = _PROVIDER_CIRCUIT_BREAKER.get(provider)
+    if tripped_at is None:
+        return False
+    return (time.time() - tripped_at) < _CIRCUIT_BREAKER_TTL
+
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
 from pydantic import Field
@@ -35,6 +56,17 @@ _SEARCH_CACHE: dict[str, tuple[float, str]] = {}
 _WEB_FETCH_CACHE_TTL_SECONDS = 15 * 60
 _WEB_FETCH_CACHE_MAX = 128
 _WEB_FETCH_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _web_search_debug_enabled() -> bool:
+    return (os.getenv("WEB_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _web_search_debug(label: str, **data: Any) -> None:
+    if not _web_search_debug_enabled():
+        return
+    payload = " ".join(f"{key}={repr(value)}" for key, value in data.items())
+    print(f"[WEB_DEBUG] {label}{(' ' + payload) if payload else ''}", flush=True)
 
 
 @dataclass(frozen=True)
@@ -283,7 +315,9 @@ def _is_topic_or_hub_hit(hit: dict[str, str]) -> bool:
     segments = _hit_path_segments(link)
     blob = " ".join(str(hit.get(field) or "") for field in ("title", "url", "link", "content", "snippet")).lower()
     tokens = _hit_path_tokens(link)
-    hub_terms = {"topic", "topics", "tag", "tags", "category", "categories", "archive", "author", "world", "mundo", "index", "home", "partidos", "resultados"}
+    hub_terms = {"topic", "topics", "tag", "tags", "category", "categories", "archive", "author", "world", "mundo", "index", "home", "partidos", "resultados", "ultima-ora"}
+    if "/t/" in urlparse(link).path.lower():
+        return True
     if any(tok in hub_terms for tok in tokens):
         return True
     if len(segments) >= 1 and segments[0] in {"news", "noticias", "world", "mundo", "partidos", "resultados", "home", "index"} and not _path_has_date_or_slug(link):
@@ -475,11 +509,28 @@ def _run_searxng_search(
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Site": "same-origin",
     }
+    _web_search_debug(
+        "searxng.request",
+        query=query,
+        search_url=search_url,
+        params=params,
+        allowed_domains=allowed_domains,
+        blocked_domains=blocked_domains,
+        num_results=num_results,
+        max_age_days=max_age_days,
+    )
     response = requests.get(search_url, params=params, headers=headers, timeout=20)
     response.raise_for_status()
     payload = response.json()
     hits = _normalize_search_hits(payload.get("results") or [])
     hits = _filter_search_hits_by_domains(hits, allowed_domains, blocked_domains)
+    _web_search_debug(
+        "searxng.response",
+        status_code=response.status_code,
+        payload_result_count=len(payload.get("results") or []),
+        filtered_hit_count=len(hits),
+        sample_urls=[hit.get("url", "") for hit in hits[:5]],
+    )
     return hits[:num_results]
 
 
@@ -624,7 +675,27 @@ def _execute_web_search_plan(
     try:
         last_error: Exception | None = None
         provider_chain = ",".join(spec.name for spec in plan.provider_candidates)
+        _web_search_debug(
+            "search_plan.start",
+            selected_provider=plan.selected_provider,
+            provider_chain=provider_chain,
+            provider_explicit=plan.provider_explicit,
+            query=query,
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+            num_results=num_results,
+            max_age_days=max_age_days,
+            topic=topic,
+            time_range=time_range,
+        )
         for index, provider_spec in enumerate(plan.provider_candidates):
+            if _circuit_open(provider_spec.name):
+                _web_search_debug(
+                    "search_plan.provider_skipped_circuit",
+                    provider=provider_spec.name,
+                )
+                continue
+
             cache_key = (
                 f"provider={provider_spec.name}|selected={plan.selected_provider}|chain={provider_chain}|explicit={plan.provider_explicit}|{query}"
                 f"|allowed={sorted(allowed_domains or [])}|blocked={sorted(blocked_domains or [])}"
@@ -647,15 +718,30 @@ def _execute_web_search_plan(
                     time_range=time_range,
                 )
                 result = _format_search_results(query, hits)
+                _web_search_debug(
+                    "search_plan.provider_success",
+                    provider=provider_spec.name,
+                    hit_count=len(hits),
+                    sample_urls=[hit.get("url", "") for hit in hits[:5]],
+                    result_preview=result[:500],
+                )
                 if use_cache:
                     _set_search_cache(cache_key, result)
                 return result
             except Exception as error:
                 last_error = error if isinstance(error, Exception) else Exception(str(error))
+                if _is_non_retryable_provider_error(last_error):
+                    _circuit_trip(provider_spec.name)
+                _web_search_debug(
+                    "search_plan.provider_error",
+                    provider=provider_spec.name,
+                    error=repr(last_error),
+                )
                 if plan.provider_explicit or index == len(plan.provider_candidates) - 1:
                     break
 
         if last_error is not None:
+            _web_search_debug("search_plan.failed", error=repr(last_error))
             return f"Error en búsqueda: {str(last_error)}"
         return "Error en búsqueda: no hay providers disponibles"
     except Exception as e:
@@ -959,13 +1045,21 @@ async def web_fetch(
         result: dict[str, Any] = {}
         title_tag = urlparse(url).hostname or url
         if use_dynamic:
-            result = await scraping_infra._scrape_dynamic_async(
-                url=url,
-                wait_for_selector=wait_for_selector,
-                extract_selector=extract_selector,
-                text_limit=max_chars,
-                block_resources=block_resources,
-                capture_json=False,
+            import asyncio as _asyncio
+            _fetch_url = url
+            _fetch_wait = wait_for_selector
+            _fetch_extract = extract_selector
+            _fetch_limit = max_chars
+            _fetch_block = block_resources
+            result = await _asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: scraping_infra._scrape_page_sync(
+                    url=_fetch_url,
+                    wait_for_selector=_fetch_wait,
+                    extract_selector=_fetch_extract,
+                    text_limit=_fetch_limit,
+                    block_resources=_fetch_block,
+                ),
             )
             fetched_url = str(result.get("url") or url)
             parsed_original = urlparse(url)

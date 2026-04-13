@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -11,14 +11,11 @@ async def test_web_fetch_synthesizes_markdown_content():
     llm = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(content="Resumen conciso")))
 
     with (
-        patch("infra.scraping_infra._scrape_dynamic_async", AsyncMock(return_value={
+        patch("infra.scraping_infra._scrape_page_sync", MagicMock(return_value={
             "url": "https://example.com/article",
             "title": "Example Article",
             "main_text": "Contenido principal de la pagina",
             "links": [{"text": "More", "href": "https://example.com/more"}],
-            "json_bundle_path": None,
-            "json_captured_count": 0,
-            "json_total_bytes": 0,
         })),
         patch("application.helpers.config_flow_helpers.get_llm", return_value=llm),
     ):
@@ -50,14 +47,11 @@ async def test_web_fetch_reports_cross_host_redirect():
     llm = SimpleNamespace(ainvoke=AsyncMock())
 
     with (
-        patch("infra.scraping_infra._scrape_dynamic_async", AsyncMock(return_value={
+        patch("infra.scraping_infra._scrape_page_sync", MagicMock(return_value={
             "url": "https://redirect.example.org/article",
             "title": "Redirected",
             "main_text": "Contenido movido",
             "links": [],
-            "json_bundle_path": None,
-            "json_captured_count": 0,
-            "json_total_bytes": 0,
         })),
         patch("application.helpers.config_flow_helpers.get_llm", return_value=llm),
     ):

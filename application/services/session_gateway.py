@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from application.composition.graph import create_supervisor_graph
 from application.helpers.config_flow_helpers import get_web_search_runtime_config
@@ -243,7 +243,13 @@ class AgentGateway:
                 return last.content
             return ""
         except Exception as e:
-            return f"Error: {e}"
+            error_response = f"Error: {e}"
+            self._persistence.save_message(session_key, "ai", error_response, request_id=request_id)
+            state["messages"].append(AIMessage(content=error_response))
+            state["request_id"] = request_id
+            state["trace_id"] = state.get("trace_id", "")
+            self._states[session_key] = state
+            return error_response
 
     async def send(self, session_key: str, message: str, request_id: str | None = None, trace_id: str | None = None) -> str:
         """

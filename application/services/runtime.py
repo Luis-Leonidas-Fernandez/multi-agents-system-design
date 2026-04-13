@@ -274,6 +274,9 @@ class AgentRuntime:
     def load_session_artifact(self, session_id: str):
         return self._artifacts.load_artifact(session_id)
 
+    async def get_live_state(self, session_id: str):
+        return await self._gateway.get_state(session_id)
+
     def build_session_replay(self, session_id: str) -> SessionReplay:
         return session_replay_service.build_replay(session_id)
 
