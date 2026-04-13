@@ -5,6 +5,7 @@ import {TextInput} from '../components/TextInput.js';
 import {TranscriptList} from '../components/TranscriptList.js';
 import {DebugPanel} from '../components/DebugPanel.js';
 import {useBridgeSession} from '../hooks/useBridgeSession.js';
+import {useMouseScroll} from '../hooks/useMouseScroll.js';
 
 const UI_DEBUG = (process.env.NODE_UI_DEBUG || '0').toLowerCase() !== '0';
 
@@ -62,6 +63,11 @@ function REPL() {
       setCopyStatus(`error al copiar: ${error?.message || 'desconocido'}`);
     }
   }, [debugLines]);
+
+  useMouseScroll(React.useCallback((dir) => {
+    if (dir === 'up') setScrollOffset(prev => Math.min(prev + 1, maxScroll));
+    else              setScrollOffset(prev => Math.max(prev - 1, 0));
+  }, [maxScroll]));
 
   useInput((input, key) => {
     if (UI_DEBUG && key.ctrl && input.toLowerCase() === 'y') {
@@ -156,7 +162,7 @@ function REPL() {
     React.createElement(
       Text,
       {color: 'gray'},
-      '↑↓ un mensaje · PgUp/PgDn de a 5 · End al fondo · Home al inicio'
+      'scroll mouse · ↑↓ un mensaje · PgUp/PgDn de a 5 · End al fondo · Home al inicio'
     ),
   );
 }
