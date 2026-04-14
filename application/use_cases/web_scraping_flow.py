@@ -4693,10 +4693,15 @@ async def run_web_scraping_flow(
                     **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
                 summary, _, _ = _finalize_web_user_summary(summary, last_message, None)
-                return {
+                _fast_result = {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
                 }
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
+                    if not _is_safe:
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
+                return _fast_result
 
         if category in {"sports", "news"}:
             discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
@@ -4741,10 +4746,15 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                return {
+                _fast_result = {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
                 }
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
+                    if not _is_safe:
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
+                return _fast_result
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="news_sports")
 
             from tools import search_web
@@ -4805,10 +4815,15 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                return {
+                _fast_result = {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
                 }
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
+                    if not _is_safe:
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
+                return _fast_result
 
         if is_web_information_query(last_message) or _is_recent_web_information_query(last_message):
             discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
@@ -4853,10 +4868,15 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                return {
+                _fast_result = {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
                 }
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
+                    if not _is_safe:
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
+                return _fast_result
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="generic_web_info")
 
         agent_hint = (
@@ -4918,10 +4938,15 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                return {
+                _fast_result = {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
                 }
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
+                    if not _is_safe:
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
+                return _fast_result
             _emit_node_outcome(
                 rid, "web_scraping_node", "error", phase="agent",
                 agent="web_scraping_agent",
