@@ -947,9 +947,9 @@ def scrape_website_dynamic(
         page = browser.new_page()
         scraping_infra._configure_page(page, block_resources=block_resources)
 
-        page.goto(url, wait_until="domcontentloaded")
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
         if wait_for_selector:
-            page.wait_for_selector(wait_for_selector, timeout=10000)
+            page.wait_for_selector(wait_for_selector, timeout=30000)
 
         html = page.content()
         page.close()

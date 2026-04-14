@@ -155,7 +155,7 @@ async def _scrape_dynamic_async(
     wait_for_selector: Optional[str] = None,
     extract_selector: Optional[str] = None,
     text_limit: int = 2000,
-    timeout_ms: int = 20000,
+    timeout_ms: int = 30000,
     block_resources: bool = True,
     capture_json: bool = True,
     max_json_responses: int = 50,
@@ -292,7 +292,7 @@ def _scrape_page_sync(
     wait_for_selector: Optional[str] = None,
     extract_selector: Optional[str] = None,
     text_limit: int = 2000,
-    timeout_ms: int = 20000,
+    timeout_ms: int = 30000,
     block_resources: bool = True,
 ) -> Dict[str, Any]:
     """
