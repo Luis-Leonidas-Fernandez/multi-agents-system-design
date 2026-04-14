@@ -322,6 +322,11 @@ def apply_web_response_post_filter(
     if not summary.strip():
         return summary, sources
 
+    # Si el contenido ya tiene fuentes inline (Fuente: por párrafo), saltear el filtro.
+    # El contenido fue pre-filtrado al construirse — un segundo filtro rompería la estructura.
+    if re.search(r'(?:^|\n)Fuente:\s*\S', summary, re.MULTILINE):
+        return summary, sources
+
     topic = _detect_query_topic(query)
     if topic == "default":
         return summary, sources

@@ -17,7 +17,7 @@ function debugUI(event, payload = {}) {
 function REPL() {
   const {exit: inkExit} = useApp();
   const [debugLines, setDebugLines] = React.useState([]);
-  const [copyStatus, setCopyStatus] = React.useState('📋 copiar todo: Ctrl+Y');
+  const [copyStatus, setCopyStatus] = React.useState('');
 
   const reportDebug = React.useCallback((scope, event, payload = {}) => {
     debugUI(`${scope}:${event}`, payload);
@@ -32,6 +32,9 @@ function REPL() {
   // +1 = retrocede un mensaje. maxScroll = total mensajes - 1.
   const [scrollOffset, setScrollOffset] = React.useState(0);
   const maxScroll = Math.max(0, state.transcript.length - 1);
+
+  // Índices de mensajes expandidos (Set para O(1) lookup).
+  const [expandedMessages, setExpandedMessages] = React.useState(() => new Set());
 
   // Cuando llega contenido nuevo y estamos al fondo, quedarse al fondo.
   const prevLenRef = React.useRef(state.transcript.length);
@@ -64,14 +67,42 @@ function REPL() {
     }
   }, [debugLines]);
 
+  const copyMessage = React.useCallback((idx) => {
+    const line = state.transcript[idx];
+    if (line == null) { setCopyStatus('sin mensaje para copiar'); return; }
+    try {
+      execFileSync('/usr/bin/pbcopy', {input: line});
+      setCopyStatus('copiado ✓');
+      setTimeout(() => setCopyStatus(''), 2000);
+    } catch (error) {
+      setCopyStatus(`error: ${error?.message || 'desconocido'}`);
+    }
+  }, [state.transcript]);
+
   useMouseScroll(React.useCallback((dir) => {
     if (dir === 'up') setScrollOffset(prev => Math.min(prev + 1, maxScroll));
     else              setScrollOffset(prev => Math.max(prev - 1, 0));
   }, [maxScroll]));
 
   useInput((input, key) => {
-    if (UI_DEBUG && key.ctrl && input.toLowerCase() === 'y') {
-      copyDebugBuffer();
+    // E → expandir/colapsar el mensaje anclado (el más reciente visible)
+    if (!key.ctrl && !key.meta && input.toLowerCase() === 'e') {
+      const anchorIdx = Math.max(0, state.transcript.length - 1 - scrollOffset);
+      setExpandedMessages(prev => {
+        const next = new Set(prev);
+        if (next.has(anchorIdx)) next.delete(anchorIdx);
+        else next.add(anchorIdx);
+        return next;
+      });
+      return;
+    }
+    if (key.ctrl && input.toLowerCase() === 'y') {
+      if (UI_DEBUG) {
+        copyDebugBuffer();
+      } else {
+        const focusedIdx = Math.max(0, state.transcript.length - 1 - scrollOffset);
+        copyMessage(focusedIdx);
+      }
       return;
     }
     // ↑ → un mensaje más antiguo
@@ -141,6 +172,7 @@ function REPL() {
         lines: state.transcript,
         scrollOffset,
         height: viewportHeight,
+        expandedMessages,
       })
     ),
 
@@ -160,9 +192,16 @@ function REPL() {
 
     // ── Hints ───────────────────────────────────────────────────────────────
     React.createElement(
-      Text,
-      {color: 'gray'},
-      'scroll mouse · ↑↓ un mensaje · PgUp/PgDn de a 5 · End al fondo · Home al inicio'
+      Box,
+      {flexDirection: 'row', justifyContent: 'space-between'},
+      React.createElement(
+        Text,
+        {color: 'gray'},
+        'scroll · ↑↓ · PgUp/Dn · End/Home · E expandir · 📋 Ctrl+Y copia'
+      ),
+      copyStatus
+        ? React.createElement(Text, {color: 'green'}, copyStatus)
+        : null,
     ),
   );
 }

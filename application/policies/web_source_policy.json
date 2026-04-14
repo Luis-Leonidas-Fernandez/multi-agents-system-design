@@ -257,6 +257,7 @@
   "source_groups": [
     {
       "name": "japan",
+      "language": "ja",
       "entity_terms": [
         "japan",
         "japón",
@@ -276,6 +277,7 @@
     },
     {
       "name": "argentina",
+      "language": "es",
       "entity_terms": [
         "argentina",
         "argentino",
@@ -296,6 +298,7 @@
     },
     {
       "name": "chile",
+      "language": "es",
       "entity_terms": [
         "chile",
         "chileno",
@@ -316,6 +319,7 @@
     },
     {
       "name": "south_korea",
+      "language": "ko",
       "entity_terms": [
         "south korea",
         "korea del sur",
@@ -339,6 +343,7 @@
     },
     {
       "name": "mexico",
+      "language": "es",
       "entity_terms": [
         "mexico",
         "méxico",
@@ -358,6 +363,7 @@
     },
     {
       "name": "united_states",
+      "language": "en",
       "entity_terms": [
         "united states",
         "estados unidos",
@@ -382,6 +388,7 @@
     },
     {
       "name": "brazil",
+      "language": "pt",
       "entity_terms": [
         "brazil",
         "brasil",
@@ -404,6 +411,7 @@
     },
     {
       "name": "uruguay",
+      "language": "es",
       "entity_terms": [
         "uruguay",
         "uruguayo",
@@ -422,6 +430,7 @@
     },
     {
       "name": "colombia",
+      "language": "es",
       "entity_terms": [
         "colombia",
         "colombiano",
@@ -441,6 +450,7 @@
     },
     {
       "name": "paraguay",
+      "language": "es",
       "entity_terms": [
         "paraguay",
         "paraguar",
@@ -459,6 +469,7 @@
     },
     {
       "name": "bolivia",
+      "language": "es",
       "entity_terms": [
         "bolivia",
         "boliviano",
@@ -476,6 +487,7 @@
     },
     {
       "name": "spain",
+      "language": "es",
       "entity_terms": [
         "spain",
         "españa",
@@ -496,6 +508,7 @@
     },
     {
       "name": "ireland",
+      "language": "en",
       "entity_terms": [
         "ireland",
         "irlanda",
@@ -511,6 +524,7 @@
     },
     {
       "name": "iceland",
+      "language": "is",
       "entity_terms": [
         "iceland",
         "islandia",
@@ -526,6 +540,7 @@
     },
     {
       "name": "slovenia",
+      "language": "sl",
       "entity_terms": [
         "slovenia",
         "eslovenia",
@@ -543,6 +558,7 @@
     },
     {
       "name": "italy",
+      "language": "it",
       "entity_terms": [
         "italy",
         "italia",
@@ -561,6 +577,7 @@
     },
     {
       "name": "ukraine",
+      "language": "uk",
       "entity_terms": [
         "ukraine",
         "ucrania",
@@ -578,6 +595,7 @@
     },
     {
       "name": "russia",
+      "language": "ru",
       "entity_terms": [
         "russia",
         "rusia",
@@ -599,6 +617,7 @@
     },
     {
       "name": "china",
+      "language": "zh",
       "entity_terms": [
         "china",
         "chino",
@@ -616,6 +635,7 @@
     },
     {
       "name": "north_korea",
+      "language": "ko",
       "entity_terms": [
         "north korea",
         "corea del norte",
@@ -632,6 +652,7 @@
     },
     {
       "name": "new_zealand",
+      "language": "en",
       "entity_terms": [
         "new zealand",
         "nueva zelanda"

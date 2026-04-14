@@ -254,6 +254,20 @@ def get_recent_query_requirements(horizon: Optional[str]) -> dict:
     }
 
 
+def get_group_language(group_name: Optional[str]) -> Optional[str]:
+    """Devuelve el código ISO 639-1 del idioma principal de la prensa local del grupo.
+
+    Retorna None si el grupo no existe o no tiene campo ``language``.
+    Los grupos con idioma "es" o "en" no necesitan traducción — el flujo de
+    búsqueda ya genera variantes en esos idiomas.
+    """
+    group = _get_source_group_policy(group_name)
+    if not group:
+        return None
+    lang = str(group.get("language") or "").strip().lower()
+    return lang if lang else None
+
+
 def _strip_accents(text: str) -> str:
     """Remove diacritics so 'japon' matches 'japón', 'ultima' matches 'última', etc."""
     return _normalize_text(text)

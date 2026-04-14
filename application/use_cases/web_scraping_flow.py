@@ -37,6 +37,7 @@ from application.policies.scrape_tracker import (
 from application.policies.web_source_policy import (
     detect_query_source_group,
     detect_recent_query_horizon,
+    get_group_language,
     get_preferred_domains_for_group,
     get_query_source_terms,
     get_recent_query_requirements,
@@ -439,22 +440,50 @@ class CountryRecentNewsStrategy:
                 }.get(topic, "Noticias")
                 header = f"**{topic_label} en {geography}**" if geography else f"**{topic_label}**"
 
-                paragraphs = [candidate.snippet for candidate in top if candidate.snippet]
-                # El header va embebido en el primer párrafo para sobrevivir el post-filter
-                if paragraphs:
-                    paragraphs[0] = f"{header}\n\n{paragraphs[0]}"
-                body = "\n\n".join(paragraphs)
-                sources_block = _format_sources(sources)
-                summary = body
-                if sources_block:
-                    summary = f"{summary}\n\n{sources_block}"
-                return {
-                    "summary": summary,
-                    "words": summary.split(),
-                    "source_type": "search",
-                    "sources": sources,
-                    "pre_synthesized": True,
-                }
+                # Detect if source language needs translation to query language.
+                # es/en sources → fast path (inline Fuente:, no LLM call).
+                # Other languages (it, ja, ko, etc.) → synthesis path so the LLM
+                # translates to the query language and attributes sources per bullet.
+                source_group_name = detect_query_source_group(last_message)
+                group_lang = get_group_language(source_group_name)
+                needs_translation = group_lang not in (None, "es", "en")
+
+                if not needs_translation:
+                    # Fast path: build each candidate with its source inline (1:1 guaranteed).
+                    blocks: list[str] = []
+                    for i, candidate in enumerate(top):
+                        if not candidate.snippet:
+                            continue
+                        url = candidate.url.split("#")[0]
+                        src_line = f"Fuente: [{candidate.title}]({url})"
+                        snippet = candidate.snippet
+                        if i == 0:
+                            snippet = f"{header}\n\n{snippet}"
+                        blocks.append(f"{snippet}\n\n{src_line}")
+                    summary = "\n\n".join(blocks)
+                    return {
+                        "summary": summary,
+                        "words": summary.split(),
+                        "source_type": "search",
+                        "sources": sources,
+                        "pre_synthesized": True,
+                    }
+                else:
+                    # Translation path: build labeled content so _synthesize_search_summary
+                    # can translate AND attribute each bullet to its source.
+                    labeled_parts = [
+                        f"[{candidate.title}]: {candidate.snippet}"
+                        for candidate in top if candidate.snippet
+                    ]
+                    raw_for_synthesis = f"{header}\n\n" + "\n\n".join(labeled_parts)
+                    return {
+                        "summary": raw_for_synthesis,
+                        "words": raw_for_synthesis.split(),
+                        "source_type": "search",
+                        "sources": sources,
+                        "pre_synthesized": False,
+                        "has_labeled_content": True,
+                    }
         return None
 
 
@@ -3937,10 +3966,13 @@ async def _run_generic_web_search_strategy_impl(
                 # Discard truncated snippets (Tavily cuts them with "…" or "...")
                 is_truncated = trimmed.endswith(("…", "...")) or re.search(r"\w…$", trimmed)
                 if trimmed and not _is_no_info_response(trimmed) and not is_truncated:
-                    paragraph_parts.append(f"{title}: {trimmed}")
-            bullets_text = "\n\n".join(paragraph_parts)
-            sources_block = _format_sources(week_entry_sources)
-            summary = f"{bullets_text}\n\n{sources_block}".strip() if sources_block else bullets_text
+                    url = _clean_source_url(c.get("url", ""))
+                    src_line = f"Fuente: [{title}]({url})" if url else (f"Fuente: {title}" if title else "")
+                    entry = f"{title}: {trimmed}"
+                    if src_line:
+                        entry = f"{entry}\n\n{src_line}"
+                    paragraph_parts.append(entry)
+            summary = "\n\n".join(paragraph_parts)
             return {
                 "summary": summary,
                 "words": summary.split(),
@@ -4471,6 +4503,7 @@ async def _synthesize_search_summary(
     query: str,
     get_llm_fn: Callable,
     sources: list[dict[str, str]],
+    has_labeled_content: bool = False,
 ) -> str:
     """Passes raw search content through LLM to produce a clean, structured response."""
     try:
@@ -4502,14 +4535,24 @@ async def _synthesize_search_summary(
         clean_content = "\n\n".join(clean_lines[:40])
         query_terms_for_dedup = _extract_generic_query_terms(query)
         query_horizon_local = detect_recent_query_horizon(query) if _is_recent_web_information_query(query) else None
+        # Cuando el contenido está en otro idioma, la instrucción de traducción debe
+        # ir al INICIO del prompt — si va enterrada en las reglas, el LLM la ignora.
+        translation_prefix = ""
+        if has_labeled_content:
+            translation_prefix = (
+                "⚠️ TRADUCCIÓN OBLIGATORIA: El contenido de abajo puede estar en otro idioma "
+                "(italiano, japonés, etc.). DEBES traducir TODO a español rioplatense. "
+                "NUNCA copies texto en otro idioma — siempre traducí.\n\n"
+            )
         prompt = (
+            f"{translation_prefix}"
             f"Fecha actual: {today_str}\n"
             f"Consulta del usuario: {query}\n\n"
             f"Información recopilada de la web:\n{clean_content}\n\n"
             "Sintetizá una respuesta clara respondiendo ÚNICAMENTE con lo que está en el texto de arriba. "
             "PROHIBIDO usar conocimiento propio o información que no esté en el texto provisto.\n\n"
             "Reglas de contenido:\n"
-            "- Usá el mismo idioma que la consulta\n"
+            "- IDIOMA: respondé siempre en el mismo idioma que la consulta del usuario\n"
             "- IGNORÁ completamente: pie de fotos, descripciones de imágenes, nombres de personas sin contexto noticioso, títulos de anime/manga, fragmentos sin información útil\n"
             "- PRIORIZÁ: artículos con hechos concretos, cifras, eventos, decisiones o noticias verificables\n"
             "- Si el contenido disponible no responde bien la consulta, indicalo brevemente\n\n"
@@ -4523,8 +4566,18 @@ async def _synthesize_search_summary(
             "- OBLIGATORIO: dejá UNA línea en blanco entre cada punto\n"
             "- Cada punto tiene 2-3 oraciones con el hecho concreto, quiénes están involucrados y por qué importa\n"
             "- NO uses títulos ni headers (##, ###) dentro de la respuesta\n"
-            "- NO incluyas una sección Sources — se agrega automáticamente"
         )
+        if has_labeled_content:
+            # Contenido etiquetado [titulo]: snippet — el LLM puede atribuir por punto.
+            # No agregar sources_block al final: el LLM lo hace inline.
+            prompt += (
+                "- OBLIGATORIO: después del texto de cada punto, en una nueva línea escribí exactamente "
+                "'Fuente: [titulo]' usando el título entre corchetes del texto de arriba "
+                "(ej: '[La Repubblica]: ...' → 'Fuente: La Repubblica')\n"
+                "- NO incluyas una sección Sources al final"
+            )
+        else:
+            prompt += "- NO incluyas una sección Sources — se agrega automáticamente"
         if query_horizon_local == "week":
             cutoff = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%d/%m/%Y')
             prompt += f"\n- Solo incluí eventos de los últimos 30 días (desde el {cutoff}). Descartá cualquier evento más antiguo aunque esté en el texto."
@@ -4536,7 +4589,7 @@ async def _synthesize_search_summary(
         synthesized = re.split(r"\n\s*sources\s*:", synthesized, maxsplit=1, flags=re.IGNORECASE)[0].strip()
         synthesized = _enforce_synthesis_format(synthesized)
         synthesized = _dedup_synthesis_bullets(synthesized, query_terms_for_dedup)
-        if sources_block:
+        if not has_labeled_content and sources_block:
             synthesized = f"{synthesized}\n\n{sources_block}"
         return synthesized
     except Exception as _synth_exc:
@@ -4661,7 +4714,10 @@ async def run_web_scraping_flow(
                 if discovery.get("pre_synthesized"):
                     summary = _disc_raw
                 else:
-                    summary = await _synthesize_search_summary(_disc_raw, last_message, get_llm_fn, _disc_sources)
+                    summary = await _synthesize_search_summary(
+                        _disc_raw, last_message, get_llm_fn, _disc_sources,
+                        has_labeled_content=bool(discovery.get("has_labeled_content")),
+                    )
                 summary, _disc_sources, words = _finalize_web_user_summary(summary, last_message, _disc_sources)
                 duration_ms = int((time.time() - t0) * 1000)
                 reliability = _scrape_reliability(len(words))
@@ -4770,7 +4826,10 @@ async def run_web_scraping_flow(
                 if discovery.get("pre_synthesized"):
                     summary = _disc_raw
                 else:
-                    summary = await _synthesize_search_summary(_disc_raw, last_message, get_llm_fn, _disc_sources)
+                    summary = await _synthesize_search_summary(
+                        _disc_raw, last_message, get_llm_fn, _disc_sources,
+                        has_labeled_content=bool(discovery.get("has_labeled_content")),
+                    )
                 summary, _disc_sources, words = _finalize_web_user_summary(summary, last_message, _disc_sources)
                 duration_ms = int((time.time() - t0) * 1000)
                 reliability = _scrape_reliability(len(words))

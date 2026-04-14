@@ -89,6 +89,12 @@ function useBridgeSession(options = {}) {
           continue;
         }
 
+        if (message.type === 'log') {
+          reportDebug('message:log', {line: message.line});
+          setState(prev => ({...prev, transcript: [...prev.transcript, `log: ${message.line || ''}`]}));
+          continue;
+        }
+
         if (message.type === 'error') {
           reportDebug('message:error', {message: message.message});
           setState(prev => ({...prev, status: `error: ${message.message || 'desconocido'}`, busy: false}));
