@@ -44,6 +44,15 @@ from application.policies.web_source_policy import (
     get_source_domain_priority,
     score_domain_boost,
 )
+from domain.country_profile import GEO_ENGLISH
+from domain.country_resolver import GENERIC_WEB_STOPWORDS, GEOGRAPHY_TERMS, extract_query_geography
+from domain.topic_detector import TOPIC_ANGLES, TOPIC_ANGLES_EN, detect_news_topic
+from domain.section_path_resolver import (
+    COUNTRY_PRESS_SECTION_PATHS,
+    GENERIC_SECTION_PATHS,
+    build_country_press_section_targets,
+)
+from infra.country_profile_repo import PERIODICOS_CONTINENT_SLUG_BY_COUNTRY
 from tools.web_tools import _is_specific_article_hit
 from application.helpers.price_flow_helpers import (
     _detect_coin_from_query,
@@ -1233,17 +1242,8 @@ async def _legacy_run_web_scraping_flow(
 # Generic Claude-style web flow
 # ============================================================================
 
-_GENERIC_WEB_STOPWORDS = {
-    "a", "al", "algo", "algunas", "algunos", "ante", "antes", "cada", "como", "con",
-    "contra", "cual", "cuál", "cuales", "cuáles", "cuando", "cuándo", "de", "del", "desde",
-    "donde", "dónde", "durante", "e", "el", "ella", "ellas", "ellos", "en", "entre",
-    "era", "eres", "es", "esa", "esas", "ese", "eso", "esta", "está", "están", "este",
-    "esto", "estos", "fue", "ha", "han", "hay", "la", "las", "le", "les", "lo", "los",
-    "mas", "más", "mi", "mis", "muy", "no", "nos", "nosotros", "o", "o", "para", "pero",
-    "por", "que", "qué", "se", "sin", "sobre", "su", "sus", "te", "tu", "tus", "un",
-    "una", "uno", "unos", "unas", "y", "ya", "hoy", "ayer", "mañana", "today", "latest",
-    "current", "recent", "news", "noticias", "page", "web", "site",
-}
+# Alias para compatibilidad con referencias internas al módulo.
+_GENERIC_WEB_STOPWORDS = GENERIC_WEB_STOPWORDS
 
 
 def _extract_generic_query_terms(text: str) -> list[str]:
@@ -1287,304 +1287,16 @@ def _should_use_country_recent_news_strategy(
     return topic in {"security", "economy", "politics"} or has_news_word
 
 
-_GEOGRAPHY_TERMS: tuple[tuple[str, str], ...] = (
-    # Latin America
-    ("ecuatoriano", "Ecuador"), ("ecuatoriana", "Ecuador"), ("ecuador", "Ecuador"),
-    ("argentino", "Argentina"), ("argentina", "Argentina"),
-    ("colombiano", "Colombia"), ("colombia", "Colombia"),
-    ("venezolano", "Venezuela"), ("venezuela", "Venezuela"),
-    ("chileno", "Chile"), ("chile", "Chile"),
-    ("peruano", "Perú"), ("peru", "Perú"),
-    ("boliviano", "Bolivia"), ("bolivia", "Bolivia"),
-    ("paraguayo", "Paraguay"), ("paraguay", "Paraguay"),
-    ("uruguayo", "Uruguay"), ("uruguay", "Uruguay"),
-    ("guatemalteco", "Guatemala"), ("guatemala", "Guatemala"),
-    ("hondureño", "Honduras"), ("honduras", "Honduras"),
-    ("salvadoreño", "El Salvador"), ("el salvador", "El Salvador"),
-    ("nicaragüense", "Nicaragua"), ("nicaragua", "Nicaragua"),
-    ("costarricense", "Costa Rica"), ("costa rica", "Costa Rica"),
-    ("panameño", "Panamá"), ("panama", "Panamá"),
-    ("cubano", "Cuba"), ("cuba", "Cuba"),
-    ("dominicano", "República Dominicana"), ("república dominicana", "República Dominicana"),
-    ("haitiano", "Haití"), ("haiti", "Haití"),
-    # North America
-    ("mexicano", "México"), ("mexicana", "México"), ("mexico", "México"),
-    ("estadounidense", "Estados Unidos"), ("estados unidos", "Estados Unidos"),
-    ("usa", "Estados Unidos"), ("eeuu", "Estados Unidos"),
-    ("canadiense", "Canadá"), ("canada", "Canadá"),
-    # Europe
-    ("español", "España"), ("espanol", "España"), ("españa", "España"),
-    ("francés", "Francia"), ("frances", "Francia"), ("france", "Francia"), ("francia", "Francia"),
-    ("alemán", "Alemania"), ("aleman", "Alemania"), ("alemania", "Alemania"),
-    ("italiano", "Italia"), ("italiana", "Italia"), ("italia", "Italia"),
-    ("británico", "Reino Unido"), ("britanico", "Reino Unido"), ("reino unido", "Reino Unido"),
-    ("inglés", "Reino Unido"), ("ingles", "Reino Unido"),
-    ("portugués", "Portugal"), ("portugues", "Portugal"), ("portugal", "Portugal"),
-    ("holandés", "Países Bajos"), ("holanda", "Países Bajos"), ("países bajos", "Países Bajos"),
-    ("belga", "Bélgica"), ("belgica", "Bélgica"), ("bélgica", "Bélgica"),
-    ("suizo", "Suiza"), ("suiza", "Suiza"),
-    ("sueco", "Suecia"), ("suecia", "Suecia"),
-    ("noruego", "Noruega"), ("noruega", "Noruega"),
-    ("danés", "Dinamarca"), ("danes", "Dinamarca"), ("dinamarca", "Dinamarca"),
-    ("finlandés", "Finlandia"), ("finlandia", "Finlandia"),
-    ("polaco", "Polonia"), ("polonia", "Polonia"),
-    ("checo", "República Checa"), ("república checa", "República Checa"),
-    ("húngaro", "Hungría"), ("hungria", "Hungría"),
-    ("rumano", "Rumanía"), ("rumania", "Rumanía"),
-    ("griego", "Grecia"), ("grecia", "Grecia"),
-    ("turco", "Turquía"), ("turquia", "Turquía"), ("turquía", "Turquía"),
-    ("ruso", "Rusia"), ("rusia", "Rusia"), ("russia", "Rusia"),
-    ("ucraniano", "Ucrania"), ("ucrania", "Ucrania"),
-    ("serbio", "Serbia"), ("serbia", "Serbia"),
-    # Asia-Pacific
-    ("japonés", "Japón"), ("japonesa", "Japón"), ("japones", "Japón"),
-    ("japón", "Japón"), ("japon", "Japón"), ("japan", "Japón"),
-    ("chino", "China"), ("china", "China"),
-    ("surcoreano", "Corea del Sur"), ("corea del sur", "Corea del Sur"),
-    ("norcoreano", "Corea del Norte"), ("corea del norte", "Corea del Norte"),
-    ("coreano", "Corea"), ("corea", "Corea"),
-    ("indio", "India"), ("india", "India"),
-    ("paquistaní", "Pakistán"), ("pakistan", "Pakistán"),
-    ("bangladesí", "Bangladesh"), ("bangladesh", "Bangladesh"),
-    ("indonesio", "Indonesia"), ("indonesia", "Indonesia"),
-    ("filipino", "Filipinas"), ("filipinas", "Filipinas"),
-    ("vietnamita", "Vietnam"), ("vietnam", "Vietnam"),
-    ("tailandés", "Tailandia"), ("tailandia", "Tailandia"),
-    ("malayo", "Malasia"), ("malasia", "Malasia"),
-    ("singapurense", "Singapur"), ("singapur", "Singapur"),
-    ("australiano", "Australia"), ("australia", "Australia"),
-    ("neozelandés", "Nueva Zelanda"), ("nueva zelanda", "Nueva Zelanda"),
-    # Middle East & Africa
-    ("israelí", "Israel"), ("israel", "Israel"),
-    ("palestino", "Palestina"), ("palestina", "Palestina"),
-    ("iraní", "Irán"), ("iran", "Irán"),
-    ("iraquí", "Irak"), ("irak", "Irak"),
-    ("sirio", "Siria"), ("siria", "Siria"),
-    ("libanés", "Líbano"), ("libano", "Líbano"),
-    ("saudí", "Arabia Saudita"), ("arabia saudita", "Arabia Saudita"), ("saudi", "Arabia Saudita"),
-    ("emiratense", "Emiratos Árabes"), ("emiratos arabes", "Emiratos Árabes"),
-    ("egipcio", "Egipto"), ("egipto", "Egipto"),
-    ("nigeriano", "Nigeria"), ("nigeria", "Nigeria"),
-    ("sudafricano", "Sudáfrica"), ("sudafrica", "Sudáfrica"),
-    ("etíope", "Etiopía"), ("etiopia", "Etiopía"),
-    ("keniata", "Kenia"), ("kenia", "Kenia"),
-    ("marroquí", "Marruecos"), ("marruecos", "Marruecos"),
-    # Brazil (no adjective form yet)
-    ("brasileño", "Brasil"), ("brasileña", "Brasil"), ("brasil", "Brasil"),
-)
+# Alias para compatibilidad con referencias internas al módulo.
+_GEOGRAPHY_TERMS = GEOGRAPHY_TERMS
+_extract_query_geography = extract_query_geography
 
-
-def _extract_query_geography(text: str) -> Optional[str]:
-    lowered = (text or "").lower()
-    # 1. Check known country terms (longest match first to avoid "corea" matching before "corea del sur")
-    for term, country in sorted(_GEOGRAPHY_TERMS, key=lambda x: -len(x[0])):
-        if term in lowered:
-            return country
-    # 2. Pattern-based fallback: extract word after "de"/"en"/"sobre" before "de esta"/"semana"/"hoy"
-    #    e.g. "noticias de turquía de esta semana" → "Turquía"
-    #    e.g. "qué pasa en nigeria" → "Nigeria"
-    fallback_patterns = [
-        r"\b(?:de|en|sobre)\s+([a-záéíóúüñ]{4,})\s+(?:de\s+esta|esta\s+semana|hoy|del\b|esta\b)",
-        r"\b(?:de|en|sobre)\s+([a-záéíóúüñ]{4,})\s*$",
-        r"\b(?:de|en|sobre)\s+([a-záéíóúüñ]{4,})\s",
-    ]
-    _geo_stopwords = _GENERIC_WEB_STOPWORDS | {
-        "noticia", "noticias", "semana", "semanas", "ultima", "ultimas",
-        "ultimo", "ultimos", "última", "últimas", "último", "últimos",
-        "reciente", "recientes", "informacion", "información", "tema",
-        "seguridad", "economia", "politica", "deporte", "cultura",
-    }
-    for pattern in fallback_patterns:
-        m = re.search(pattern, lowered)
-        if m:
-            word = m.group(1).strip()
-            if word not in _geo_stopwords and len(word) >= 4:
-                return word.capitalize()
-    return None
-
-
-_TOPIC_ANGLES: dict[str, list[str]] = {
-    "security": [
-        "{geo} crimen delincuencia seguridad interna {year}",
-        "{geo} defensa militar despliegue fuerzas {year}",
-        "{geo} diplomacia tensiones política exterior {year}",
-        "{geo} desastre emergencia seguridad civil {year}",
-    ],
-    "economy": [
-        "{geo} economía mercado inversión {year}",
-        "{geo} empleo salario empresa {year}",
-        "{geo} inflación precios comercio {year}",
-        "{geo} tecnología industria energía {year}",
-    ],
-    "politics": [
-        "{geo} gobierno elecciones política {year}",
-        "{geo} congreso ley reforma legislación {year}",
-        "{geo} oposición partido liderazgo {year}",
-        "{geo} corrupción justicia tribunal {year}",
-    ],
-    "default": [
-        "{geo} {topic} noticias recientes {year}",
-        "{geo} {topic} novedades actualidad {year}",
-        "{geo} {topic} últimas noticias semana {year}",
-        "{geo} {topic} hoy noticia {year}",
-    ],
-}
-
-# English equivalents used as supplementary search fallback when Spanish angles yield < 4 candidates.
-_TOPIC_ANGLES_EN: dict[str, list[str]] = {
-    "security": [
-        "{geo_en} crime internal security {year}",
-        "{geo_en} defense military deployment {year}",
-        "{geo_en} diplomacy tensions foreign policy {year}",
-        "{geo_en} disaster emergency civil security {year}",
-    ],
-    "economy": [
-        "{geo_en} economy market investment {year}",
-        "{geo_en} employment wages companies {year}",
-        "{geo_en} inflation prices trade {year}",
-        "{geo_en} technology industry energy {year}",
-    ],
-    "politics": [
-        "{geo_en} government elections politics {year}",
-        "{geo_en} congress law reform legislation {year}",
-        "{geo_en} opposition party leadership {year}",
-        "{geo_en} corruption justice tribunal {year}",
-    ],
-    "default": [
-        "{geo_en} {topic} recent news {year}",
-        "{geo_en} {topic} latest news this week {year}",
-        "{geo_en} {topic} today news {year}",
-        "{geo_en} {topic} updates {year}",
-    ],
-}
-
-_GEO_ENGLISH: dict[str, str] = {
-    # Latin America
-    "Ecuador": "Ecuador", "Argentina": "Argentina", "Colombia": "Colombia",
-    "Venezuela": "Venezuela", "Chile": "Chile", "Perú": "Peru",
-    "Bolivia": "Bolivia", "Paraguay": "Paraguay", "Uruguay": "Uruguay",
-    "Guatemala": "Guatemala", "Honduras": "Honduras", "El Salvador": "El Salvador",
-    "Nicaragua": "Nicaragua", "Costa Rica": "Costa Rica", "Panamá": "Panama",
-    "Cuba": "Cuba", "República Dominicana": "Dominican Republic", "Haití": "Haiti",
-    # North America
-    "México": "Mexico", "Estados Unidos": "United States", "Canadá": "Canada",
-    # Europe
-    "España": "Spain", "Francia": "France", "Alemania": "Germany",
-    "Italia": "Italy", "Reino Unido": "United Kingdom", "Portugal": "Portugal",
-    "Países Bajos": "Netherlands", "Bélgica": "Belgium", "Suiza": "Switzerland",
-    "Suecia": "Sweden", "Noruega": "Norway", "Dinamarca": "Denmark",
-    "Finlandia": "Finland", "Polonia": "Poland", "República Checa": "Czech Republic",
-    "Hungría": "Hungary", "Rumanía": "Romania", "Grecia": "Greece",
-    "Turquía": "Turkey", "Rusia": "Russia", "Ucrania": "Ukraine", "Serbia": "Serbia",
-    # Asia-Pacific
-    "Japón": "Japan", "China": "China", "Corea del Sur": "South Korea",
-    "Corea del Norte": "North Korea", "Corea": "Korea",
-    "India": "India", "Pakistán": "Pakistan", "Bangladesh": "Bangladesh",
-    "Indonesia": "Indonesia", "Filipinas": "Philippines", "Vietnam": "Vietnam",
-    "Tailandia": "Thailand", "Malasia": "Malaysia", "Singapur": "Singapore",
-    "Australia": "Australia", "Nueva Zelanda": "New Zealand",
-    # Middle East & Africa
-    "Israel": "Israel", "Palestina": "Palestine", "Irán": "Iran",
-    "Irak": "Iraq", "Siria": "Syria", "Líbano": "Lebanon",
-    "Arabia Saudita": "Saudi Arabia", "Emiratos Árabes": "UAE",
-    "Egipto": "Egypt", "Nigeria": "Nigeria", "Sudáfrica": "South Africa",
-    "Etiopía": "Ethiopia", "Kenia": "Kenya", "Marruecos": "Morocco",
-    # Brazil
-    "Brasil": "Brazil",
-}
-
-_PERIODICOS_CONTINENT_SLUG_BY_COUNTRY: dict[str, str] = {
-    # Latin America
-    "Argentina": "sudamerica",
-    "Bolivia": "sudamerica",
-    "Brasil": "sudamerica",
-    "Chile": "sudamerica",
-    "Colombia": "sudamerica",
-    "Ecuador": "sudamerica",
-    "Paraguay": "sudamerica",
-    "Perú": "sudamerica",
-    "Uruguay": "sudamerica",
-    "Venezuela": "sudamerica",
-    # North/Central America + Caribbean
-    "Canadá": "norteamerica",
-    "Costa Rica": "centroamerica",
-    "Cuba": "centroamerica",
-    "El Salvador": "centroamerica",
-    "Estados Unidos": "norteamerica",
-    "Guatemala": "centroamerica",
-    "Haití": "centroamerica",
-    "Honduras": "centroamerica",
-    "México": "norteamerica",
-    "Nicaragua": "centroamerica",
-    "Panamá": "centroamerica",
-    "República Dominicana": "centroamerica",
-    # Europe
-    "Alemania": "europa",
-    "Bélgica": "europa",
-    "Dinamarca": "europa",
-    "España": "europa",
-    "Finlandia": "europa",
-    "Francia": "europa",
-    "Grecia": "europa",
-    "Hungría": "europa",
-    "Italia": "europa",
-    "Noruega": "europa",
-    "Países Bajos": "europa",
-    "Polonia": "europa",
-    "Portugal": "europa",
-    "Reino Unido": "europa",
-    "República Checa": "europa",
-    "Rumanía": "europa",
-    "Rusia": "europa",
-    "Serbia": "europa",
-    "Suecia": "europa",
-    "Suiza": "europa",
-    "Turquía": "europa",
-    "Ucrania": "europa",
-    # Asia-Pacific
-    "Australia": "asia",
-    "Bangladesh": "asia",
-    "China": "asia",
-    "Corea": "asia",
-    "Corea del Norte": "asia",
-    "Corea del Sur": "asia",
-    "Filipinas": "asia",
-    "India": "asia",
-    "Indonesia": "asia",
-    "Japón": "asia",
-    "Malasia": "asia",
-    "Nueva Zelanda": "asia",
-    "Pakistán": "asia",
-    "Singapur": "asia",
-    "Tailandia": "asia",
-    "Vietnam": "asia",
-    # Middle East & Africa
-    "Arabia Saudita": "medio-oriente",
-    "Egipto": "africa",
-    "Emiratos Árabes": "medio-oriente",
-    "Etiopía": "africa",
-    "Irak": "medio-oriente",
-    "Irán": "medio-oriente",
-    "Israel": "medio-oriente",
-    "Kenia": "africa",
-    "Líbano": "medio-oriente",
-    "Marruecos": "africa",
-    "Nigeria": "africa",
-    "Palestina": "medio-oriente",
-    "Siria": "medio-oriente",
-    "Sudáfrica": "africa",
-}
-
-
-def _detect_news_topic(query: str) -> str:
-    lowered = query.lower()
-    if any(k in lowered for k in ["seguridad", "security", "crimen", "defensa", "militar", "policía", "policia", "terroris", "ataque", "atentado", "conflicto"]):
-        return "security"
-    if any(k in lowered for k in ["economía", "economia", "mercado", "bolsa", "precio", "inflacion", "inflación", "pib", "empleo", "comercio", "empresa"]):
-        return "economy"
-    if any(k in lowered for k in ["política", "politica", "gobierno", "elección", "eleccion", "presidente", "congreso", "partido", "ministro"]):
-        return "politics"
-    return "default"
+# Alias para compatibilidad con referencias internas al módulo.
+_TOPIC_ANGLES = TOPIC_ANGLES
+_TOPIC_ANGLES_EN = TOPIC_ANGLES_EN
+_GEO_ENGLISH = GEO_ENGLISH
+_PERIODICOS_CONTINENT_SLUG_BY_COUNTRY = PERIODICOS_CONTINENT_SLUG_BY_COUNTRY
+_detect_news_topic = detect_news_topic
 
 
 def _country_press_query_terms(last_message: str) -> list[str]:
@@ -1871,228 +1583,11 @@ def _dedupe_homepage_lines(lines: list[str]) -> list[str]:
     return deduped
 
 
-_COUNTRY_PRESS_SECTION_PATHS: dict[str, dict[str, list[tuple[str, str]]]] = {
-    # ── ITALIA ─────────────────────────────────────────────────────────────
-    "ansa.it": {
-        "security": [("/sito/notizie/cronaca/cronaca.shtml", "cronaca")],
-        "politics": [("/sito/notizie/politica/politica.shtml", "politica")],
-        "economy": [("/sito/notizie/economia/economia.shtml", "economia")],
-        "default": [("/sito/notizie/cronaca/cronaca.shtml", "cronaca")],
-    },
-    "repubblica.it": {
-        "security": [("/cronaca/", "cronaca")],
-        "politics": [("/politica/", "politica")],
-        "default": [("/cronaca/", "cronaca")],
-    },
-    "ilmessaggero.it": {
-        "security": [("/italia/", "italia"), ("/roma/", "roma")],
-        "politics": [("/politica/", "politica"), ("/italia/", "italia")],
-        "default": [("/italia/", "italia")],
-    },
-    "ilfattoquotidiano.it": {
-        "security": [("/cronaca/", "cronaca"), ("/", "homepage-cronaca")],
-        "politics": [("/politica/", "politica"), ("/", "homepage-politica")],
-        "default": [("/", "homepage")],
-    },
-    "ilfoglio.it": {
-        "security": [("/cronaca/", "cronaca"), ("/", "homepage-cronaca")],
-        "politics": [("/politica/", "politica"), ("/", "homepage-politica")],
-        "default": [("/", "homepage")],
-    },
-    "ilmanifesto.it": {
-        "security": [("/", "homepage-cronaca")],
-        "politics": [("/sezioni/politica/", "politica"), ("/", "homepage-politica")],
-        "default": [("/", "homepage")],
-    },
-    "huffingtonpost.it": {
-        "security": [("/news/cronaca/", "cronaca"), ("/", "homepage-cronaca")],
-        "politics": [("/politica/", "politica"), ("/", "homepage-politica")],
-        "default": [("/", "homepage")],
-    },
-    # ── ESPAÑA ─────────────────────────────────────────────────────────────
-    "elpais.com": {
-        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
-        "politics": [("/espana/", "españa"), ("/politica/", "política")],
-        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
-        "default": [("/espana/", "españa"), ("/actualidad/", "actualidad")],
-    },
-    "elmundo.es": {
-        "security": [("/espana/", "españa"), ("/cronica/", "crónica")],
-        "politics": [("/espana/", "españa"), ("/politica/", "política")],
-        "economy": [("/economia/", "economía"), ("/mercados/", "mercados")],
-        "default": [("/espana/", "españa")],
-    },
-    "abc.es": {
-        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
-        "politics": [("/espana/", "españa"), ("/politica/", "política")],
-        "economy": [("/economia/", "economía")],
-        "default": [("/espana/", "españa")],
-    },
-    "lavanguardia.com": {
-        "security": [("/sucesos/", "sucesos"), ("/vida/sucesos-y-tribunales/", "sucesos")],
-        "politics": [("/politica/", "política"), ("/internacional/", "internacional")],
-        "economy": [("/economia/", "economía"), ("/finanzas/", "finanzas")],
-        "default": [("/politica/", "política"), ("/vida/", "vida")],
-    },
-    "elconfidencial.com": {
-        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
-        "politics": [("/espana/", "españa"), ("/politica/", "política")],
-        "economy": [("/economia/", "economía"), ("/mercados/", "mercados")],
-        "default": [("/espana/", "españa")],
-    },
-    "20minutos.es": {
-        "security": [("/nacional/", "nacional"), ("/sociedad/", "sociedad")],
-        "politics": [("/politica/", "política"), ("/nacional/", "nacional")],
-        "economy": [("/economia/", "economía")],
-        "default": [("/nacional/", "nacional")],
-    },
-    "eldiario.es": {
-        "security": [("/sociedad/", "sociedad"), ("/espana/", "españa")],
-        "politics": [("/politica/", "política"), ("/espana/", "españa")],
-        "economy": [("/economia/", "economía")],
-        "default": [("/espana/", "españa")],
-    },
-    "publico.es": {
-        "security": [("/sociedad/", "sociedad"), ("/espana/", "españa")],
-        "politics": [("/politica/", "política"), ("/espana/", "españa")],
-        "economy": [("/economia/", "economía")],
-        "default": [("/espana/", "españa")],
-    },
-    "larazon.es": {
-        "security": [("/espana/", "españa"), ("/sociedad/", "sociedad")],
-        "politics": [("/espana/", "españa"), ("/politica/", "política")],
-        "default": [("/espana/", "españa")],
-    },
-    "cadenaser.com": {
-        "security": [("/noticias/nacional/", "nacional"), ("/noticias/sociedad/", "sociedad")],
-        "politics": [("/noticias/politica/", "política"), ("/noticias/nacional/", "nacional")],
-        "default": [("/noticias/", "noticias")],
-    },
-    "rtve.es": {
-        "security": [("/noticias/espana/", "españa"), ("/noticias/sociedad/", "sociedad")],
-        "politics": [("/noticias/politica/", "política"), ("/noticias/espana/", "españa")],
-        "economy": [("/noticias/economia/", "economía")],
-        "default": [("/noticias/", "noticias")],
-    },
-    # ── ARGENTINA ──────────────────────────────────────────────────────────
-    "lanacion.com.ar": {
-        "security": [("/seguridad/", "seguridad"), ("/politica/", "política")],
-        "politics": [("/politica/", "política"), ("/el-mundo/", "el-mundo")],
-        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
-        "default": [("/ultimo-momento/", "último momento"), ("/", "homepage")],
-    },
-    "infobae.com": {
-        "security": [("/sociedad/", "sociedad"), ("/politica/", "política")],
-        "politics": [("/politica/", "política"), ("/america/america-latina/", "america")],
-        "economy": [("/economia/", "economía"), ("/finanzas/", "finanzas")],
-        "default": [("/sociedad/", "sociedad"), ("/", "homepage")],
-    },
-    "pagina12.com.ar": {
-        "security": [("/secciones/el-pais/", "el-país"), ("/secciones/sociedad/", "sociedad")],
-        "politics": [("/secciones/el-pais/", "el-país"), ("/secciones/", "secciones")],
-        "economy": [("/secciones/economia/", "economía"), ("/secciones/", "secciones")],
-        "default": [("/secciones/el-pais/", "el-país")],
-    },
-    "perfil.com": {
-        "security": [("/noticias/policial/", "policial"), ("/noticias/policial.html", "policial")],
-        "politics": [("/noticias/politica/", "política"), ("/noticias/politica.html", "política")],
-        "economy": [("/noticias/economia/", "economía")],
-        "default": [("/noticias/", "noticias")],
-    },
-    "cronica.com.ar": {
-        "security": [("/categoria/policiales/", "policiales"), ("/categoria/", "noticias")],
-        "politics": [("/categoria/politica/", "política")],
-        "economy": [("/categoria/economia/", "economía")],
-        "default": [("/categoria/policiales/", "policiales")],
-    },
-    "clarin.com": {
-        "security": [("/policiales/", "policiales"), ("/sociedad/", "sociedad")],
-        "politics": [("/politica/", "política"), ("/zona/", "zona")],
-        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
-        "default": [("/ultimo-momento/", "último momento")],
-    },
-    "ambito.com": {
-        "security": [("/politica/", "política"), ("/economia/", "economía")],
-        "politics": [("/politica/", "política")],
-        "economy": [("/economia/", "economía"), ("/finanzas/", "finanzas")],
-        "default": [("/politica/", "política")],
-    },
-    "tiempoar.com.ar": {
-        "security": [("/secciones/el-pais/", "el-país"), ("/", "homepage")],
-        "politics": [("/secciones/el-pais/", "el-país")],
-        "default": [("/", "homepage")],
-    },
-    # ── CHILE ──────────────────────────────────────────────────────────────
-    "emol.com": {
-        "security": [("/noticias/nacional/", "nacional"), ("/noticias/policial/", "policial")],
-        "politics": [("/noticias/nacional/", "nacional"), ("/noticias/politica/", "política")],
-        "economy": [("/noticias/economia/", "economía")],
-        "default": [("/noticias/nacional/", "nacional")],
-    },
-    "latercera.com": {
-        "security": [("/nacional/", "nacional"), ("/politica/", "política")],
-        "politics": [("/politica/", "política"), ("/nacional/", "nacional")],
-        "economy": [("/pulso/", "pulso"), ("/negocios/", "negocios")],
-        "default": [("/nacional/", "nacional")],
-    },
-    # ── MÉXICO ─────────────────────────────────────────────────────────────
-    "eluniversal.com.mx": {
-        "security": [("/nacion/seguridad/", "seguridad"), ("/estados/", "estados")],
-        "politics": [("/nacion/politica/", "política"), ("/nacion/", "nación")],
-        "economy": [("/finanzas/", "finanzas"), ("/economia/", "economía")],
-        "default": [("/nacion/", "nación")],
-    },
-    "milenio.com": {
-        "security": [("/policia/", "policía"), ("/estados/", "estados")],
-        "politics": [("/politica/", "política"), ("/mexico/", "méxico")],
-        "economy": [("/negocios/", "negocios")],
-        "default": [("/policia/", "policía")],
-    },
-    # ── COLOMBIA ───────────────────────────────────────────────────────────
-    "eltiempo.com": {
-        "security": [("/justicia/", "justicia"), ("/colombia/", "colombia")],
-        "politics": [("/politica/", "política"), ("/colombia/", "colombia")],
-        "economy": [("/economia/", "economía"), ("/negocios/", "negocios")],
-        "default": [("/colombia/", "colombia")],
-    },
-}
+# Alias para compatibilidad con referencias internas al módulo.
+_COUNTRY_PRESS_SECTION_PATHS = COUNTRY_PRESS_SECTION_PATHS
+_GENERIC_SECTION_PATHS = GENERIC_SECTION_PATHS
+_build_country_press_section_targets = build_country_press_section_targets
 
-_GENERIC_SECTION_PATHS: dict[str, list[tuple[str, str]]] = {
-    "security": [
-        ("/seguridad/", "seguridad"),
-        ("/policiales/", "policiales"),
-        ("/sociedad/", "sociedad"),
-        ("/sucesos/", "sucesos"),
-        ("/espana/", "españa"),
-        ("/nacional/", "nacional"),
-        ("/cronaca/", "cronaca"),
-        ("/", "homepage"),
-    ],
-    "politics": [
-        ("/politica/", "política"),
-        ("/espana/", "españa"),
-        ("/nacional/", "nacional"),
-        ("/gobierno/", "gobierno"),
-        ("/nacion/", "nación"),
-        ("/secciones/el-pais/", "el-país"),
-        ("/", "homepage"),
-    ],
-    "economy": [
-        ("/economia/", "economía"),
-        ("/finanzas/", "finanzas"),
-        ("/negocios/", "negocios"),
-        ("/mercados/", "mercados"),
-        ("/", "homepage"),
-    ],
-    "default": [
-        ("/noticias/", "noticias"),
-        ("/actualidad/", "actualidad"),
-        ("/ultimo-momento/", "último momento"),
-        ("/nacional/", "nacional"),
-        ("/espana/", "españa"),
-        ("/", "homepage"),
-    ],
-}
 
 _SECTION_LOCAL_LABELS = {
     "cronaca", "italia", "roma", "politica", "interni", "economia", "mercati",
@@ -2148,24 +1643,6 @@ def _build_newspaper_section_fetch_prompt(last_message: str, press_name: str, se
     )
 
 
-def _build_country_press_section_targets(domain: str, fallback_url: str, last_message: str) -> list[tuple[str, str]]:
-    topic = _detect_news_topic(last_message)
-    base = (fallback_url or f"https://{domain}/").strip() or f"https://{domain}/"
-    if not base.endswith("/"):
-        base = base + "/"
-    domain_map = _COUNTRY_PRESS_SECTION_PATHS.get(domain, {})
-    candidates = list(domain_map.get(topic) or domain_map.get("default") or [])
-    if not candidates:
-        candidates = list(_GENERIC_SECTION_PATHS.get(topic, _GENERIC_SECTION_PATHS["default"]))
-    built: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for path, label in candidates:
-        full_url = base if path == "/" else urljoin(base, path.lstrip("/"))
-        if full_url in seen:
-            continue
-        seen.add(full_url)
-        built.append((full_url, label))
-    return built[:4]
 
 
 def _classify_fetch_error(fetch_text: str) -> Optional[str]:
