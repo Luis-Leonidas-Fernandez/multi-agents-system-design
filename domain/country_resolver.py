@@ -115,20 +115,28 @@ _GEO_STOPWORDS: frozenset[str] = GENERIC_WEB_STOPWORDS | frozenset({
 })
 
 
-def extract_query_geography(text: str) -> Optional[str]:
+def extract_query_geography(
+    text: str,
+    terms: Optional[tuple[tuple[str, str], ...]] = None,
+) -> Optional[str]:
     """Extrae el nombre canónico del país desde el texto del query.
 
     Primero busca por términos conocidos (longest match first).
     Si no hay match, aplica un fallback por regex buscando el sustantivo
     después de preposiciones geográficas comunes.
 
+    Args:
+        text: Query del usuario.
+        terms: Tabla de demonyms a usar. Si es None usa GEOGRAPHY_TERMS del módulo.
+
     Retorna None si no puede determinar el país.
     """
+    effective_terms = GEOGRAPHY_TERMS if terms is None else terms
     lowered = (text or "").lower()
 
     # 1. Términos conocidos — longest match first para evitar
     #    que "corea" gane ante "corea del sur"
-    for term, country in sorted(GEOGRAPHY_TERMS, key=lambda x: -len(x[0])):
+    for term, country in sorted(effective_terms, key=lambda x: -len(x[0])):
         if term in lowered:
             return country
 

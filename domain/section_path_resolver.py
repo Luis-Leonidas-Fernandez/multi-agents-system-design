@@ -1,6 +1,7 @@
 """Resolución de paths de secciones de prensa local por dominio y tópico."""
 from __future__ import annotations
 
+from typing import Optional
 from urllib.parse import urljoin
 
 from domain.topic_detector import detect_news_topic
@@ -238,21 +239,33 @@ def build_country_press_section_targets(
     domain: str,
     fallback_url: str,
     last_message: str,
+    section_paths: Optional[dict[str, dict[str, list[tuple[str, str]]]]] = None,
+    generic_paths: Optional[dict[str, list[tuple[str, str]]]] = None,
 ) -> list[tuple[str, str]]:
     """Construye la lista de URLs de secciones a scrapear para un dominio dado.
 
     Usa paths curados si existen; cae a genéricos si no.
     Retorna máximo 4 URLs distintas.
+
+    Args:
+        domain: Hostname sin www (ej. "ansa.it").
+        fallback_url: URL base del medio.
+        last_message: Query del usuario (para detectar el tópico).
+        section_paths: Paths curados por dominio. Si es None usa COUNTRY_PRESS_SECTION_PATHS.
+        generic_paths: Paths de fallback por tópico. Si es None usa GENERIC_SECTION_PATHS.
     """
+    effective_section = COUNTRY_PRESS_SECTION_PATHS if section_paths is None else section_paths
+    effective_generic = GENERIC_SECTION_PATHS if generic_paths is None else generic_paths
+
     topic = detect_news_topic(last_message)
     base = (fallback_url or f"https://{domain}/").strip() or f"https://{domain}/"
     if not base.endswith("/"):
         base = base + "/"
 
-    domain_map = COUNTRY_PRESS_SECTION_PATHS.get(domain, {})
+    domain_map = effective_section.get(domain, {})
     candidates = list(domain_map.get(topic) or domain_map.get("default") or [])
     if not candidates:
-        candidates = list(GENERIC_SECTION_PATHS.get(topic, GENERIC_SECTION_PATHS["default"]))
+        candidates = list(effective_generic.get(topic, effective_generic.get("default", [])))
 
     built: list[tuple[str, str]] = []
     seen: set[str] = set()

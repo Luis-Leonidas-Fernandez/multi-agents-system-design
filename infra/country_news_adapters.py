@@ -1,17 +1,16 @@
 """Adaptadores concretos para los puertos de noticias por país.
 
-Cada clase envuelve la implementación de Fase 1 (domain/ e infra/).
-Son los defaults que usa CountryRecentNewsStrategy cuando no se inyecta
-ningún puerto explícito.
+Cada clase recibe un CountryBootstrap en construcción y lo usa para
+resolver datos en lugar de importar constantes de módulo directamente.
+Si no se pasa bootstrap, usan CountryBootstrap.default() (mismos datos
+estáticos que antes — sin cambio de comportamiento).
 """
 from __future__ import annotations
 
 from typing import Any, Optional
 
 from domain.country_resolver import extract_query_geography
-from domain.country_profile import GEO_ENGLISH
 from domain.section_path_resolver import build_country_press_section_targets
-from infra.country_profile_repo import PERIODICOS_CONTINENT_SLUG_BY_COUNTRY
 from ports.country_news_ports import (
     ICountryProfileRepository,
     ICountryResolver,
@@ -21,24 +20,36 @@ from ports.country_news_ports import (
 
 
 class DefaultCountryResolver(ICountryResolver):
-    """Delega en extract_query_geography del módulo de dominio."""
+    """Resuelve geografía usando los demonyms del bootstrap."""
+
+    def __init__(self, bootstrap: Optional["CountryBootstrap"] = None) -> None:
+        from infra.country_bootstrap import CountryBootstrap
+        self._bootstrap = bootstrap or CountryBootstrap.default()
 
     def resolve(self, query: str) -> Optional[str]:
-        return extract_query_geography(query)
+        return extract_query_geography(query, self._bootstrap.geography_terms)
 
 
 class DefaultCountryProfileRepository(ICountryProfileRepository):
-    """Lee GEO_ENGLISH y PERIODICOS_CONTINENT_SLUG_BY_COUNTRY del dominio."""
+    """Lee nombre en inglés y slug de continente del bootstrap."""
+
+    def __init__(self, bootstrap: Optional["CountryBootstrap"] = None) -> None:
+        from infra.country_bootstrap import CountryBootstrap
+        self._bootstrap = bootstrap or CountryBootstrap.default()
 
     def get_english_name(self, canonical: str) -> str:
-        return GEO_ENGLISH.get(canonical, canonical)
+        return self._bootstrap.geo_english.get(canonical, canonical)
 
     def get_continent_slug(self, canonical: str) -> Optional[str]:
-        return PERIODICOS_CONTINENT_SLUG_BY_COUNTRY.get(canonical)
+        return self._bootstrap.continent_slug_by_country.get(canonical)
 
 
 class DefaultSectionPathResolver(ISectionPathResolver):
-    """Delega en build_country_press_section_targets del módulo de dominio."""
+    """Resuelve paths de sección usando los mappings del bootstrap."""
+
+    def __init__(self, bootstrap: Optional["CountryBootstrap"] = None) -> None:
+        from infra.country_bootstrap import CountryBootstrap
+        self._bootstrap = bootstrap or CountryBootstrap.default()
 
     def resolve_targets(
         self,
@@ -46,7 +57,13 @@ class DefaultSectionPathResolver(ISectionPathResolver):
         fallback_url: str,
         query: str,
     ) -> list[tuple[str, str]]:
-        return build_country_press_section_targets(domain, fallback_url, query)
+        return build_country_press_section_targets(
+            domain,
+            fallback_url,
+            query,
+            section_paths=self._bootstrap.country_press_section_paths,
+            generic_paths=self._bootstrap.generic_section_paths,
+        )
 
 
 class DefaultPressSourceDiscovery(IPressSourceDiscovery):
