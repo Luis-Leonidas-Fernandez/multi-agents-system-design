@@ -58,6 +58,7 @@ from ports.country_news_ports import (
     ICountryProfileRepository,
     ISectionPathResolver,
     IPressSourceDiscovery,
+    IDynamicPressSourceDiscovery,
 )
 from tools.web_tools import _is_specific_article_hit
 from application.helpers.price_flow_helpers import (
@@ -260,6 +261,7 @@ class CountryRecentNewsStrategy:
         profile_repo: Optional["ICountryProfileRepository"] = None,
         section_path_resolver: Optional["ISectionPathResolver"] = None,
         press_discovery: Optional["IPressSourceDiscovery"] = None,
+        dynamic_discovery: Optional["IDynamicPressSourceDiscovery"] = None,
     ) -> None:
         from infra.country_news_adapters import (
             DefaultCountryResolver,
@@ -267,12 +269,14 @@ class CountryRecentNewsStrategy:
             DefaultSectionPathResolver,
             DefaultPressSourceDiscovery,
         )
+        from infra.dynamic_press_discovery import DefaultDynamicPressDiscovery
         self._search_runtime = search_runtime
         self._fetch_runtime = fetch_runtime
         self._country_resolver = country_resolver or DefaultCountryResolver()
         self._profile_repo = profile_repo or DefaultCountryProfileRepository()
         self._section_path_resolver = section_path_resolver or DefaultSectionPathResolver()
         self._press_discovery = press_discovery or DefaultPressSourceDiscovery()
+        self._dynamic_discovery = dynamic_discovery or DefaultDynamicPressDiscovery()
 
     async def execute(
         self,
@@ -281,23 +285,59 @@ class CountryRecentNewsStrategy:
     ) -> Optional[dict[str, Any]]:
         query_source_group = detect_query_source_group(last_message)
         query_horizon = detect_recent_query_horizon(last_message) if _is_recent_web_information_query(last_message) else None
-        if not _should_use_country_recent_news_strategy(last_message, query_source_group, query_horizon):
+        use_bootstrap = _should_use_country_recent_news_strategy(last_message, query_source_group, query_horizon)
+
+        # ── Bootstrap path ───────────────────────────────────────────────────
+        if use_bootstrap:
+            source_terms = list(get_query_source_terms(last_message))
+            country_press_domains, country_press_names = await self._press_discovery.discover(
+                last_message,
+                query_source_group,
+                source_terms,
+                web_search_runtime_args,
+            )
+            if not country_press_domains:
+                return None
+
+        # ── Fase 4: soft gate — país no registrado pero detectable ───────────
+        elif query_source_group is None:
+            inferred_geo = self._country_resolver.resolve(last_message)
+            lowered_msg = (last_message or "").lower()
+            _has_news = any(t in lowered_msg for t in ("noticia", "noticias", "news", "headline", "headlines"))
+            _has_topic = _detect_news_topic(last_message) in {"security", "economy", "politics"}
+            _valid_horizon = query_horizon in {"today", "week", "month"}
+            if not (inferred_geo and _valid_horizon and (_has_news or _has_topic)):
+                return None
+            _web_debug(
+                "country_press.dynamic.attempt",
+                geography=inferred_geo,
+                horizon=query_horizon,
+                reason="source_group_missing",
+            )
+            country_press_domains, country_press_names = await self._dynamic_discovery.discover_for_unknown_country(
+                last_message,
+                inferred_geo,
+                web_search_runtime_args,
+            )
+            if not country_press_domains:
+                _web_debug("country_press.dynamic.no_sources", geography=inferred_geo)
+                return None
+            # Fabricar un source_group sintético para que el caché funcione igual.
+            query_source_group = f"dynamic:{inferred_geo.lower()}"
+            source_terms = [inferred_geo.lower()]
+            _country_press_cache_set(query_source_group, source_terms, country_press_domains, country_press_names)
+            _country_press_strategy_cache_set(query_source_group, source_terms, "dynamic")
+            _web_debug("country_press.dynamic.success", geography=inferred_geo, domains=country_press_domains)
+
+        else:
+            # Otro motivo para que el gate falle (deporte, horizonte inválido, etc.)
             return None
 
-        source_terms = list(get_query_source_terms(last_message))
+        # ── Continuación común (bootstrap + dynamic) ─────────────────────────
         query_terms = _extract_generic_query_terms(last_message)
         for term in source_terms:
             if term not in query_terms:
                 query_terms.append(term)
-
-        country_press_domains, country_press_names = await self._press_discovery.discover(
-            last_message,
-            query_source_group,
-            source_terms,
-            web_search_runtime_args,
-        )
-        if not country_press_domains:
-            return None
 
         country_press_sources = _country_press_source_cache_get(query_source_group, source_terms)
         discovery_strategy = _country_press_strategy_cache_get(query_source_group, source_terms)

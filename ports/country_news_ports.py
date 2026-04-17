@@ -59,9 +59,34 @@ class IPressSourceDiscovery(ABC):
         raise NotImplementedError
 
 
+class IDynamicPressSourceDiscovery(ABC):
+    """Descubre fuentes de prensa para países NO registrados en el bootstrap.
+
+    A diferencia de IPressSourceDiscovery, acepta None como source_group
+    y trabaja a partir del nombre canónico del país inferido desde el query.
+    """
+
+    @abstractmethod
+    async def discover_for_unknown_country(
+        self,
+        query: str,
+        geography: str,
+        runtime_args: Optional[dict[str, Any]] = None,
+    ) -> tuple[list[str], list[str]]:
+        """Retorna (dominios, nombres_de_prensa) usando descubrimiento dinámico.
+
+        Args:
+            query: Query original del usuario.
+            geography: Nombre canónico del país (ej. "Namibia").
+            runtime_args: Parámetros opcionales de búsqueda web.
+        """
+        raise NotImplementedError
+
+
 __all__ = [
     "ICountryResolver",
     "ICountryProfileRepository",
     "ISectionPathResolver",
     "IPressSourceDiscovery",
+    "IDynamicPressSourceDiscovery",
 ]
