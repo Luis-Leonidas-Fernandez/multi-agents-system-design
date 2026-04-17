@@ -18,6 +18,7 @@ from langchain_core.runnables.config import RunnableConfig
 from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard, _is_allowed_public_price_request
 from application.helpers.audit_flow_helpers import (
     _emit_node_outcome,
+    _emit_country_news_metrics,
     _extract_tokens,
     _extract_quality,
     _extract_followup,
@@ -297,7 +298,17 @@ class CountryRecentNewsStrategy:
                 web_search_runtime_args,
             )
             if not country_press_domains:
+                _emit_country_news_metrics(
+                    geography=query_source_group,
+                    resolution_path="none",
+                    domains_found=0,
+                )
                 return None
+            _emit_country_news_metrics(
+                geography=query_source_group,
+                resolution_path="bootstrap",
+                domains_found=len(country_press_domains),
+            )
 
         # ── Fase 4: soft gate — país no registrado pero detectable ───────────
         elif query_source_group is None:
@@ -321,6 +332,11 @@ class CountryRecentNewsStrategy:
             )
             if not country_press_domains:
                 _web_debug("country_press.dynamic.no_sources", geography=inferred_geo)
+                _emit_country_news_metrics(
+                    geography=inferred_geo,
+                    resolution_path="none",
+                    domains_found=0,
+                )
                 return None
             # Fabricar un source_group sintético para que el caché funcione igual.
             query_source_group = f"dynamic:{inferred_geo.lower()}"
@@ -328,6 +344,11 @@ class CountryRecentNewsStrategy:
             _country_press_cache_set(query_source_group, source_terms, country_press_domains, country_press_names)
             _country_press_strategy_cache_set(query_source_group, source_terms, "dynamic")
             _web_debug("country_press.dynamic.success", geography=inferred_geo, domains=country_press_domains)
+            _emit_country_news_metrics(
+                geography=inferred_geo,
+                resolution_path="dynamic",
+                domains_found=len(country_press_domains),
+            )
 
         else:
             # Otro motivo para que el gate falle (deporte, horizonte inválido, etc.)

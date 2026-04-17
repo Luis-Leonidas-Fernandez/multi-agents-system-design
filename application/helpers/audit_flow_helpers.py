@@ -36,6 +36,32 @@ def _emit_guard_audit(log_data: Dict[str, Any]) -> None:
         print(payload)
 
 
+def _emit_country_news_metrics(
+    *,
+    geography: Optional[str],
+    resolution_path: str,
+    domains_found: int,
+    request_id: str = "",
+) -> None:
+    """Emite un evento de observabilidad para el sistema de noticias por país.
+
+    resolution_path:
+      "bootstrap"          — país curado en datos estáticos
+      "dynamic_directory"  — descubierto via periodicos.com.ar
+      "dynamic_search"     — descubierto via Tavily fallback
+      "dynamic_cache"      — retornado desde caché de sesión (300s TTL)
+      "none"               — sin resolución (query fuera de scope)
+    """
+    _emit_guard_audit({
+        "event_type": "country_news_resolution",
+        "ts_ms": int(time.time() * 1000),
+        "geography": geography,
+        "resolution_path": resolution_path,
+        "domains_found": domains_found,
+        "request_id": request_id,
+    })
+
+
 def _emit_node_outcome(request_id: str, node: str, outcome: Outcome, phase: str = "agent", **extra) -> None:
     _emit_guard_audit({
         "event_type": "node_outcome",
@@ -155,6 +181,7 @@ __all__ = [
     "Outcome",
     "MODEL_PRICING",
     "_emit_guard_audit",
+    "_emit_country_news_metrics",
     "_emit_node_outcome",
     "_extract_tokens",
     "_extract_quality",
