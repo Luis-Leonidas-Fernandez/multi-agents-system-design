@@ -53,6 +53,12 @@ from domain.section_path_resolver import (
     build_country_press_section_targets,
 )
 from infra.country_profile_repo import PERIODICOS_CONTINENT_SLUG_BY_COUNTRY
+from ports.country_news_ports import (
+    ICountryResolver,
+    ICountryProfileRepository,
+    ISectionPathResolver,
+    IPressSourceDiscovery,
+)
 from tools.web_tools import _is_specific_article_hit
 from application.helpers.price_flow_helpers import (
     _detect_coin_from_query,
@@ -245,9 +251,28 @@ def _candidate_strategy_priority(candidate: dict[str, str], *, query: str, query
 class CountryRecentNewsStrategy:
     """Estrategia principal para noticias locales recientes basadas en secciones."""
 
-    def __init__(self, *, search_runtime: WebSearchRuntime, fetch_runtime: WebFetchRuntime) -> None:
+    def __init__(
+        self,
+        *,
+        search_runtime: WebSearchRuntime,
+        fetch_runtime: WebFetchRuntime,
+        country_resolver: Optional["ICountryResolver"] = None,
+        profile_repo: Optional["ICountryProfileRepository"] = None,
+        section_path_resolver: Optional["ISectionPathResolver"] = None,
+        press_discovery: Optional["IPressSourceDiscovery"] = None,
+    ) -> None:
+        from infra.country_news_adapters import (
+            DefaultCountryResolver,
+            DefaultCountryProfileRepository,
+            DefaultSectionPathResolver,
+            DefaultPressSourceDiscovery,
+        )
         self._search_runtime = search_runtime
         self._fetch_runtime = fetch_runtime
+        self._country_resolver = country_resolver or DefaultCountryResolver()
+        self._profile_repo = profile_repo or DefaultCountryProfileRepository()
+        self._section_path_resolver = section_path_resolver or DefaultSectionPathResolver()
+        self._press_discovery = press_discovery or DefaultPressSourceDiscovery()
 
     async def execute(
         self,
@@ -265,7 +290,7 @@ class CountryRecentNewsStrategy:
             if term not in query_terms:
                 query_terms.append(term)
 
-        country_press_domains, country_press_names = await _discover_country_press_sources(
+        country_press_domains, country_press_names = await self._press_discovery.discover(
             last_message,
             query_source_group,
             source_terms,
@@ -315,7 +340,7 @@ class CountryRecentNewsStrategy:
             fallback_url = (source_meta.get("url") or "").strip()
             if not fallback_url:
                 continue
-            for section_url, section_label in _build_country_press_section_targets(domain, fallback_url, last_message):
+            for section_url, section_label in self._section_path_resolver.resolve_targets(domain, fallback_url, last_message):
                 section_prompt = _build_newspaper_section_fetch_prompt(
                     last_message,
                     source_meta.get("title") or press_name,
@@ -440,7 +465,7 @@ class CountryRecentNewsStrategy:
                 for candidate in top
             ]
             if top and sources:
-                geography = _extract_query_geography(last_message) or ""
+                geography = self._country_resolver.resolve(last_message) or ""
                 topic = _detect_news_topic(last_message)
                 topic_label = {
                     "security": "Seguridad",
