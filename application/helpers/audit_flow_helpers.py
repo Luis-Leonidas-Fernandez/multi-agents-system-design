@@ -46,11 +46,10 @@ def _emit_country_news_metrics(
     """Emite un evento de observabilidad para el sistema de noticias por país.
 
     resolution_path:
-      "bootstrap"          — país curado en datos estáticos
-      "dynamic_directory"  — descubierto via periodicos.com.ar
-      "dynamic_search"     — descubierto via Tavily fallback
-      "dynamic_cache"      — retornado desde caché de sesión (300s TTL)
-      "none"               — sin resolución (query fuera de scope)
+      "bootstrap"  — país curado en datos estáticos
+      "dynamic"    — descubierto vía DefaultDynamicPressDiscovery
+                     (sub-path exacto trazado por _web_debug en dynamic_press_discovery.py)
+      "none"       — sin resolución (query fuera de scope, país desconocido, etc.)
     """
     _emit_guard_audit({
         "event_type": "country_news_resolution",
