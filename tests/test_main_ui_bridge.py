@@ -1,7 +1,22 @@
 from application.ui_bridge.state_mapper import (
-    extract_latest_ai_text_from_live_state as _extract_latest_ai_text_from_live_state,
-    merge_turn_response_into_ui_state as _merge_turn_response_into_ui_state,
+    extract_latest_ai_text_from_live_state as _extract,
+    merge_turn_response_into_ui_state as _merge,
 )
+from application.ui_bridge.protocol import StatePayload
+
+
+def _make_payload(**kwargs) -> StatePayload:
+    defaults = {
+        "session_id": "sess-1",
+        "status": "listo",
+        "phase": "idle",
+        "prompt": "Escribí",
+        "transcript": [],
+        "message_count": 0,
+        "has_memory": False,
+    }
+    defaults.update(kwargs)
+    return StatePayload(**defaults)
 
 
 class _FakeMessage:
@@ -10,54 +25,30 @@ class _FakeMessage:
         self.content = content
 
 
-def test_merge_turn_response_into_ui_state_appends_ai_when_transcript_is_stale():
-    state = {
-        "session_id": "sess-1",
-        "status": "listo",
-        "prompt": "Escribí",
-        "transcript": ["human: hola"],
-        "message_count": 1,
-        "has_memory": False,
-    }
-
-    merged = _merge_turn_response_into_ui_state(state, "respuesta final", message_count=2)
-
-    assert merged["transcript"] == ["human: hola", "assistant: respuesta final"]
-    assert merged["message_count"] == 2
+def test_merge_appends_ai_when_transcript_is_stale():
+    payload = _make_payload(transcript=["human: hola"], message_count=1)
+    merged = _merge(payload, "respuesta final", message_count=2)
+    assert merged.transcript == ["human: hola", "assistant: respuesta final"]
+    assert merged.message_count == 2
 
 
-def test_merge_turn_response_into_ui_state_does_not_duplicate_existing_ai():
-    state = {
-        "session_id": "sess-1",
-        "status": "listo",
-        "prompt": "Escribí",
-        "transcript": ["human: hola", "assistant: respuesta final"],
-        "message_count": 2,
-        "has_memory": False,
-    }
-
-    merged = _merge_turn_response_into_ui_state(state, "respuesta final", message_count=2)
-
-    assert merged["transcript"] == ["human: hola", "assistant: respuesta final"]
-    assert merged["message_count"] == 2
+def test_merge_does_not_duplicate_existing_ai():
+    payload = _make_payload(
+        transcript=["human: hola", "assistant: respuesta final"],
+        message_count=2,
+    )
+    merged = _merge(payload, "respuesta final", message_count=2)
+    assert merged.transcript == ["human: hola", "assistant: respuesta final"]
+    assert merged.message_count == 2
 
 
-def test_merge_turn_response_into_ui_state_ignores_empty_response():
-    state = {
-        "session_id": "sess-1",
-        "status": "listo",
-        "prompt": "Escribí",
-        "transcript": ["human: hola"],
-        "message_count": 1,
-        "has_memory": False,
-    }
-
-    merged = _merge_turn_response_into_ui_state(state, "   ", message_count=1)
-
-    assert merged == state
+def test_merge_ignores_empty_response():
+    payload = _make_payload(transcript=["human: hola"], message_count=1)
+    merged = _merge(payload, "   ", message_count=1)
+    assert merged is payload
 
 
-def test_extract_latest_ai_text_from_live_state_returns_latest_assistant_message():
+def test_extract_returns_latest_assistant_message():
     live_state = {
         "messages": [
             _FakeMessage("human", "hola"),
@@ -65,11 +56,9 @@ def test_extract_latest_ai_text_from_live_state_returns_latest_assistant_message
             _FakeMessage("assistant", "respuesta 2"),
         ]
     }
+    assert _extract(live_state) == "respuesta 2"
 
-    assert _extract_latest_ai_text_from_live_state(live_state) == "respuesta 2"
 
-
-def test_extract_latest_ai_text_from_live_state_returns_empty_when_missing():
+def test_extract_returns_empty_when_missing():
     live_state = {"messages": [_FakeMessage("human", "hola")]}
-
-    assert _extract_latest_ai_text_from_live_state(live_state) == ""
+    assert _extract(live_state) == ""

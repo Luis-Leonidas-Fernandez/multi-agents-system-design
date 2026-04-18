@@ -1,14 +1,24 @@
-"""Mapeo entre el estado interno del runtime y el payload JSON de la UI."""
+"""Mapeo entre el estado interno del runtime y el payload tipado de la UI."""
 from __future__ import annotations
 
-from typing import Any, Optional, cast
+from typing import Any, Literal, Optional
 
 from application.services.runtime import AgentRuntime
+from application.ui_bridge.protocol import StatePayload
 
 _UI_ROLE_MAP: dict[str, str] = {"ai": "assistant", "human": "you"}
 
 
-def build_ui_state_payload(lifecycle: Any, runtime: AgentRuntime, status: str) -> dict[str, Any]:
+def _derive_phase(status: str) -> Literal["idle", "running", "error"]:
+    s = status.lower()
+    if "procesando" in s or "running" in s:
+        return "running"
+    if "error" in s:
+        return "error"
+    return "idle"
+
+
+def build_ui_state_payload(lifecycle: Any, runtime: AgentRuntime, status: str) -> StatePayload:
     artifact = runtime.build_session_artifact(lifecycle.session_id)
     transcript: list[str] = []
     for item in artifact.transcript:
@@ -16,42 +26,53 @@ def build_ui_state_payload(lifecycle: Any, runtime: AgentRuntime, status: str) -
         content = str(item.get("content", ""))
         transcript.append(f"{role}: {content}".rstrip())
     view = lifecycle.view()
-    return {
-        "session_id": lifecycle.session_id,
-        "status": status,
-        "prompt": view.prompt_hint,
-        "transcript": transcript,
-        "message_count": view.snapshot.message_count,
-        "has_memory": view.snapshot.has_memory,
-    }
+    return StatePayload(
+        session_id=lifecycle.session_id,
+        status=status,
+        phase=_derive_phase(status),
+        transcript=transcript,
+        message_count=view.snapshot.message_count,
+        has_memory=view.snapshot.has_memory,
+        prompt=view.prompt_hint,
+    )
 
 
 def merge_turn_response_into_ui_state(
-    state: dict[str, Any],
+    payload: StatePayload,
     response: str,
     *,
     message_count: Optional[int] = None,
-) -> dict[str, Any]:
+) -> StatePayload:
     """Asegura que la UI vea la respuesta del turno aunque el artifact esté atrasado."""
-    normalized_response = (response or "").strip()
-    if not normalized_response:
-        return state
+    normalized = (response or "").strip()
+    if not normalized:
+        return payload
 
-    transcript = list(cast(list[str], state.get("transcript", [])))
-    ai_line = f"assistant: {normalized_response}"
+    ai_line = f"assistant: {normalized}"
+    transcript = list(payload.transcript)
+
     if transcript and transcript[-1] == ai_line:
-        merged = dict(state)
         if message_count is not None:
-            merged["message_count"] = max(int(merged.get("message_count", 0) or 0), int(message_count))
-        return merged
+            return StatePayload(
+                session_id=payload.session_id,
+                status=payload.status,
+                phase=payload.phase,
+                transcript=transcript,
+                message_count=max(payload.message_count, message_count),
+                has_memory=payload.has_memory,
+                prompt=payload.prompt,
+            )
+        return payload
 
-    merged = dict(state)
-    merged["transcript"] = transcript + [ai_line]
-    if message_count is not None:
-        merged["message_count"] = max(int(merged.get("message_count", 0) or 0), int(message_count))
-    elif "message_count" in merged:
-        merged["message_count"] = int(merged.get("message_count", 0) or 0) + 1
-    return merged
+    return StatePayload(
+        session_id=payload.session_id,
+        status=payload.status,
+        phase=payload.phase,
+        transcript=transcript + [ai_line],
+        message_count=max(payload.message_count, message_count) if message_count is not None else payload.message_count + 1,
+        has_memory=payload.has_memory,
+        prompt=payload.prompt,
+    )
 
 
 def extract_latest_ai_text_from_live_state(live_state: Optional[dict[str, Any]]) -> str:

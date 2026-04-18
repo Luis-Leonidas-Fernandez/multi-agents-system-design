@@ -39,9 +39,15 @@ def run_ui_bridge() -> None:
     emitter = BridgeEmitter()
     emitter.emit(HelloEvent())
 
+    if not emitter.wait_for_hello_ack():
+        emit_json({"type": "error", "message": "Handshake fallido: hello_ack no recibido o rechazado dentro del timeout."})
+        return
+
     runtime = AgentRuntime()
     lifecycle = runtime.start_session_lifecycle(None)
-    emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo")))
+    emitter.session_id = lifecycle.session_id
+
+    emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo").to_dict()))
 
     try:
         for raw in sys.stdin:
@@ -56,6 +62,7 @@ def run_ui_bridge() -> None:
 
             action = str(message.get("action", "")).lower()
             if action == "exit":
+                emitter.emit(ExitEvent(reason="completed"))
                 break
             if action != "submit":
                 emitter.emit(ErrorEvent(message=f"Acción no soportada: {action}"))
@@ -63,13 +70,13 @@ def run_ui_bridge() -> None:
 
             text = str(message.get("text", "")).strip()
             if not text:
-                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo")))
+                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo").to_dict()))
                 continue
 
             if text.lower() in {"salir", "exit", "quit"}:
                 asyncio.run(lifecycle.close())
                 asyncio.run(runtime.shutdown())
-                emitter.emit(ExitEvent())
+                emitter.emit(ExitEvent(reason="completed"))
                 break
 
             if text.startswith("/"):
@@ -77,16 +84,17 @@ def run_ui_bridge() -> None:
                 result = dispatch_inspection_command(text, lifecycle, runtime)
                 if result.handled:
                     base_state = build_ui_state_payload(lifecycle, runtime, "listo")
-                    base_transcript = list(cast(list[str], base_state.get("transcript", [])))
+                    base_transcript = list(base_state.transcript)
                     base_transcript.append(f"command: {text}")
                     base_transcript.extend(result.lines)
-                    emitter.emit(StateEvent(state={**base_state, "transcript": base_transcript}))
+                    base_state.transcript = base_transcript
+                    emitter.emit(StateEvent(state=base_state.to_dict()))
                     continue
 
             emitter.emit(BusyEvent())
             session = lifecycle.resolve(text)
             if session.turn_context is None:
-                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo")))
+                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo").to_dict()))
                 continue
             try:
                 turn = asyncio.run(asyncio.wait_for(runtime.execute_turn(session.turn_context), timeout=TURN_TIMEOUT_SECONDS))
@@ -100,13 +108,13 @@ def run_ui_bridge() -> None:
                     effective_response,
                     message_count=turn.message_count,
                 )
-                emitter.emit(StateEvent(state=state_payload))
+                emitter.emit(StateEvent(state=state_payload.to_dict()))
             except asyncio.TimeoutError:
                 emitter.emit(ErrorEvent(message=f"El turno superó {int(TURN_TIMEOUT_SECONDS)}s. Revisá proveedor/red/modelo."))
-                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo")))
+                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo").to_dict()))
             except Exception as exc:
                 emitter.emit(ErrorEvent(message=str(exc)))
-                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo")))
+                emitter.emit(StateEvent(state=build_ui_state_payload(lifecycle, runtime, "listo").to_dict()))
     finally:
         try:
             asyncio.run(lifecycle.close())

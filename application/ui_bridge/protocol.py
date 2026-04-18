@@ -2,13 +2,15 @@
 
 Secuencia válida de eventos
 ---------------------------
-1. ``hello``  — siempre primero; anuncia versión y capabilities.
-2. ``state | busy | error | exit``  — cualquier orden posterior.
+1. ``hello``     — siempre primero; anuncia versión y capabilities.
+2. ``hello_ack`` — Node UI responde aceptando o rechazando (Node → Python).
+3. ``state | busy | error | exit``  — cualquier orden posterior.
 
 Reglas de invariante:
 - Ningún evento puede preceder a ``hello``.
 - Solo puede existir un ``hello`` por sesión.
 - ``exit`` es terminal; no se emiten eventos posteriores.
+- El bridge no procesa requests hasta recibir ``hello_ack`` con ``accepted=true``.
 
 Versioning (semver)
 -------------------
@@ -19,15 +21,24 @@ Versioning (semver)
 
 Schema versioning
 -----------------
-``StateEvent`` y ``ErrorEvent`` incluyen ``schema_version`` independiente
-del protocolo, para que los dashboards/clientes detecten cambios de estructura
-sin necesidad de bump de protocolo completo.
+``StatePayload`` incluye ``schema_version`` para que los dashboards/clientes
+detecten cambios de estructura de estado sin necesidad de bump de protocolo.
+``ErrorEvent`` incluye ``schema_version`` por el mismo motivo.
+
+Correlation
+-----------
+``BridgeEmitter`` inyecta ``event_id`` (UUID), ``timestamp`` (Unix float) y
+``session_id`` en cada evento emitido. Sin esto no se puede reconstruir sesiones
+ni hacer tracing de auditoría.
 """
 from __future__ import annotations
 
 import json
+import sys
+import time
+import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 # ---------------------------------------------------------------------------
 # Versión de protocolo
@@ -50,7 +61,8 @@ ERROR_SCHEMA_VERSION: int = 1
 
 
 @dataclass(frozen=True)
-class BridgeCapabilities:
+class BridgeCapabilityFeatures:
+    """Feature flags del bridge. Cada bool indica soporte real, no intención."""
     streaming: bool = False
     tool_calls: bool = True
     audit_traces: bool = True
@@ -58,8 +70,41 @@ class BridgeCapabilities:
     cost_tracking: bool = False
 
 
+@dataclass(frozen=True)
+class BridgeCapabilities:
+    """Capabilities versionadas. ``version`` permite evolucionar la estructura
+    sin romper clientes que no conocen campos nuevos."""
+    version: int = 1
+    features: BridgeCapabilityFeatures = field(default_factory=BridgeCapabilityFeatures)
+
+
 # ---------------------------------------------------------------------------
-# Eventos
+# Payload tipado de estado (Python ↔ Node)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StatePayload:
+    """Estructura canónica del estado de sesión enviado al Node UI.
+
+    ``phase`` mapea el estado interno a un enum auditable en lugar de strings
+    libres, lo que facilita dashboards y trazas sin parsing.
+    """
+    session_id: str
+    status: str
+    phase: Literal["idle", "running", "error"]
+    transcript: list[str]
+    message_count: int
+    has_memory: bool
+    prompt: str = ""
+    schema_version: int = STATE_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# Eventos salientes (Python → Node UI)
 # ---------------------------------------------------------------------------
 
 
@@ -73,7 +118,6 @@ class HelloEvent:
 @dataclass(frozen=True)
 class StateEvent:
     state: dict[str, Any]
-    schema_version: int = STATE_SCHEMA_VERSION
     type: Literal["state"] = "state"
 
 
@@ -92,6 +136,7 @@ class ErrorEvent:
 
 @dataclass(frozen=True)
 class ExitEvent:
+    reason: Literal["completed", "error", "cancelled"] = "completed"
     type: Literal["exit"] = "exit"
 
 
@@ -114,18 +159,52 @@ class TurnCompletedEvent:
 BridgeEvent = HelloEvent | StateEvent | BusyEvent | ErrorEvent | ExitEvent
 
 # ---------------------------------------------------------------------------
-# Emitter con fail-fast (Python side)
+# Evento entrante (Node UI → Python)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HelloAckPayload:
+    """Confirmación de handshake enviada por el Node UI tras recibir ``hello``."""
+    accepted: bool = True
+    type: Literal["hello_ack"] = "hello_ack"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "HelloAckPayload":
+        return cls(accepted=bool(data.get("accepted", False)))
+
+
+# ---------------------------------------------------------------------------
+# Emitter tipado con fail-fast y correlación (Python side)
 # ---------------------------------------------------------------------------
 
 
 class BridgeEmitter:
-    """Emitter tipado con guard: HelloEvent DEBE ser el primer evento.
+    """Emitter tipado con tres garantías:
 
-    Usar una instancia por proceso/bridge — no compartir entre tests.
+    1. Fail-fast: ``HelloEvent`` DEBE ser el primer evento emitido.
+    2. Correlation: inyecta ``event_id``, ``timestamp`` y ``session_id`` en
+       cada payload antes de serializarlo a JSON.
+    3. Capabilities-aware: el método ``emit`` consulta las capabilities
+       declaradas para gate comportamientos futuros (e.g. streaming).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, session_id: str = "") -> None:
         self._hello_emitted: bool = False
+        self._session_id: str = session_id
+        self._capabilities: BridgeCapabilities = BridgeCapabilities()
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        self._session_id = value
+
+    @property
+    def capabilities(self) -> BridgeCapabilities:
+        return self._capabilities
 
     def emit(self, event: BridgeEvent) -> None:
         if not self._hello_emitted:
@@ -133,8 +212,61 @@ class BridgeEmitter:
                 raise RuntimeError(
                     f"First event must be HelloEvent, got {type(event).__name__}"
                 )
+            self._capabilities = event.capabilities
             self._hello_emitted = True
-        emit_json(asdict(event))
+
+        payload = asdict(event)
+
+        # Correlation envelope — clave para auditoría y tracing.
+        payload["event_id"] = str(uuid.uuid4())
+        payload["timestamp"] = time.time()
+        if self._session_id:
+            payload["session_id"] = self._session_id
+
+        # Capabilities-gated behavior.
+        if isinstance(event, StateEvent) and not self._capabilities.features.streaming:
+            # Full state update path. When streaming=True: emit partial tokens here.
+            pass
+
+        emit_json(payload)
+
+    def wait_for_hello_ack(
+        self,
+        *,
+        timeout: float = 5.0,
+        stdin: Any = None,
+    ) -> bool:
+        """Lee el primer mensaje de stdin esperando ``hello_ack``.
+
+        Retorna ``True`` si el Node UI aceptó el handshake dentro del timeout.
+        Retorna ``False`` en timeout, rechazo o mensaje inesperado.
+
+        En producción usa ``select`` para respetar el timeout. Para objetos
+        no seleccionables (e.g. ``io.StringIO`` en tests), hace ``readline``
+        directo sin timeout.
+        """
+        import select as _select
+
+        src = stdin if stdin is not None else sys.stdin
+        try:
+            readable, _, _ = _select.select([src], [], [], timeout)
+            if not readable:
+                return False
+        except (OSError, ValueError):
+            # Objeto no seleccionable (StringIO u otro sin fileno real).
+            # Caemos a readline directo — válido en tests y entornos restringidos.
+            pass
+
+        raw = src.readline().strip()
+        if not raw:
+            return False
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if data.get("type") != "hello_ack":
+            return False
+        return bool(data.get("accepted", False))
 
 
 # ---------------------------------------------------------------------------
