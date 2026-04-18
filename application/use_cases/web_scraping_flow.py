@@ -67,7 +67,42 @@ from domain.web_models import (
     Specificity,
     WebCandidate,
 )
-from tools.web_tools import _is_specific_article_hit
+from domain.web_text_utils import (
+    _TITLE_STOPWORDS,
+    _MONTH_NAMES_ES,
+    _MONTH_NAMES_EN,
+    _NO_INFO_RE,
+    _text_keywords,
+    _extract_urls_from_text,
+    _clean_source_url,
+    _format_sources,
+    _build_source_backed_response,
+    _strip_accents,
+    _slugify_periodicos_label,
+    _is_no_info_response,
+    _enforce_synthesis_format,
+    _dedup_synthesis_bullets,
+    _candidate_url_has_date,
+    _candidate_url_is_recent,
+)
+from domain.web_classifier import (
+    _NON_NEWS_DOMAINS,
+    _FORUM_PATH_SEGMENTS,
+    _is_non_news_candidate,
+    _same_event,
+    _dedup_candidates_by_event,
+    _extract_generic_search_candidates,
+    _candidate_snippet_lines,
+    _is_hub_like_candidate,
+    _query_targets_public_safety,
+    _is_tangential_vertical_candidate,
+    _is_invalid_news_candidate,
+    _candidate_record_from_dict,
+    _classify_candidate_source_kind,
+    _classify_candidate_recency,
+    _classify_candidate_specificity,
+    _candidate_strategy_priority,
+)
 from application.helpers.price_flow_helpers import (
     _detect_coin_from_query,
     _format_price_response,
@@ -99,66 +134,6 @@ def _web_debug(label: str, **data: Any) -> None:
     print(f"[WEB_DEBUG] {label}{(' ' + payload) if payload else ''}", flush=True)
 
 
-def _extract_urls_from_text(text: str) -> list[str]:
-    urls = re.findall(r"https?://[^\s)\]]+", text or "")
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for url in urls:
-        normalized = url.rstrip(".,;:")
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            cleaned.append(normalized)
-    return cleaned
-
-
-def _clean_source_url(url: str) -> str:
-    """Strip CITE_THIS artifacts (|domain=xxx>>>) from URLs."""
-    return url.split("|")[0].rstrip(">").strip() if url else url
-
-
-def _format_sources(sources: list[dict[str, str]]) -> str:
-    if not sources:
-        return ""
-    lines = ["Sources:"]
-    seen_domains: set[str] = set()
-    for source in sources:
-        raw_url = source.get("url") or ""
-        url = _clean_source_url(raw_url)
-        if not url:
-            continue
-        domain = source.get("domain") or (urlparse(url).hostname or "").replace("www.", "")
-        if domain and domain in seen_domains:
-            continue
-        if domain:
-            seen_domains.add(domain)
-        title = source.get("title") or url
-        # Clean CITE_THIS artifacts from title too
-        if "|domain=" in title:
-            title = url
-        lines.append(f"- [{title}]({url})")
-    return "\n".join(lines)
-
-
-def _build_source_backed_response(summary_lines: list[str], sources: list[dict[str, str]]) -> str:
-    body = []
-    seen_lines: set[str] = set()
-    for line in summary_lines:
-        cleaned = line.strip()
-        if not cleaned:
-            continue
-        cleaned = re.sub(r"^[-•\u2022]\s+", "", cleaned)
-        dedupe_key = re.sub(r"\s+", " ", cleaned).strip().lower()
-        if dedupe_key in seen_lines:
-            continue
-        seen_lines.add(dedupe_key)
-        body.append(cleaned)
-    sources_block = _format_sources(sources)
-    if sources_block:
-        if body:
-            body.append("")
-        body.append(sources_block)
-    return "\n".join(body).strip()
-
 
 def _finalize_web_user_summary(
     summary: str,
@@ -176,66 +151,6 @@ def _finalize_web_user_summary(
 
 WebCandidateRecord = WebCandidate
 
-
-def _candidate_record_from_dict(candidate: dict[str, str], *, query: str, query_horizon: Optional[str]) -> WebCandidate:
-    source_kind = _classify_candidate_source_kind(candidate)
-    evidence_kind = EvidenceKind.SECTION_LINES if source_kind == SourceKind.SECTION else EvidenceKind.SEARCH_SNIPPET
-    recency = _classify_candidate_recency(candidate, query_horizon)
-    specificity = _classify_candidate_specificity(candidate, query)
-    return WebCandidate(
-        title=str(candidate.get("title") or candidate.get("url") or "result"),
-        url=str(candidate.get("url") or ""),
-        snippet=str(candidate.get("snippet") or ""),
-        source_kind=source_kind,
-        evidence_kind=evidence_kind,
-        recency=recency,
-        specificity=specificity,
-        source_label=str(candidate.get("source_label") or ""),
-    )
-
-
-def _classify_candidate_source_kind(candidate: dict[str, str]) -> SourceKind:
-    if _is_hub_like_candidate(candidate):
-        return SourceKind.HUB
-    if candidate.get("source_kind") == "section_fallback":
-        return SourceKind.SECTION
-    if candidate.get("source_kind") == "homepage_fallback":
-        return SourceKind.HOMEPAGE
-    if _is_specific_article_hit(candidate):
-        return SourceKind.ARTICLE
-    return SourceKind.TOPIC
-
-
-def _classify_candidate_recency(candidate: dict[str, str], query_horizon: Optional[str]) -> Recency:
-    url = str(candidate.get("url") or "")
-    if _candidate_url_has_date(url):
-        threshold = 45 if query_horizon == "month" else 14 if query_horizon == "week" else 2 if query_horizon == "today" else 30
-        return Recency.DATED_RECENT if _candidate_url_is_recent(url, threshold) else Recency.DATED_OLD
-    if candidate.get("source_kind") == "section_fallback":
-        return Recency.DATED_RECENT
-    return Recency.UNDATED
-
-
-def _classify_candidate_specificity(candidate: dict[str, str], query: str) -> Specificity:
-    if _is_invalid_news_candidate(candidate, query):
-        return Specificity.STRUCTURAL
-    if candidate.get("source_kind") == "section_fallback" or _is_specific_article_hit(candidate):
-        return Specificity.CONCRETE
-    return Specificity.BROAD
-
-
-def _candidate_strategy_priority(candidate: dict[str, str], *, query: str, query_horizon: Optional[str]) -> tuple[int, int, int, int]:
-    record = _candidate_record_from_dict(candidate, query=query, query_horizon=query_horizon)
-    source_rank = {
-        "section_hit": 0,
-        "article_hit": 1,
-        "homepage_hit": 2,
-        "topic_hit": 3,
-        "hub_hit": 4,
-    }.get(record.source_kind, 5)
-    specificity_rank = {"concrete": 0, "broad": 1, "structural": 2}.get(record.specificity, 3)
-    recency_rank = {"dated_recent": 0, "undated": 1, "dated_old": 2}.get(record.recency, 3)
-    return (source_rank, specificity_rank, recency_rank, -len(record.snippet.split()))
 
 
 class CountryRecentNewsStrategy:
@@ -1755,221 +1670,6 @@ def _build_angle_queries(last_message: str, search_age_days: Optional[int]) -> l
     return queries
 
 
-_MONTH_NAMES_ES = {
-    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
-    "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
-    "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
-}
-_MONTH_NAMES_EN = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
-}
-
-
-def _candidate_url_is_recent(url: str, days_threshold: int) -> bool:
-    """Returns True if the date embedded in the URL is within `days_threshold` days, or no date found.
-
-    Handles separated dates (/2026/04/02/), compact dates (yjj20260402...), and
-    month-name slugs in Spanish or English (e.g. julio-2025, march-2025).
-    """
-    import datetime
-    today = datetime.date.today()
-    cutoff = today - datetime.timedelta(days=days_threshold)
-    lowered = (url or "").lower()
-    # Separated numeric: /2026/04/02/ or /2026-04-02
-    for match in re.finditer(r"[/\-](\d{4})[/\-](\d{2})[/\-](\d{2})", lowered):
-        try:
-            article_date = datetime.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            return article_date >= cutoff
-        except ValueError:
-            pass
-    # Compact: YYYYMMDD anywhere in the URL slug (e.g. yjj20260212... or 20260402_news)
-    for match in re.finditer(r"(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])", lowered):
-        try:
-            article_date = datetime.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            return article_date >= cutoff
-        except ValueError:
-            pass
-    # Month-name slug: "julio-2025", "march-2025", "2025-julio", "2025-march"
-    all_months = {**_MONTH_NAMES_ES, **_MONTH_NAMES_EN}
-    month_pattern = "|".join(re.escape(m) for m in all_months)
-    for match in re.finditer(
-        rf"(?:({month_pattern})[- ](\d{{4}})|(\d{{4}})[- ]({month_pattern}))", lowered
-    ):
-        month_name = match.group(1) or match.group(4)
-        year_str = match.group(2) or match.group(3)
-        try:
-            article_date = datetime.date(int(year_str), all_months[month_name], 1)
-            return article_date >= cutoff
-        except (ValueError, KeyError):
-            pass
-    return True  # No date in URL → don't filter (assume recent)
-
-
-_TITLE_STOPWORDS = {
-    "de", "la", "el", "en", "a", "los", "las", "del", "que", "un", "una",
-    "por", "con", "se", "ha", "al", "es", "su", "y", "e", "o", "the", "of",
-    "in", "to", "a", "and", "for", "on", "at", "by", "with", "from",
-}
-
-
-def _text_keywords(text: str) -> set[str]:
-    return {w.lower() for w in text.split() if len(w) > 4 and w.lower() not in _TITLE_STOPWORDS}
-
-
-_NON_NEWS_DOMAINS = {
-    "travel", "tourism", "tripadvisor", "lonelyplanet", "fodors", "frommers",
-    "wikivoyage", "wikipedia", "wikitravel", "about.com", "tripsavvy",
-    "smartertravel", "booking.com", "expedia", "airbnb",
-    # statistics / data aggregators — evergreen content, never news
-    "numbeo.com", "statista.com", "macrotrends.net", "worldometers.info",
-    "tradingeconomics.com", "indexmundi.com", "globaleconomy.com",
-    "countrymeters.info", "globalterrorismindex.org", "visionofhumanity.org",
-    # think tanks / advocacy orgs — policy analysis, not news reporting
-    "brennancenter.org", "aclu.org", "cato.org", "heritage.org",
-    "brookings.edu", "cfr.org", "chathamhouse.org", "sipri.org",
-    "amnesty.org", "hrw.org", "freedomhouse.org",
-    "dialogopolitico.org", "csis.org", "rand.org", "wilsoncenter.org",
-    # government travel advisory portals — evergreen safety ratings, not news
-    "osac.gov", "travel.state.gov", "smartraveller.gov.au",
-    "travel.gc.ca", "gov.uk/foreign-travel-advice",
-    # travel/community forums — threads stay active for years, not current news
-    "losviajeros.com", "foro.travel", "viajeros.com", "tripadvisor.com",
-    "lonelyplanet.com/thorntree", "reddit.com/r/travel",
-}
-
-# URL path segments that indicate forums, threads, or community posts — not journalism.
-_FORUM_PATH_SEGMENTS = {
-    "/foros/", "/forum/", "/forums/", "/thread/", "/threads/",
-    "/topic/", "/topics/", "/post/", "/posts/", "/discussion/",
-    "/comunidad/", "/community/", "/board/", "/boards/",
-}
-
-
-def _is_non_news_candidate(candidate: dict[str, str]) -> bool:
-    """Returns True if the candidate looks like evergreen/travel/wiki/government-PR content rather than news."""
-    url = candidate.get("url", "").lower()
-    title = candidate.get("title", "").lower()
-    snippet = candidate.get("snippet", "").lower()
-
-    if any(domain in url for domain in _NON_NEWS_DOMAINS):
-        return True
-
-    # Forum / community thread URLs — content is user-generated and not time-stamped journalism
-    if any(seg in url for seg in _FORUM_PATH_SEGMENTS):
-        return True
-
-    # Government press-release sections (.gob. / .gov domains with /prensa/ or /comunicado/)
-    # These publish project announcements, not journalistic news.
-    _GOV_TLD = (".gob.", ".gov.", "/gob.", "/gov.")
-    _PR_PATHS = ("/prensa/", "/comunicado", "/nota-de-prensa", "/press-release", "/sala-de-prensa")
-    if any(tld in url for tld in _GOV_TLD) and any(path in url for path in _PR_PATHS):
-        return True
-
-    # Law firm / legal publisher URLs — client alerts, legal updates, publications
-    _LEGAL_PATHS = (
-        "/legal-update", "/client-alert", "/client-advisory", "/legal-alert",
-        "/publications/", "/publication/", "/insights/", "/knowledge/",
-        "/briefing/", "/memorandum/", "/legal-news/",
-    )
-    if any(seg in url for seg in _LEGAL_PATHS):
-        return True
-
-    # Snippets with generic travel-advice patterns (no concrete event, no date)
-    evergreen_signals = [
-        "se recomienda a los viajeros", "se aconseja a los viajeros",
-        "para los turistas", "consejos de seguridad", "guía de viaje",
-        "recomendaciones para viajeros", "baja tasa de criminalidad",
-        "travel advisory", "safety tips for travelers",
-        # travel advisory language
-        "ejercer mayor precaución", "ejercer precaución",
-        "se desaconseja viajar", "no se recomienda viajar",
-        "nivel de alerta de viaje", "travel level", "do not travel",
-        "reconsider travel", "exercise increased caution",
-        "high threat location", "ubicación de alta amenaza",
-    ]
-    return any(signal in snippet or signal in title for signal in evergreen_signals)
-
-
-def _same_event(
-    candidate_a: dict[str, str],
-    candidate_b: dict[str, str],
-    query_terms: Optional[list[str]] = None,
-) -> bool:
-    """Returns True if two candidates appear to describe the same event.
-
-    Title overlap ≥ 3 shared keywords (excluding query terms) → same event.
-    Full-text (title+snippet) overlap ≥ 5 non-query keywords → same event.
-
-    Thresholds intentionally conservative: for topic-rich queries (e.g. Japan security),
-    many articles share 2 generic words (china, tensiones) without covering the same story.
-    Requiring 3 title-keyword overlap prevents false deduplication across genuinely
-    distinct events, which is what produces 4 diverse bullets.
-    """
-    excluded = set(t.lower() for t in (query_terms or []))
-    excluded.update(_TITLE_STOPWORDS)
-
-    def keywords(text: str) -> set[str]:
-        return {w.lower() for w in text.split() if len(w) > 4 and w.lower() not in excluded}
-
-    title_kw_a = keywords(candidate_a.get("title", ""))
-    title_kw_b = keywords(candidate_b.get("title", ""))
-    if len(title_kw_a & title_kw_b) >= 3:
-        return True
-
-    full_a = keywords(f"{candidate_a.get('title', '')} {candidate_a.get('snippet', '')}")
-    full_b = keywords(f"{candidate_b.get('title', '')} {candidate_b.get('snippet', '')}")
-    return len(full_a & full_b) >= 5
-
-
-def _dedup_candidates_by_event(
-    candidates: list[dict[str, str]],
-    query_terms: Optional[list[str]] = None,
-) -> list[dict[str, str]]:
-    """Keep one candidate per event — drop articles that appear to cover the same story."""
-    accepted: list[dict[str, str]] = []
-    for candidate in candidates:
-        if not any(_same_event(candidate, a, query_terms) for a in accepted):
-            accepted.append(candidate)
-    return accepted
-
-
-def _extract_generic_search_candidates(search_text: str) -> list[dict[str, str]]:
-    candidates: list[dict[str, str]] = []
-    current: Optional[dict[str, str]] = None
-
-    for line in [line.rstrip() for line in (search_text or "").splitlines() if line.strip()]:
-        # Handle both "1. [title](url)" and "1. [article] [title](url)" / "1. [hub] [title](url)"
-        item_match = re.match(r"^\d+\. (?:\[(article|hub)\]\s*)?\[(.+?)\]\((https?://[^)]+)\)", line.strip())
-        if item_match:
-            if current:
-                candidates.append(current)
-            tag = item_match.group(1) or ""
-            current = {
-                "title": item_match.group(2).strip(),
-                "url": item_match.group(3).strip(),
-                "snippet": "",
-                "hit_type": tag,
-            }
-            continue
-
-        if current is not None and not line.startswith("Sources:") and not line.startswith("-") and not line.startswith("Call web_fetch") and not line.startswith("Next step"):
-            snippet = line.strip()
-            if snippet:
-                current["snippet"] = (current.get("snippet", "") + " " + snippet).strip()
-
-    if current:
-        candidates.append(current)
-
-    seen: set[str] = set()
-    deduped: list[dict[str, str]] = []
-    for candidate in candidates:
-        url = candidate.get("url", "")
-        if url and url not in seen:
-            seen.add(url)
-            deduped.append(candidate)
-    return deduped
 
 
 def _score_generic_candidate(candidate: dict[str, str], query_terms: list[str], query_source_group: Optional[str] = None) -> int:
@@ -2044,122 +1744,6 @@ def _rank_candidates_by_source_policy(
         ),
     )
 
-
-def _candidate_snippet_lines(candidate: dict[str, str]) -> list[str]:
-    snippet = (candidate.get("snippet") or "").strip()
-    if not snippet:
-        return []
-    snippet = re.sub(r"^#+\s+", "", snippet)
-    snippet = re.sub(r"\s+#+\s+", " ", snippet).strip()
-    if len(snippet.split()) < 4:
-        return []
-    return [snippet]
-
-
-def _is_hub_like_candidate(candidate: dict[str, str]) -> bool:
-    url = (candidate.get("url") or "").lower()
-    hit_type = (candidate.get("hit_type") or "").lower()
-    if hit_type == "hub":
-        return True
-    path = urlparse(url).path.lower().rstrip("/")
-    segments = [segment for segment in path.split("/") if segment]
-    if not segments:
-        return True
-    structurally_invalid_segments = {
-        "edizioni",
-        "editioni",
-        "dalle_sezioni_mobile.html",
-        "gli-inserti-del-foglio",
-        "conosci-i-foglianti",
-        "ultima-ora",
-    }
-    if any(segment in structurally_invalid_segments for segment in segments):
-        return True
-    if any(token in path for token in ("/edizioni/", "/dalle_sezioni_mobile", "/gli-inserti-del-foglio", "/conosci-i-foglianti", "/t/")):
-        return True
-    if any(token in path for token in ("/tag/", "/tags/", "/autori/", "/authors/", "/argomenti/", "/rubriche/")):
-        return True
-    if path.endswith(("/news.shtml", "/index.shtml", "/cronaca.shtml", "/politica.shtml", "/economia.shtml")):
-        return True
-    if segments[-1] in {"politica", "cronaca", "economia", "sport", "archive", "archivio", "topnews", "ultimaora"}:
-        return True
-    if (
-        len(segments) <= 2
-        and any(seg in {"politica", "cronaca", "economia", "sport"} for seg in segments)
-        and not any("-" in seg or "_" in seg or re.search(r"\d", seg) for seg in segments)
-    ):
-        return True
-    return False
-
-
-def _query_targets_public_safety(query: str) -> bool:
-    normalized = _strip_accents((query or "").lower())
-    signals = (
-        "seguridad",
-        "security",
-        "sicurezza",
-        "policia",
-        "police",
-        "polizia",
-        "crime",
-        "crimen",
-        "cronaca",
-        "public safety",
-        "orden publico",
-        "orden público",
-    )
-    return any(signal in normalized for signal in signals)
-
-
-def _is_tangential_vertical_candidate(candidate: dict[str, str], query: str) -> bool:
-    if not _query_targets_public_safety(query):
-        return False
-    path = urlparse(candidate.get("url", "")).path.lower()
-    title = (candidate.get("title") or "").lower()
-    blob = f"{path} {title}"
-    return any(
-        token in blob
-        for token in (
-            "/canale_motori/",
-            "/motori/",
-            "/auto/",
-            "/sicurezza-informatica",
-            "sicurezza informatica",
-            "cybersecurity",
-            "ciberseguridad",
-            "motori",
-            "automotive",
-            "sicurezza stradale",
-            "sicurezza vial",
-            "road safety",
-        )
-    )
-
-
-def _is_invalid_news_candidate(candidate: dict[str, str], query: str) -> bool:
-    return _is_hub_like_candidate(candidate) or _is_tangential_vertical_candidate(candidate, query)
-
-
-def _candidate_url_has_date(url: str) -> bool:
-    lowered = (url or "").lower()
-    if re.search(r"[/\-](\d{4})[/\-](\d{2})[/\-](\d{2})", lowered):
-        return True
-    if re.search(r"(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])", lowered):
-        return True
-    all_months = {**_MONTH_NAMES_ES, **_MONTH_NAMES_EN}
-    month_pattern = "|".join(re.escape(m) for m in all_months)
-    return bool(
-        re.search(rf"(?:({month_pattern})[- ](\d{{4}})|(\d{{4}})[- ]({month_pattern}))", lowered)
-    )
-
-
-def _strip_accents(text: str) -> str:
-    """Remove diacritics so 'japon' matches 'japón', 'ultima' matches 'última', etc."""
-    import unicodedata
-    return "".join(
-        c for c in unicodedata.normalize("NFD", text)
-        if unicodedata.category(c) != "Mn"
-    )
 
 
 def _extract_generic_content_lines(text: str, query_terms: list[str]) -> list[str]:
@@ -2338,29 +1922,6 @@ def _filter_section_lines_for_query(lines: list[str], last_message: str, section
     return _dedupe_homepage_lines(filtered)
 
 
-_NO_INFO_RE = re.compile(
-    # Pattern A: "no/sin + verb + noticias/información/news/contenido"
-    # Catches: "no proporciona noticias", "no incluye noticias recientes", "no hay noticias"
-    r"\b(?:no|sin)\b.{0,50}\b(?:noticias?|informacion|news|contenido relevante)\b"
-    # Pattern B: "subject + no + verb" — "la información proporcionada no incluye"
-    r"|\b(?:informacion|pagina|sitio|texto|contenido)\b.{0,40}\bno\b.{0,40}"
-    r"\b(?:incluye|proporciona|contiene|ofrece|tiene|encontr)\b"
-    # Pattern C: explicit "doesn't address this topic" meta-commentary
-    r"|sin abordar (?:directamente|este tema|el tema)"
-    r"|no aborda (?:directamente|este tema)"
-    r"|no trata (?:directamente|este tema)"
-    r"|informacion proporcionada se centra en"
-    # Pattern D: English equivalents
-    r"|does not (?:contain|provide|include) (?:information|news|relevant)"
-    r"|no relevant information|no results found|without relevant information",
-    re.DOTALL,
-)
-
-
-def _is_no_info_response(text: str) -> bool:
-    lowered = _strip_accents((text or "").lower())
-    return bool(_NO_INFO_RE.search(lowered))
-
 
 def _extract_sources_from_text(text: str) -> list[dict[str, str]]:
     sources: list[dict[str, str]] = []
@@ -2395,11 +1956,6 @@ def _extract_sources_from_text(text: str) -> list[dict[str, str]]:
             sources.append({"title": url, "url": url, "domain": domain, "snippet": ""})
     return sources
 
-
-def _slugify_periodicos_label(value: str) -> str:
-    normalized = _strip_accents((value or "").lower())
-    normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
-    return normalized
 
 
 def _extract_periodicos_directory_links(html: str, *, base_url: str) -> list[dict[str, str]]:
@@ -3940,113 +3496,6 @@ async def _run_generic_web_search_fetch(
         )
     return result
 
-
-def _enforce_synthesis_format(text: str) -> str:
-    """Post-process LLM output to guarantee bullet spacing and strip header artifacts."""
-    lines = text.splitlines()
-    result: list[str] = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        # Remove markdown headers the LLM may have emitted despite instructions
-        if re.match(r"^#{1,4}\s", stripped):
-            continue
-        # Ensure blank line before every bullet (•, -, *) that starts a new point
-        if re.match(r"^[•\-\*]\s", stripped) and result and result[-1].strip():
-            result.append("")
-        result.append(stripped)
-        # Ensure blank line after every bullet line (before next non-empty line)
-        if re.match(r"^[•\-\*]\s", stripped):
-            # Peek ahead: if next non-empty line isn't a blank, we'll add one later
-            pass
-    # Second pass: ensure blank line after each bullet block
-    final: list[str] = []
-    for i, line in enumerate(result):
-        final.append(line)
-        if re.match(r"^[•\-\*]\s", line):
-            # Add blank after bullet if next line is non-empty content
-            if i + 1 < len(result) and result[i + 1].strip():
-                final.append("")
-    # Collapse 3+ consecutive blank lines to 2
-    collapsed: list[str] = []
-    blank_count = 0
-    for line in final:
-        if not line.strip():
-            blank_count += 1
-            if blank_count <= 2:
-                collapsed.append(line)
-        else:
-            blank_count = 0
-            collapsed.append(line)
-    return "\n".join(collapsed).strip()
-
-
-def _dedup_synthesis_bullets(text: str, query_terms: Optional[list[str]] = None) -> str:
-    """Remove duplicate bullets from a synthesized response.
-
-    Two bullets are considered duplicates when their non-query keyword overlap ≥ 3.
-    Keeps the longer (more informative) bullet of each duplicate pair.
-    """
-    excluded = set(t.lower() for t in (query_terms or []))
-    excluded.update(_TITLE_STOPWORDS)
-
-    def kw(s: str) -> set[str]:
-        words = set()
-        for w in s.split():
-            w = w.lower()
-            if len(w) <= 4 or w in excluded:
-                continue
-            # Normalize plural: "terremotos" → "terremoto", "desastres" → "desastre"
-            if w.endswith("s") and len(w) > 5:
-                w = w[:-1]
-            words.add(w)
-        return words
-
-    # Split into (bullet_block, non_bullet_prefix) sections
-    # A bullet block = the • line plus any continuation lines before the next bullet
-    blocks: list[str] = []
-    current: list[str] = []
-    for line in text.splitlines():
-        if re.match(r"^[•\-\*]\s", line.strip()) and current:
-            blocks.append("\n".join(current))
-            current = [line]
-        else:
-            current.append(line)
-    if current:
-        blocks.append("\n".join(current))
-
-    # Separate bullet blocks from header/non-bullet prefix
-    bullet_blocks: list[str] = []
-    prefix_lines: list[str] = []
-    for block in blocks:
-        if re.match(r"^[•\-\*]\s", block.strip()):
-            bullet_blocks.append(block)
-        else:
-            prefix_lines.append(block)
-
-    _DISASTER_KW = {"terremoto", "sismo", "maremoto", "tsunami", "earthquake", "seismic"}
-
-    # Dedup bullet blocks
-    accepted: list[str] = []
-    for block in bullet_blocks:
-        block_kw = kw(block)
-        duplicate = False
-        for i, acc in enumerate(accepted):
-            acc_kw = kw(acc)
-            # Use a lower threshold when both bullets are about natural disasters
-            # (earthquake variants share few unique words but are clearly the same topic)
-            both_disaster = bool(block_kw & _DISASTER_KW) and bool(acc_kw & _DISASTER_KW)
-            dedup_threshold = 2 if both_disaster else 4
-            if len(block_kw & acc_kw) >= dedup_threshold:
-                # Keep the longer one
-                if len(block) > len(acc):
-                    accepted[i] = block
-                duplicate = True
-                break
-        if not duplicate:
-            accepted.append(block)
-
-    all_parts = prefix_lines + accepted
-    return "\n\n".join(p.strip() for p in all_parts if p.strip())
 
 
 async def _synthesize_search_summary(
