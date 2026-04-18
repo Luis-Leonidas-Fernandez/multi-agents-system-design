@@ -1,6 +1,6 @@
-from main import (
-    _extract_latest_ai_text_from_live_state,
-    _merge_turn_response_into_ui_state,
+from application.ui_bridge.state_mapper import (
+    extract_latest_ai_text_from_live_state as _extract_latest_ai_text_from_live_state,
+    merge_turn_response_into_ui_state as _merge_turn_response_into_ui_state,
 )
 
 
@@ -22,7 +22,7 @@ def test_merge_turn_response_into_ui_state_appends_ai_when_transcript_is_stale()
 
     merged = _merge_turn_response_into_ui_state(state, "respuesta final", message_count=2)
 
-    assert merged["transcript"] == ["human: hola", "ai: respuesta final"]
+    assert merged["transcript"] == ["human: hola", "assistant: respuesta final"]
     assert merged["message_count"] == 2
 
 
@@ -31,14 +31,14 @@ def test_merge_turn_response_into_ui_state_does_not_duplicate_existing_ai():
         "session_id": "sess-1",
         "status": "listo",
         "prompt": "Escribí",
-        "transcript": ["human: hola", "ai: respuesta final"],
+        "transcript": ["human: hola", "assistant: respuesta final"],
         "message_count": 2,
         "has_memory": False,
     }
 
     merged = _merge_turn_response_into_ui_state(state, "respuesta final", message_count=2)
 
-    assert merged["transcript"] == ["human: hola", "ai: respuesta final"]
+    assert merged["transcript"] == ["human: hola", "assistant: respuesta final"]
     assert merged["message_count"] == 2
 
 

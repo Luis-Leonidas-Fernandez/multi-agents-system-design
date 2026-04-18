@@ -12,7 +12,7 @@ import threading
 import importlib.util
 import subprocess
 from pathlib import Path
-from typing import cast, Optional
+from typing import Optional
 
 from application.helpers.config_flow_helpers import validate_env
 from application.services.agent_registry import get_agent_specs
@@ -44,8 +44,6 @@ from application.services.session_inspection import (
     format_session_artifact,
     format_session_selector,
 )
-
-TURN_TIMEOUT_SECONDS = float(os.getenv("TURN_TIMEOUT_SECONDS", "180"))
 _SEARXNG_DEFAULT_BASE_URL = "http://localhost:8888"
 _SEARXNG_PROBE_PATH = "/search?q=multi-agents-healthcheck&format=json&categories=general"
 
@@ -167,152 +165,9 @@ def _default_node_bin() -> Optional[str]:
     return str(candidate) if candidate.exists() else None
 
 
-_UI_ROLE_MAP: dict[str, str] = {"ai": "assistant", "human": "you"}
-
-
-def _ui_state_payload(lifecycle, runtime: AgentRuntime, status: str) -> dict[str, object]:
-    artifact = runtime.build_session_artifact(lifecycle.session_id)
-    transcript: list[str] = []
-    for item in artifact.transcript:
-        role = _UI_ROLE_MAP.get(str(item.get("role", "message")).lower(), str(item.get("role", "message")).lower())
-        content = str(item.get("content", ""))
-        transcript.append(f"{role}: {content}".rstrip())
-    view = lifecycle.view()
-    return {
-        "session_id": lifecycle.session_id,
-        "status": status,
-        "prompt": view.prompt_hint,
-        "transcript": transcript,
-        "message_count": view.snapshot.message_count,
-        "has_memory": view.snapshot.has_memory,
-    }
-
-
-def _merge_turn_response_into_ui_state(
-    state: dict[str, object],
-    response: str,
-    *,
-    message_count: Optional[int] = None,
-) -> dict[str, object]:
-    """Asegura que la UI vea la respuesta del turno aunque el artifact esté atrasado."""
-    normalized_response = (response or "").strip()
-    if not normalized_response:
-        return state
-
-    transcript = list(cast(list[str], state.get("transcript", [])))
-    ai_line = f"assistant: {normalized_response}"
-    if transcript and transcript[-1] == ai_line:
-        merged = dict(state)
-        if message_count is not None:
-            merged["message_count"] = max(int(merged.get("message_count", 0) or 0), int(message_count))
-        return merged
-
-    merged = dict(state)
-    merged["transcript"] = transcript + [ai_line]
-    if message_count is not None:
-        merged["message_count"] = max(int(merged.get("message_count", 0) or 0), int(message_count))
-    elif "message_count" in merged:
-        merged["message_count"] = int(merged.get("message_count", 0) or 0) + 1
-    return merged
-
-
-def _extract_latest_ai_text_from_live_state(live_state: Optional[dict[str, object]]) -> str:
-    if not live_state:
-        return ""
-    messages = live_state.get("messages")
-    if not isinstance(messages, list):
-        return ""
-    for item in reversed(messages):
-        role = str(getattr(item, "type", getattr(item, "role", ""))).lower()
-        if role in {"ai", "assistant"}:
-            content = str(getattr(item, "content", "")).strip()
-            if content:
-                return content
-    return ""
-
-
-def _emit_json(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-
 def _run_ui_bridge() -> None:
-    # HITL usa input() interactivo — incompatible con bridge (stdin es JSON del Node UI).
-    # Forzamos false antes de que hitl_flow se importe via AgentRuntime.
-    os.environ.setdefault("HITL_ENABLED", "false")
-    validate_env()
-    runtime = AgentRuntime()
-    lifecycle = runtime.start_session_lifecycle(None)
-    _emit_json({"type": "state", "state": _ui_state_payload(lifecycle, runtime, "listo")})
-    try:
-        for raw in sys.stdin:
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                _emit_json({"type": "error", "message": "JSON inválido"})
-                continue
-
-            action = str(message.get("action", "")).lower()
-            if action == "exit":
-                break
-            if action != "submit":
-                _emit_json({"type": "error", "message": f"Acción no soportada: {action}"})
-                continue
-
-            text = str(message.get("text", "")).strip()
-            if not text:
-                _emit_json({"type": "state", "state": _ui_state_payload(lifecycle, runtime, "listo")})
-                continue
-
-            if text.lower() in {"salir", "exit", "quit"}:
-                asyncio.run(lifecycle.close())
-                asyncio.run(runtime.shutdown())
-                _emit_json({"type": "exit"})
-                break
-
-            if text.startswith("/"):
-                result = dispatch_inspection_command(text, lifecycle, runtime)
-                if result.handled:
-                    base_state = _ui_state_payload(lifecycle, runtime, "listo")
-                    base_transcript = list(cast(list[str], base_state.get("transcript", [])))
-                    base_transcript.append(f"command: {text}")
-                    base_transcript.extend(result.lines)
-                    _emit_json({"type": "state", "state": {**base_state, "transcript": base_transcript}})
-                    continue
-
-            _emit_json({"type": "busy", "status": "procesando…"})
-            session = lifecycle.resolve(text)
-            if session.turn_context is None:
-                _emit_json({"type": "state", "state": _ui_state_payload(lifecycle, runtime, "listo")})
-                continue
-            try:
-                turn = asyncio.run(asyncio.wait_for(runtime.execute_turn(session.turn_context), timeout=TURN_TIMEOUT_SECONDS))
-                live_state = asyncio.run(runtime.get_live_state(lifecycle.session_id))
-                effective_response = (turn.response or "").strip() or _extract_latest_ai_text_from_live_state(cast(Optional[dict[str, object]], live_state))
-                state_payload = _ui_state_payload(lifecycle, runtime, "listo")
-                state_payload = _merge_turn_response_into_ui_state(
-                    state_payload,
-                    effective_response,
-                    message_count=turn.message_count,
-                )
-                _emit_json({"type": "state", "state": state_payload})
-            except asyncio.TimeoutError:
-                _emit_json({"type": "error", "message": f"El turno superó {int(TURN_TIMEOUT_SECONDS)}s. Revisá proveedor/red/modelo."})
-                _emit_json({"type": "state", "state": _ui_state_payload(lifecycle, runtime, "listo")})
-            except Exception as exc:
-                _emit_json({"type": "error", "message": str(exc)})
-                _emit_json({"type": "state", "state": _ui_state_payload(lifecycle, runtime, "listo")})
-    finally:
-        try:
-            asyncio.run(lifecycle.close())
-        except Exception:
-            pass
-        try:
-            asyncio.run(runtime.shutdown())
-        except Exception:
-            pass
+    from application.ui_bridge.runner import run_ui_bridge
+    run_ui_bridge()
 
 
 def _handle_inspection_command(user_input: str, lifecycle, runtime: AgentRuntime) -> bool:
