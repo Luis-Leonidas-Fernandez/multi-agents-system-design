@@ -1,14 +1,25 @@
 """Tipos de eventos del protocolo bridge Python ↔ Node UI.
 
-Versión actual: 1 (campo 'type' obligatorio en todos los eventos).
+La versión efectiva del protocolo se anuncia mediante el evento inicial ``hello``
+(campo ``protocol_version``). El Node UI debe validar esa versión antes de
+procesar cualquier otro evento.
+
 Eventos futuros preparados pero no emitidos: TurnStartedEvent, TurnCompletedEvent.
 """
 from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
+
+PROTOCOL_VERSION: int = 1
+
+
+@dataclass(frozen=True)
+class HelloEvent:
+    protocol_version: int = PROTOCOL_VERSION
+    type: Literal["hello"] = "hello"
 
 
 @dataclass(frozen=True)
@@ -50,7 +61,7 @@ class TurnCompletedEvent:
     type: Literal["turn_completed"] = "turn_completed"
 
 
-BridgeEvent = StateEvent | BusyEvent | ErrorEvent | ExitEvent
+BridgeEvent = HelloEvent | StateEvent | BusyEvent | ErrorEvent | ExitEvent
 
 
 def emit_json(payload: dict[str, Any]) -> None:
@@ -58,5 +69,4 @@ def emit_json(payload: dict[str, Any]) -> None:
 
 
 def event_to_dict(event: BridgeEvent) -> dict[str, Any]:
-    from dataclasses import asdict
     return asdict(event)

@@ -20,6 +20,7 @@
 
 - `code_node` and `web_scraping_node` must always check `HITL_ENABLED` before execution. Removing or short-circuiting this check must be rejected.
 - HITL confirmation must happen before the agent runs, not after.
+- **Exception — Node UI bridge**: `application/ui_bridge/runner.py` sets `HITL_ENABLED=false` via `os.environ.setdefault` because stdin is occupied by the JSON protocol and `input()` is incompatible. This is intentional and architecturally documented. Future work: replace with a `hitl_request` bridge event that awaits user confirmation via stdin.
 
 ## AgentDoG Guardrail
 

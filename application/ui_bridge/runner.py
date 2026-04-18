@@ -13,7 +13,7 @@ from typing import cast, Optional
 
 from application.helpers.config_flow_helpers import validate_env
 from application.services.runtime import AgentRuntime
-from application.ui_bridge.protocol import emit_json
+from application.ui_bridge.protocol import HelloEvent, emit_json, event_to_dict
 from application.ui_bridge.state_mapper import (
     build_ui_state_payload,
     extract_latest_ai_text_from_live_state,
@@ -27,6 +27,7 @@ def run_ui_bridge() -> None:
     # HITL usa input() interactivo — incompatible con bridge (stdin es JSON del Node UI).
     os.environ.setdefault("HITL_ENABLED", "false")
     validate_env()
+    emit_json(event_to_dict(HelloEvent()))
     runtime = AgentRuntime()
     lifecycle = runtime.start_session_lifecycle(None)
     emit_json({"type": "state", "state": build_ui_state_payload(lifecycle, runtime, "listo")})
