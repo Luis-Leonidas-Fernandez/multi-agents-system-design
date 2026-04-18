@@ -2,32 +2,23 @@
 
 import os
 import re
-import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Annotated, Optional, Any
 from urllib.parse import urlparse, urljoin
 
-# Circuit breaker: evita reintentar providers que fallaron con errores no-retriables
-# (ej: Tavily con plan excedido). TTL: 5 minutos por proceso.
-_PROVIDER_CIRCUIT_BREAKER: dict[str, float] = {}
-_CIRCUIT_BREAKER_TTL = 300
-
-
-def _is_non_retryable_provider_error(error: Exception) -> bool:
-    msg = str(error).lower()
-    return any(kw in msg for kw in ["forbidden", "usage limit", "403", "rate limit", "exceeded", "unauthorized", "invalid api key"])
-
-
-def _circuit_trip(provider: str) -> None:
-    _PROVIDER_CIRCUIT_BREAKER[provider] = time.time()
-
-
-def _circuit_open(provider: str) -> bool:
-    tripped_at = _PROVIDER_CIRCUIT_BREAKER.get(provider)
-    if tripped_at is None:
-        return False
-    return (time.time() - tripped_at) < _CIRCUIT_BREAKER_TTL
+from infra.web_circuit_breaker import (
+    _is_non_retryable_provider_error,
+    _circuit_trip,
+    _circuit_open,
+)
+from infra.web_cache import (
+    _get_search_cache,
+    _set_search_cache,
+    _get_web_fetch_cache,
+    _set_web_fetch_cache,
+    _web_fetch_cache_key,
+)
 
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
@@ -48,14 +39,6 @@ from application.services.web_search_registry import (
 )
 from infra import scraping_infra
 
-
-_SEARCH_CACHE_TTL_SECONDS = 15 * 60
-_SEARCH_CACHE_MAX = 128
-_SEARCH_CACHE: dict[str, tuple[float, str]] = {}
-
-_WEB_FETCH_CACHE_TTL_SECONDS = 15 * 60
-_WEB_FETCH_CACHE_MAX = 128
-_WEB_FETCH_CACHE: dict[str, tuple[float, str]] = {}
 
 
 def _web_search_debug_enabled() -> bool:
@@ -207,51 +190,6 @@ def _domain_allowed(url: str, *, allowed: Optional[list[str]] = None, blocked: O
         return any(_domain_matches(host, pattern) for pattern in allowed)
     return True
 
-
-def _search_cache_key(query: str, allowed_domains: Optional[list[str]], blocked_domains: Optional[list[str]], num_results: int) -> str:
-    allowed = ",".join(sorted((allowed_domains or []) + _split_domain_list(os.getenv("WEB_ALLOWED_DOMAINS"))))
-    blocked = ",".join(sorted((blocked_domains or []) + _split_domain_list(os.getenv("WEB_BLOCKED_DOMAINS"))))
-    return f"{query}|allowed={allowed}|blocked={blocked}|n={num_results}"
-
-
-def _get_search_cache(key: str) -> Optional[str]:
-    entry = _SEARCH_CACHE.get(key)
-    if not entry:
-        return None
-    ts, value = entry
-    if time.time() - ts > _SEARCH_CACHE_TTL_SECONDS:
-        _SEARCH_CACHE.pop(key, None)
-        return None
-    return value
-
-
-def _set_search_cache(key: str, value: str) -> None:
-    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX:
-        oldest_key = next(iter(_SEARCH_CACHE))
-        _SEARCH_CACHE.pop(oldest_key, None)
-    _SEARCH_CACHE[key] = (time.time(), value)
-
-
-def _web_fetch_cache_key(url: str, prompt: str, use_dynamic: bool, wait_for_selector: Optional[str], extract_selector: Optional[str], max_chars: int) -> str:
-    return f"{url}|prompt={prompt}|dynamic={use_dynamic}|wait={wait_for_selector}|extract={extract_selector}|chars={max_chars}"
-
-
-def _get_web_fetch_cache(key: str) -> Optional[str]:
-    entry = _WEB_FETCH_CACHE.get(key)
-    if not entry:
-        return None
-    ts, value = entry
-    if time.time() - ts > _WEB_FETCH_CACHE_TTL_SECONDS:
-        _WEB_FETCH_CACHE.pop(key, None)
-        return None
-    return value
-
-
-def _set_web_fetch_cache(key: str, value: str) -> None:
-    if len(_WEB_FETCH_CACHE) >= _WEB_FETCH_CACHE_MAX:
-        oldest_key = next(iter(_WEB_FETCH_CACHE))
-        _WEB_FETCH_CACHE.pop(oldest_key, None)
-    _WEB_FETCH_CACHE[key] = (time.time(), value)
 
 
 def _is_preapproved_host(hostname: str, pathname: str) -> bool:
