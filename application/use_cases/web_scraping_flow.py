@@ -8,7 +8,6 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 from typing import Any, Optional, Callable, Awaitable, Mapping, cast
 
@@ -60,6 +59,13 @@ from ports.country_news_ports import (
     ISectionPathResolver,
     IPressSourceDiscovery,
     IDynamicPressSourceDiscovery,
+)
+from domain.web_models import (
+    EvidenceKind,
+    Recency,
+    SourceKind,
+    Specificity,
+    WebCandidate,
 )
 from tools.web_tools import _is_specific_article_hit
 from application.helpers.price_flow_helpers import (
@@ -168,33 +174,15 @@ def _finalize_web_user_summary(
     return filtered_summary, filtered_sources, final_words
 
 
-@dataclass(frozen=True)
-class WebCandidateRecord:
-    title: str
-    url: str
-    snippet: str
-    source_kind: str
-    evidence_kind: str
-    recency: str
-    specificity: str
-    source_label: str = ""
-
-    def as_candidate(self) -> dict[str, str]:
-        return {
-            "title": self.title,
-            "url": self.url,
-            "snippet": self.snippet,
-            "source_kind": self.source_kind,
-            "source_label": self.source_label,
-        }
+WebCandidateRecord = WebCandidate
 
 
-def _candidate_record_from_dict(candidate: dict[str, str], *, query: str, query_horizon: Optional[str]) -> WebCandidateRecord:
+def _candidate_record_from_dict(candidate: dict[str, str], *, query: str, query_horizon: Optional[str]) -> WebCandidate:
     source_kind = _classify_candidate_source_kind(candidate)
-    evidence_kind = "section_lines" if source_kind == "section_hit" else "search_snippet"
+    evidence_kind = EvidenceKind.SECTION_LINES if source_kind == SourceKind.SECTION else EvidenceKind.SEARCH_SNIPPET
     recency = _classify_candidate_recency(candidate, query_horizon)
     specificity = _classify_candidate_specificity(candidate, query)
-    return WebCandidateRecord(
+    return WebCandidate(
         title=str(candidate.get("title") or candidate.get("url") or "result"),
         url=str(candidate.get("url") or ""),
         snippet=str(candidate.get("snippet") or ""),
@@ -206,34 +194,34 @@ def _candidate_record_from_dict(candidate: dict[str, str], *, query: str, query_
     )
 
 
-def _classify_candidate_source_kind(candidate: dict[str, str]) -> str:
+def _classify_candidate_source_kind(candidate: dict[str, str]) -> SourceKind:
     if _is_hub_like_candidate(candidate):
-        return "hub_hit"
+        return SourceKind.HUB
     if candidate.get("source_kind") == "section_fallback":
-        return "section_hit"
+        return SourceKind.SECTION
     if candidate.get("source_kind") == "homepage_fallback":
-        return "homepage_hit"
+        return SourceKind.HOMEPAGE
     if _is_specific_article_hit(candidate):
-        return "article_hit"
-    return "topic_hit"
+        return SourceKind.ARTICLE
+    return SourceKind.TOPIC
 
 
-def _classify_candidate_recency(candidate: dict[str, str], query_horizon: Optional[str]) -> str:
+def _classify_candidate_recency(candidate: dict[str, str], query_horizon: Optional[str]) -> Recency:
     url = str(candidate.get("url") or "")
     if _candidate_url_has_date(url):
         threshold = 45 if query_horizon == "month" else 14 if query_horizon == "week" else 2 if query_horizon == "today" else 30
-        return "dated_recent" if _candidate_url_is_recent(url, threshold) else "dated_old"
+        return Recency.DATED_RECENT if _candidate_url_is_recent(url, threshold) else Recency.DATED_OLD
     if candidate.get("source_kind") == "section_fallback":
-        return "dated_recent"
-    return "undated"
+        return Recency.DATED_RECENT
+    return Recency.UNDATED
 
 
-def _classify_candidate_specificity(candidate: dict[str, str], query: str) -> str:
+def _classify_candidate_specificity(candidate: dict[str, str], query: str) -> Specificity:
     if _is_invalid_news_candidate(candidate, query):
-        return "structural"
+        return Specificity.STRUCTURAL
     if candidate.get("source_kind") == "section_fallback" or _is_specific_article_hit(candidate):
-        return "concrete"
-    return "broad"
+        return Specificity.CONCRETE
+    return Specificity.BROAD
 
 
 def _candidate_strategy_priority(candidate: dict[str, str], *, query: str, query_horizon: Optional[str]) -> tuple[int, int, int, int]:
@@ -484,14 +472,14 @@ class CountryRecentNewsStrategy:
                     if candidate_url in seen_urls:
                         continue
                     seen_urls.add(candidate_url)
-                    structured_candidates.append(WebCandidateRecord(
+                    structured_candidates.append(WebCandidate(
                         title=f"{source_meta.get('title') or press_name} — {section_label}",
                         url=candidate_url,
                         snippet=item_text,
-                        source_kind="section_hit",
-                        evidence_kind="section_lines",
-                        recency="dated_recent",
-                        specificity="concrete",
+                        source_kind=SourceKind.SECTION,
+                        evidence_kind=EvidenceKind.SECTION_LINES,
+                        recency=Recency.DATED_RECENT,
+                        specificity=Specificity.CONCRETE,
                         source_label=section_label,
                     ))
 
