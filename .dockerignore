@@ -1,33 +1,37 @@
-# Git
-.git
-.gitignore
+# Git (innecesario ignorarlos, pero no rompe)
+# .git
+# .gitignore
 
 # Python
-__pycache__
+__pycache__/
 *.py[cod]
-*$py.class
 *.so
 .Python
-.venv
+.venv/
 venv/
 ENV/
 
 # IDE
-.vscode
-.idea
+.vscode/
+.idea/
 *.swp
 *.swo
 
-# Archivos de entorno (no incluir secrets!)
+# Entorno (SECRETS)
 .env
 .env.local
 
-# Docker
-Dockerfile
-docker-compose*.yml
-.dockerignore
-
-# Tests y otros
-.pytest_cache
+# Tests
+.pytest_cache/
 .coverage
 htmlcov/
+
+# Logs y runtime
+logs/
+sessions/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
