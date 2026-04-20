@@ -2931,130 +2931,152 @@ async def _fetch_and_score_entries(
     return eligible_entries
 
 
+async def _run_week_search_pipeline(
+    last_message: str,
+    ctx: QueryContext,
+    web_search_runtime_args: Optional[dict[str, Any]],
+) -> tuple[list[dict[str, str]], str, Optional[dict[str, Any]]]:
+    """Returns (diverse_candidates, search_text, early_response). Caller returns early_response immediately if not None."""
+    diverse_candidates, search_text = await _run_week_search_candidates(
+        last_message, ctx.search_age_days, ctx.query_terms, ctx.query_source_group, web_search_runtime_args
+    )
+    local_source_strategy = _country_press_strategy_cache_get(ctx.query_source_group, ctx.source_terms)
+    _web_debug(
+        "generic_fetch.week_candidates",
+        query=last_message,
+        search_age_days=ctx.search_age_days,
+        candidate_count=len(diverse_candidates),
+        local_source_strategy=local_source_strategy,
+        urls=[c.get("url", "") for c in diverse_candidates],
+    )
+    if ctx.query_source_group and not diverse_candidates and local_source_strategy in {"cache", "directory", "policy", "lookup"}:
+        return [], search_text, _build_no_local_sources_response(last_message)
+    return diverse_candidates, search_text, None
+
+
+async def _run_general_search_pipeline(
+    last_message: str,
+    ctx: QueryContext,
+    loop: asyncio.AbstractEventLoop,
+    web_search_runtime_args: Optional[dict[str, Any]],
+) -> tuple[list[dict[str, str]], str]:
+    from tools import search_web
+
+    query_terms = ctx.query_terms
+    query_source_group = ctx.query_source_group
+    source_terms = ctx.source_terms
+    query_horizon = ctx.query_horizon
+    search_age_days = ctx.search_age_days
+
+    country_press_domains, country_press_names = await _discover_country_press_sources(
+        last_message,
+        query_source_group,
+        source_terms,
+        web_search_runtime_args,
+    )
+    search_invoke_args: dict = {"query": last_message, "use_cache": False, **(web_search_runtime_args or {})}
+    if search_age_days is not None:
+        search_invoke_args["max_age_days"] = search_age_days
+    if _is_recent_web_information_query(last_message):
+        search_invoke_args["topic"] = "news"
+        if query_horizon == "today":
+            search_invoke_args["time_range"] = "day"
+    if country_press_domains and not search_invoke_args.get("allowed_domains"):
+        search_invoke_args["allowed_domains"] = country_press_domains
+    if country_press_names:
+        search_invoke_args["query"] = f"{last_message} {' '.join(country_press_names[:4])}".strip()
+
+    search_text = await loop.run_in_executor(
+        None,
+        lambda: search_web.invoke(search_invoke_args),
+    )
+    if not isinstance(search_text, str):
+        search_text = str(search_text)
+
+    candidates = _extract_generic_search_candidates(search_text)
+    ranked_candidates = _rank_candidates_by_source_policy(
+        [
+            c for c in candidates
+            if not _is_non_news_candidate(c)
+            and not _is_invalid_news_candidate(c, last_message)
+        ],
+        query_terms,
+        query_source_group,
+    )[:8]
+
+    diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)
+    _web_debug(
+        "generic_fetch.initial_search",
+        query=last_message,
+        invoke_args=search_invoke_args,
+        candidate_count=len(candidates),
+        ranked_candidate_count=len(ranked_candidates),
+        diverse_candidate_count=len(diverse_candidates),
+        search_preview=search_text[:500],
+    )
+
+    if len(diverse_candidates) < 3:
+        alt_invoke_args: dict = {"query": last_message + " últimas noticias recientes", "use_cache": False, **(web_search_runtime_args or {})}
+        if search_age_days is not None:
+            alt_invoke_args["max_age_days"] = search_age_days
+        if _is_recent_web_information_query(last_message):
+            alt_invoke_args["topic"] = "news"
+            if query_horizon == "today":
+                alt_invoke_args["time_range"] = "day"
+        if country_press_domains and not alt_invoke_args.get("allowed_domains"):
+            alt_invoke_args["allowed_domains"] = country_press_domains
+        if country_press_names:
+            alt_invoke_args["query"] = f"{last_message} últimas noticias recientes {' '.join(country_press_names[:4])}".strip()
+        alt_search_text = await loop.run_in_executor(
+            None,
+            lambda q=alt_invoke_args: search_web.invoke(q),
+        )
+        if not isinstance(alt_search_text, str):
+            alt_search_text = str(alt_search_text)
+        alt_candidates = [
+            c for c in _extract_generic_search_candidates(alt_search_text)
+            if not _is_non_news_candidate(c)
+            and not _is_invalid_news_candidate(c, last_message)
+        ]
+        for c in _rank_candidates_by_source_policy(alt_candidates, query_terms, query_source_group):
+            if len(diverse_candidates) >= 4:
+                break
+            if not any(_same_event(c, d, query_terms) for d in diverse_candidates):
+                diverse_candidates.append(c)
+        search_text = search_text + "\n" + alt_search_text
+        _web_debug(
+            "generic_fetch.alt_search",
+            query=alt_invoke_args["query"],
+            invoke_args=alt_invoke_args,
+            alt_candidate_count=len(alt_candidates),
+            diverse_candidate_count=len(diverse_candidates),
+            alt_preview=alt_search_text[:500],
+        )
+
+    return diverse_candidates, search_text
+
+
 async def _run_generic_web_search_strategy_impl(
     last_message: str,
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    from tools import search_web
-    from tools.web_tools import fetch_web_page
-
     ctx, policy = _build_query_context(last_message)
     query_terms = ctx.query_terms
     query_source_group = ctx.query_source_group
-    source_terms = ctx.source_terms
     query_horizon = ctx.query_horizon
     search_age_days = ctx.search_age_days
     recent_min_score = policy.min_score
     recent_min_body_lines = policy.min_body_lines
     recent_min_sources = policy.min_sources
     recent_min_candidates = policy.min_candidates
-    recent_candidate_min_body_lines = policy.candidate_min_body_lines
-    recent_candidate_min_sources = policy.candidate_min_sources
     loop = asyncio.get_running_loop()
 
     if query_horizon == "week":
-        # OpenClaw-style search: one provider-backed result set, then rank/deduplicate
-        # the returned candidates before fetching article pages.
-        diverse_candidates, search_text = await _run_week_search_candidates(
-            last_message, search_age_days, query_terms, query_source_group, web_search_runtime_args
-        )
-        local_source_strategy = _country_press_strategy_cache_get(query_source_group, source_terms)
-        _web_debug(
-            "generic_fetch.week_candidates",
-            query=last_message,
-            search_age_days=search_age_days,
-            candidate_count=len(diverse_candidates),
-            local_source_strategy=local_source_strategy,
-            urls=[c.get("url", "") for c in diverse_candidates],
-        )
-        if query_source_group and not diverse_candidates and local_source_strategy in {"cache", "directory", "policy", "lookup"}:
-            return _build_no_local_sources_response(last_message)
+        diverse_candidates, search_text, early = await _run_week_search_pipeline(last_message, ctx, web_search_runtime_args)
+        if early is not None:
+            return early
     else:
-        country_press_domains, country_press_names = await _discover_country_press_sources(
-            last_message,
-            query_source_group,
-            source_terms,
-            web_search_runtime_args,
-        )
-        search_invoke_args: dict = {"query": last_message, "use_cache": False, **(web_search_runtime_args or {})}
-        if search_age_days is not None:
-            search_invoke_args["max_age_days"] = search_age_days
-        if _is_recent_web_information_query(last_message):
-            search_invoke_args["topic"] = "news"
-            if query_horizon == "today":
-                search_invoke_args["time_range"] = "day"
-        if country_press_domains and not search_invoke_args.get("allowed_domains"):
-            search_invoke_args["allowed_domains"] = country_press_domains
-        if country_press_names:
-            search_invoke_args["query"] = f"{last_message} {' '.join(country_press_names[:4])}".strip()
-
-        search_text = await loop.run_in_executor(
-            None,
-            lambda: search_web.invoke(search_invoke_args),
-        )
-        if not isinstance(search_text, str):
-            search_text = str(search_text)
-
-        candidates = _extract_generic_search_candidates(search_text)
-        ranked_candidates = _rank_candidates_by_source_policy(
-            [
-                c for c in candidates
-                if not _is_non_news_candidate(c)
-                and not _is_invalid_news_candidate(c, last_message)
-            ],
-            query_terms,
-            query_source_group,
-        )[:8]
-
-        diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)
-        _web_debug(
-            "generic_fetch.initial_search",
-            query=last_message,
-            invoke_args=search_invoke_args,
-            candidate_count=len(candidates),
-            ranked_candidate_count=len(ranked_candidates),
-            diverse_candidate_count=len(diverse_candidates),
-            search_preview=search_text[:500],
-        )
-
-        # Run second search if fewer than 3 distinct events found
-        if len(diverse_candidates) < 3:
-            alt_invoke_args: dict = {"query": last_message + " últimas noticias recientes", "use_cache": False, **(web_search_runtime_args or {})}
-            if search_age_days is not None:
-                alt_invoke_args["max_age_days"] = search_age_days
-            if _is_recent_web_information_query(last_message):
-                alt_invoke_args["topic"] = "news"
-                if query_horizon == "today":
-                    alt_invoke_args["time_range"] = "day"
-            if country_press_domains and not alt_invoke_args.get("allowed_domains"):
-                alt_invoke_args["allowed_domains"] = country_press_domains
-            if country_press_names:
-                alt_invoke_args["query"] = f"{last_message} últimas noticias recientes {' '.join(country_press_names[:4])}".strip()
-            alt_search_text = await loop.run_in_executor(
-                None,
-                lambda q=alt_invoke_args: search_web.invoke(q),
-            )
-            if not isinstance(alt_search_text, str):
-                alt_search_text = str(alt_search_text)
-            alt_candidates = [
-                c for c in _extract_generic_search_candidates(alt_search_text)
-                if not _is_non_news_candidate(c)
-                and not _is_invalid_news_candidate(c, last_message)
-            ]
-            for c in _rank_candidates_by_source_policy(alt_candidates, query_terms, query_source_group):
-                if len(diverse_candidates) >= 4:
-                    break
-                if not any(_same_event(c, d, query_terms) for d in diverse_candidates):
-                    diverse_candidates.append(c)
-            search_text = search_text + "\n" + alt_search_text
-            _web_debug(
-                "generic_fetch.alt_search",
-                query=alt_invoke_args["query"],
-                invoke_args=alt_invoke_args,
-                alt_candidate_count=len(alt_candidates),
-                diverse_candidate_count=len(diverse_candidates),
-                alt_preview=alt_search_text[:500],
-            )
+        diverse_candidates, search_text = await _run_general_search_pipeline(last_message, ctx, loop, web_search_runtime_args)
 
     ranked_candidates = diverse_candidates[:4]
     _web_debug(
@@ -3692,6 +3714,14 @@ async def run_web_scraping_flow(
                 if should_evaluate_guard_fn("web_scraping_node"):
                     _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
                     if not _is_safe:
+                        _emit_node_outcome(
+                            rid, "web_scraping_node", "blocked", phase="post_guard",
+                            agent="web_scraping_agent",
+                            duration_ms=int((time.time() - t0) * 1000),
+                            reason="agentdog", followup_likely=True,
+                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
+                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
+                        )
                         return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return _fast_result
 
@@ -3745,6 +3775,14 @@ async def run_web_scraping_flow(
                 if should_evaluate_guard_fn("web_scraping_node"):
                     _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
                     if not _is_safe:
+                        _emit_node_outcome(
+                            rid, "web_scraping_node", "blocked", phase="post_guard",
+                            agent="web_scraping_agent",
+                            duration_ms=int((time.time() - t0) * 1000),
+                            reason="agentdog", followup_likely=True,
+                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
+                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
+                        )
                         return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return _fast_result
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="news_sports")
@@ -3814,6 +3852,14 @@ async def run_web_scraping_flow(
                 if should_evaluate_guard_fn("web_scraping_node"):
                     _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
                     if not _is_safe:
+                        _emit_node_outcome(
+                            rid, "web_scraping_node", "blocked", phase="post_guard",
+                            agent="web_scraping_agent",
+                            duration_ms=int((time.time() - t0) * 1000),
+                            reason="agentdog", followup_likely=True,
+                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
+                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
+                        )
                         return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return _fast_result
 
@@ -3867,6 +3913,14 @@ async def run_web_scraping_flow(
                 if should_evaluate_guard_fn("web_scraping_node"):
                     _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
                     if not _is_safe:
+                        _emit_node_outcome(
+                            rid, "web_scraping_node", "blocked", phase="post_guard",
+                            agent="web_scraping_agent",
+                            duration_ms=int((time.time() - t0) * 1000),
+                            reason="agentdog", followup_likely=True,
+                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
+                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
+                        )
                         return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return _fast_result
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="generic_web_info")
@@ -3937,6 +3991,14 @@ async def run_web_scraping_flow(
                 if should_evaluate_guard_fn("web_scraping_node"):
                     _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
                     if not _is_safe:
+                        _emit_node_outcome(
+                            rid, "web_scraping_node", "blocked", phase="post_guard",
+                            agent="web_scraping_agent",
+                            duration_ms=int((time.time() - t0) * 1000),
+                            reason="agentdog", followup_likely=True,
+                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
+                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
+                        )
                         return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return _fast_result
             _emit_node_outcome(
