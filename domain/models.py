@@ -7,13 +7,7 @@ from typing import TypedDict, Annotated, Literal
 
 from pydantic import BaseModel
 
-from application.services.agent_registry import AGENT_NAMES
-
-
-# Python 3.9 no permite derivar Literal dinámicamente desde una tupla.
-# Mantenemos el Literal explícito y validamos sincronía con el registry.
-_REGISTERED_AGENT_NAMES = ("math_agent", "analysis_agent", "code_agent", "web_scraping_agent")
-assert _REGISTERED_AGENT_NAMES == AGENT_NAMES, "AgentName Literal desincronizado con agent_registry.AGENT_NAMES"
+from domain.agent_roles import AGENT_NAMES
 
 AgentName = Literal["math_agent", "analysis_agent", "code_agent", "web_scraping_agent"]
 

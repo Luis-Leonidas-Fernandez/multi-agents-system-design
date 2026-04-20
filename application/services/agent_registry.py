@@ -10,8 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
-
-AGENT_NAMES = ("math_agent", "analysis_agent", "code_agent", "web_scraping_agent")
+from domain.agent_roles import AGENT_NAMES  # noqa: F401  — re-exported for callers
 
 
 @dataclass(frozen=True)

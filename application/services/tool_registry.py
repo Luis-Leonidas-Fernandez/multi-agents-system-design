@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
+from domain.agent_roles import AGENT_NAMES as _AGENT_NAMES
+
 from tools import (
     calculate,
     analyze_data,
@@ -134,7 +136,6 @@ _TOOL_SPECS: tuple[ToolSpec, ...] = (
 )
 
 _TOOLS_BY_NAME = {spec.name: spec for spec in _TOOL_SPECS}
-_AGENT_NAMES = ("math_agent", "analysis_agent", "code_agent", "web_scraping_agent")
 
 
 def list_tool_specs() -> tuple[ToolSpec, ...]:
