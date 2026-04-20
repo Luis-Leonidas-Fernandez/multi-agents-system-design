@@ -2263,7 +2263,7 @@ async def _run_country_press_search_candidates(
     query_horizon: Optional[str] = None,
 ) -> tuple[list[dict[str, str]], str]:
     from tools import search_web
-    from tools.web_tools import fetch_web_page
+    from tools.web_tools import fetch_web_page, _is_specific_article_hit
 
     country_press_domains, country_press_names = await _discover_country_press_sources(
         last_message,
@@ -3056,6 +3056,7 @@ async def _run_generic_web_search_strategy_impl(
     last_message: str,
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
+    from tools.web_tools import _is_specific_article_hit
     ctx, policy = _build_query_context(last_message)
     query_terms = ctx.query_terms
     query_source_group = ctx.query_source_group
@@ -3640,9 +3641,6 @@ async def run_web_scraping_flow(
     prior_score = ctx["prior_score"]
     prior_reliability = ctx["prior_reliability"]
     ml_recommended = ctx["ml_recommended"]
-    strategy = ctx["strategy"]
-    exploring = ctx["exploring"]
-    exp_rate = ctx["exp_rate"]
     prediction_match = ctx["prediction_match"]
     _web_debug(
         "run_web_scraping_flow.start",

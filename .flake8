@@ -1,0 +1,23 @@
+[flake8]
+max-line-length = 120
+max-function-length = 100
+# Only enforce: function length (CFQ001) + undefined names (F821) + unused vars (F841)
+# Style codes (E2xx, E3xx, E5xx) are not enforced — existing codebase uses alignment style
+select = CFQ001,F821,F841
+per-file-ignores =
+    # god file — planned split into services
+    application/use_cases/web_scraping_flow.py: CFQ001
+    # safety evaluator with complex branching
+    application/policies/agentdog.py: CFQ001
+    # CLI dispatcher with many commands
+    application/services/cli_dispatch.py: CFQ001
+    # tool executor with complex branching
+    application/services/tool_execution.py: CFQ001
+    # Playwright async with nested callbacks
+    infra/scraping_infra.py: CFQ001
+exclude =
+    __pycache__,
+    .git,
+    venv,
+    .venv,
+    dist

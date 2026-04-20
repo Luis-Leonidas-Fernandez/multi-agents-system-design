@@ -6,6 +6,27 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lint dependencies
+        run: pip install -r requirements-lint.txt
+
+      - name: flake8 — style + function length
+        run: flake8 domain/ application/ infra/ tools/
+
+      - name: import-linter — layer rules
+        run: lint-imports
+
   tests:
     name: Tests
     runs-on: ubuntu-latest

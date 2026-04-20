@@ -7,7 +7,10 @@ estáticos que antes — sin cambio de comportamiento).
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from infra.country_bootstrap import CountryBootstrap
 
 from domain.country_resolver import extract_query_geography
 from domain.section_path_resolver import build_country_press_section_targets

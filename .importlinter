@@ -1,0 +1,36 @@
+[importlinter]
+root_packages =
+    domain
+    application
+    infra
+    tools
+
+[importlinter:contract:domain-isolation]
+name = Domain layer must not import from application, infra, or tools
+type = forbidden
+source_modules =
+    domain
+forbidden_modules =
+    application
+    infra
+    tools
+
+[importlinter:contract:application-no-infra]
+name = Application layer must not import from infra
+type = forbidden
+source_modules =
+    application
+forbidden_modules =
+    infra
+# Only flag direct application → infra imports.
+# Transitive paths through tools/ are acceptable (tools depends on infra by design).
+allow_indirect_imports = true
+ignore_imports =
+    # Known violations — application services directly wired to infra adapters.
+    # Fix: introduce port interfaces in domain and inject via DI.
+    application.services.session_memory -> infra.memory
+    application.services.session_persistence -> infra.persistence
+    application.use_cases.web_scraping_flow -> infra.country_news_adapters
+    application.use_cases.web_scraping_flow -> infra.dynamic_press_discovery
+    application.use_cases.web_scraping_flow -> infra.scraping_infra
+    application.use_cases.web_scraping_flow -> infra.country_profile_repo

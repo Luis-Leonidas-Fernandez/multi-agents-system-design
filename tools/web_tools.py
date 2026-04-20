@@ -36,6 +36,15 @@ from application.helpers.scraping_flow_helpers import (
 from application.services.web_search_registry import (
     get_web_search_provider_spec,
     resolve_web_search_provider_candidates,
+    WebSearchProviderSpec,
+)
+from domain.web_classifier import (
+    _hit_path_segments,
+    _hit_path_tokens,
+    _path_has_date_or_slug,
+    _blob_has_article_signal,
+    _is_topic_or_hub_hit,
+    _is_specific_article_hit,
 )
 from infra import scraping_infra
 
@@ -207,90 +216,6 @@ def _is_preapproved_url(url: str) -> bool:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     return bool(host) and _is_preapproved_host(host, parsed.path or "/")
-
-
-def _hit_path_segments(link: str) -> list[str]:
-    path = urlparse(link or "").path.strip("/")
-    if not path:
-        return []
-    return [segment for segment in path.split("/") if segment]
-
-
-def _hit_path_tokens(link: str) -> list[str]:
-    tokens: list[str] = []
-    for segment in _hit_path_segments(link):
-        for token in re.split(r"[-_]+", segment):
-            token = token.strip().lower()
-            if token:
-                tokens.append(token)
-    return tokens
-
-
-def _path_has_date_or_slug(link: str) -> bool:
-    path = urlparse(link or "").path.lower()
-    segments = _hit_path_segments(link)
-    return bool(
-        re.search(r"(19|20)\d{2}[/\-]?\d{2}[/\-]?\d{2}", path)
-        or re.search(r"\d{6,8}", path)
-        or any("-" in seg or "_" in seg or re.search(r"\d", seg) for seg in segments)
-    )
-
-
-def _blob_has_article_signal(blob: str) -> bool:
-    article_signals = (
-        "security", "safety", "economy", "economic", "politics", "political", "election",
-        "breaking", "update", "reported", "report", "announced", "announcement", "court",
-        "attack", "disaster", "conflict", "strike", "result", "results", "resultado", "resultados",
-        "match", "game", "policy", "strategy", "minister", "president", "prime minister",
-    )
-    return any(term in blob for term in article_signals)
-
-
-def _is_topic_or_hub_hit(hit: dict[str, str]) -> bool:
-    link = str(hit.get("url") or hit.get("link") or "")
-    if not link:
-        return False
-    segments = _hit_path_segments(link)
-    blob = " ".join(str(hit.get(field) or "") for field in ("title", "url", "link", "content", "snippet")).lower()
-    tokens = _hit_path_tokens(link)
-    hub_terms = {"topic", "topics", "tag", "tags", "category", "categories", "archive", "author", "world", "mundo", "index", "home", "partidos", "resultados", "ultima-ora"}
-    if "/t/" in urlparse(link).path.lower():
-        return True
-    if any(tok in hub_terms for tok in tokens):
-        return True
-    if len(segments) >= 1 and segments[0] in {"news", "noticias", "world", "mundo", "partidos", "resultados", "home", "index"} and not _path_has_date_or_slug(link):
-        if segments[0] in {"news", "noticias"} and _blob_has_article_signal(blob):
-            return False
-        return True
-    has_slug = any("-" in seg or "_" in seg or re.search(r"\d", seg) for seg in segments)
-    if len(segments) <= 2 and not _path_has_date_or_slug(link) and not has_slug and not _blob_has_article_signal(blob):
-        return True
-    return False
-
-
-def _is_specific_article_hit(hit: dict[str, str]) -> bool:
-    link = str(hit.get("url") or hit.get("link") or "")
-    if not link:
-        return False
-    path = urlparse(link).path.lower()
-    segments = _hit_path_segments(link)
-    tokens = _hit_path_tokens(link)
-    blob = " ".join(str(hit.get(field) or "") for field in ("title", "url", "link", "content", "snippet")).lower()
-    if re.search(r"(19|20)\d{2}[/\-]?\d{2}[/\-]?\d{2}", path) or re.search(r"\d{6,8}", path):
-        return True
-    if _is_topic_or_hub_hit(hit):
-        return False
-    if any(tok in {"news", "noticias"} for tok in tokens) and _blob_has_article_signal(blob):
-        return True
-    if any(tok in {"topic", "topics", "tag", "tags", "category", "categories", "archive", "author", "world", "mundo", "index", "home", "partidos", "resultados"} for tok in tokens):
-        return False
-    if len(segments) >= 2 and _blob_has_article_signal(blob):
-        return True
-    if len(segments) == 1 and any("-" in seg or "_" in seg for seg in segments) and _blob_has_article_signal(blob):
-        return True
-    if any("-" in seg or "_" in seg or re.search(r"\d", seg) for seg in segments):
-        return True
-    return len(segments) >= 3
 
 
 def _format_search_results(query: str, hits: list[dict[str, str]]) -> str:
