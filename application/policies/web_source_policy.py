@@ -159,15 +159,6 @@ def get_preferred_domains_for_group(query_source_group: Optional[str]) -> tuple[
     return tuple(domains)
 
 
-def is_preferred_domain_for_group(query_source_group: Optional[str], link: str) -> bool:
-    group = _get_source_group_policy(query_source_group)
-    if not group:
-        return False
-    if any(_matches_domain_hint(link, domain) for domain in group.get("preferred_domains", [])):
-        return True
-    return any(_matches_hostname_suffix(link, suffix) for suffix in _get_group_suffix_hints(group))
-
-
 def is_global_trusted_domain(link: str) -> bool:
     lowered_link = (link or "").lower()
     return any(domain and domain in lowered_link for domain in WEB_SOURCE_POLICY["global_trusted_domains"])

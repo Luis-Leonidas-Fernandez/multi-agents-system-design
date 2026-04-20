@@ -48,14 +48,6 @@ class Specificity(str, Enum):
 
 
 @dataclass(frozen=True)
-class WebSource:
-    title: str
-    url: str
-    domain: str = ""
-    source_kind: SourceKind | None = None
-
-
-@dataclass(frozen=True)
 class WebCandidate:
     title: str
     url: str
