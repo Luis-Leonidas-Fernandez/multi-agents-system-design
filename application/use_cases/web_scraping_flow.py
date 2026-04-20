@@ -67,6 +67,7 @@ from ports.country_news_ports import (
     IPressSourceDiscovery,
     IDynamicPressSourceDiscovery,
 )
+from application.helpers.url_helpers import _is_article_url, _extract_web_fetch_redirect_url
 from domain.web_models import (
     EvidenceKind,
     Recency,
@@ -2662,13 +2663,6 @@ def _build_generic_fetch_prompt(query: str) -> str:
     )
 
 
-def _extract_web_fetch_redirect_url(result_text: str) -> Optional[str]:
-    match = re.search(r"^Redirect URL:\s*(https?://\S+)$", result_text or "", re.MULTILINE)
-    if match:
-        return match.group(1).strip().rstrip(".,;:")
-    return None
-
-
 async def _run_week_search_candidates(
     last_message: str,
     search_age_days: Optional[int],
@@ -3092,12 +3086,6 @@ async def _run_generic_web_search_strategy_impl(
     # 2. Fall back to Tavily snippet when fetch fails or returns poor content
     # This is more reliable than full dynamic fetches for paywalled/dynamic pages.
     if query_horizon == "week":
-        # Match URLs that look like specific articles: date in path, or slug ≥15 chars
-        # 15 chars covers nippon.com IDs like yjj2026040500456 (16 chars)
-        _url_date_re = re.compile(
-            r"/\d{4}/\d{2}/\d{2}/|/\d{8}[-_]|\d{4}-\d{2}-\d{2}"
-            r"|/[a-z0-9-]{15,}/?$"  # article slug (was 30, lowered to 15)
-        )
         week_entry_lines: list[str] = []
         week_snippet_lines: list[str] = []
         week_entry_sources: list[dict[str, str]] = []
@@ -3108,18 +3096,10 @@ async def _run_generic_web_search_strategy_impl(
         async def _week_entry(c: dict[str, str]) -> tuple[str, str, bool]:
             url = c.get("url", "")
             snippet = c.get("snippet", "").strip()
-            # Strip markdown from snippet
             snippet = re.sub(r"^#+\s+", "", snippet)
             snippet = re.sub(r"\s+#+\s+", " ", snippet).strip()
             title = re.sub(r"^#+\s+", "", c.get("title", url)).strip()
-            # Fetch if URL looks like a specific article: date in path, long slug,
-            # or non-trivial path with ≥5-char last segment (catches nippon.com IDs like d01194)
-            _path_fetch = urlparse(url).path.rstrip("/")
-            _last_seg_fetch = _path_fetch.rsplit("/", 1)[-1] if _path_fetch else ""
-            _is_article_url_fetch = bool(_url_date_re.search(url)) or (
-                _path_fetch.count("/") >= 2 and len(_last_seg_fetch) >= 5
-            )
-            if _is_article_url_fetch:
+            if _is_article_url(url):
                 try:
                     fetched = await _fetch_web_page_follow_redirect(url, fetch_prompt_week, use_dynamic=False)
                     if (
@@ -3134,7 +3114,6 @@ async def _run_generic_web_search_strategy_impl(
                             return title, " ".join(lines[:3]), False
                 except Exception:
                     pass
-            # Fallback to Tavily snippet
             return title, snippet, True
 
         week_results = await asyncio.gather(*[_week_entry(c) for c in diverse_candidates])
@@ -3143,7 +3122,6 @@ async def _run_generic_web_search_strategy_impl(
             min_words = 4 if from_snippet else 8
             if not content or len(content.split()) < min_words:
                 continue
-            # Discard entries that are no-info placeholders
             if _is_no_info_response(content):
                 continue
             url = c.get("url", "")
@@ -3153,14 +3131,7 @@ async def _run_generic_web_search_strategy_impl(
             week_entry_lines.append(f"[{title}] — {content}")
             if from_snippet:
                 week_snippet_lines.append(f"[{title}] — {content}")
-            # Include URL in Sources if it looks like a specific article:
-            # has date/long-slug pattern, OR has a non-trivial path (≥2 segments, last ≥5 chars)
-            path = urlparse(url).path.rstrip("/")
-            last_segment = path.rsplit("/", 1)[-1] if path else ""
-            is_article_url = bool(_url_date_re.search(url)) or (
-                path.count("/") >= 2 and len(last_segment) >= 5
-            )
-            if is_article_url:
+            if _is_article_url(url):
                 week_entry_sources.append({"title": title, "url": url})
                 if from_snippet:
                     week_snippet_sources.append({"title": title, "url": url})

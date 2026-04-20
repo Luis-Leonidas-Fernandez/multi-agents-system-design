@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage
 
 from application.services.agent_registry import get_agent_spec
 from application.helpers.config_flow_helpers import get_web_search_runtime_config
+from application.helpers.url_helpers import _extract_web_fetch_redirect_url
 from application.services.background_tasks import background_task_service, BackgroundTaskService
 
 
@@ -39,12 +40,9 @@ async def _extract_url_query(url: str) -> dict[str, Any]:
 
     result = await fetch_web_page(url=url, prompt="Extraé y resumí la información relevante de esta página web.", use_dynamic=True)
     if isinstance(result, str):
-        import re
-
-        match = re.search(r"^Redirect URL:\s*(https?://\S+)$", result, re.MULTILINE)
-        if match:
-            redirected = await fetch_web_page(url=match.group(1).strip().rstrip(".,;:"), prompt="Extraé y resumí la información relevante de esta página web.", use_dynamic=True)
-            result = redirected
+        redirect_url = _extract_web_fetch_redirect_url(result)
+        if redirect_url:
+            result = await fetch_web_page(url=redirect_url, prompt="Extraé y resumí la información relevante de esta página web.", use_dynamic=True)
     return {"main_text": result if isinstance(result, str) else str(result)}
 
 
