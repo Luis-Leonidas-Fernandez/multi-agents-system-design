@@ -69,8 +69,10 @@ from ports.country_news_ports import (
 )
 from application.helpers.url_helpers import _is_article_url, _extract_web_fetch_redirect_url
 from domain.web_models import (
+    CandidateDict,
     EvidenceKind,
     Recency,
+    SourceDict,
     SourceKind,
     Specificity,
     WebCandidate,
@@ -2669,7 +2671,7 @@ async def _run_week_search_candidates(
     query_terms: list[str],
     query_source_group: Optional[str],
     web_search_runtime_args: Optional[dict[str, Any]] = None,
-) -> tuple[list[dict[str, str]], str]:
+) -> tuple[list[CandidateDict], str]:
     """Runs the generic OpenClaw-style web search path.
 
     The search provider decides the result set; this helper only normalizes, ranks,
@@ -2806,7 +2808,7 @@ def _build_query_context(last_message: str) -> tuple[QueryContext, RecentPolicy]
 
 
 async def _fetch_and_score_entries(
-    ranked_candidates: list[dict[str, str]],
+    ranked_candidates: list[CandidateDict],
     last_message: str,
     ctx: QueryContext,
     policy: RecentPolicy,
@@ -2816,7 +2818,7 @@ async def _fetch_and_score_entries(
     query_terms = ctx.query_terms
     query_source_group = ctx.query_source_group
 
-    async def _fetch_candidate(candidate: dict[str, str]) -> tuple[dict[str, str], Any]:
+    async def _fetch_candidate(candidate: CandidateDict) -> tuple[CandidateDict, Any]:
         try:
             # use_dynamic=False: requests HTTP es suficiente para artículos de noticias
             # y evita lanzar N browsers Chromium en paralelo (que es lo que causaba el timeout)
@@ -2929,7 +2931,7 @@ async def _run_week_search_pipeline(
     last_message: str,
     ctx: QueryContext,
     web_search_runtime_args: Optional[dict[str, Any]],
-) -> tuple[list[dict[str, str]], str, Optional[dict[str, Any]]]:
+) -> tuple[list[CandidateDict], str, Optional[dict[str, Any]]]:
     """Returns (diverse_candidates, search_text, early_response). Caller returns early_response immediately if not None."""
     diverse_candidates, search_text = await _run_week_search_candidates(
         last_message, ctx.search_age_days, ctx.query_terms, ctx.query_source_group, web_search_runtime_args
@@ -2953,7 +2955,7 @@ async def _run_general_search_pipeline(
     ctx: QueryContext,
     loop: asyncio.AbstractEventLoop,
     web_search_runtime_args: Optional[dict[str, Any]],
-) -> tuple[list[dict[str, str]], str]:
+) -> tuple[list[CandidateDict], str]:
     from tools import search_web
 
     query_terms = ctx.query_terms

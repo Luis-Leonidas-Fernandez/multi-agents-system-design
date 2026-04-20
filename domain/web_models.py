@@ -3,6 +3,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TypedDict
+
+
+class CandidateDict(TypedDict, total=False):
+    """Shape of a raw search candidate (Tavily/SearXNG result)."""
+    url: str
+    title: str
+    snippet: str
+    source_kind: str
+    source_label: str
+
+
+class SourceDict(TypedDict, total=False):
+    """Shape of a citation source reference."""
+    url: str
+    title: str
 
 
 class SourceKind(str, Enum):

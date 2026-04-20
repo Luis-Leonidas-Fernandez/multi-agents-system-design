@@ -6,6 +6,8 @@ import re
 from typing import Optional
 from urllib.parse import urlparse
 
+from domain.web_models import SourceDict
+
 
 _TITLE_STOPWORDS = {
     "de", "la", "el", "en", "a", "los", "las", "del", "que", "un", "una",
@@ -60,7 +62,7 @@ def _clean_source_url(url: str) -> str:
     return url.split("|")[0].rstrip(">").strip() if url else url
 
 
-def _format_sources(sources: list[dict[str, str]]) -> str:
+def _format_sources(sources: list[SourceDict]) -> str:
     if not sources:
         return ""
     lines = ["Sources:"]
@@ -82,7 +84,7 @@ def _format_sources(sources: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _build_source_backed_response(summary_lines: list[str], sources: list[dict[str, str]]) -> str:
+def _build_source_backed_response(summary_lines: list[str], sources: list[SourceDict]) -> str:
     body = []
     seen_lines: set[str] = set()
     for line in summary_lines:

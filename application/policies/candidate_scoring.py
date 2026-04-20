@@ -8,6 +8,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from domain.web_classifier import _is_hub_like_candidate
+from domain.web_models import CandidateDict
 from application.policies.web_source_policy import score_domain_boost, get_source_domain_priority
 
 # --- Scores positivos ---
@@ -30,7 +31,7 @@ _NOISE_WORDS = {"login", "signin", "cookie", "privacy", "archive", "perfil"}
 
 
 def _score_generic_candidate(
-    candidate: dict[str, str],
+    candidate: CandidateDict,
     query_terms: list[str],
     query_source_group: Optional[str] = None,
 ) -> int:
@@ -83,15 +84,15 @@ def _score_generic_candidate(
     return score
 
 
-def _candidate_source_priority(candidate: dict[str, str], query_source_group: Optional[str]) -> int:
+def _candidate_source_priority(candidate: CandidateDict, query_source_group: Optional[str]) -> int:
     return get_source_domain_priority(query_source_group, candidate.get("url", ""))
 
 
 def _rank_candidates_by_source_policy(
-    candidates: list[dict[str, str]],
+    candidates: list[CandidateDict],
     query_terms: list[str],
     query_source_group: Optional[str],
-) -> list[dict[str, str]]:
+) -> list[CandidateDict]:
     if not candidates:
         return []
     if not query_source_group:
