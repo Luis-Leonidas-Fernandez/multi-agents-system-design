@@ -2811,6 +2811,126 @@ def _build_query_context(last_message: str) -> tuple[QueryContext, RecentPolicy]
     return ctx, policy
 
 
+async def _fetch_and_score_entries(
+    ranked_candidates: list[dict[str, str]],
+    last_message: str,
+    ctx: QueryContext,
+    policy: RecentPolicy,
+    search_text: str,
+) -> list[dict[str, Any]]:
+    fetch_prompt = _build_generic_fetch_prompt(last_message)
+    query_terms = ctx.query_terms
+    query_source_group = ctx.query_source_group
+
+    async def _fetch_candidate(candidate: dict[str, str]) -> tuple[dict[str, str], Any]:
+        try:
+            # use_dynamic=False: requests HTTP es suficiente para artículos de noticias
+            # y evita lanzar N browsers Chromium en paralelo (que es lo que causaba el timeout)
+            result = await _fetch_web_page_follow_redirect(candidate["url"], fetch_prompt, use_dynamic=False)
+            return candidate, result
+        except Exception as exc:  # pragma: no cover - defensive
+            return candidate, exc
+
+    fetched_results = await asyncio.gather(
+        *(_fetch_candidate(candidate) for candidate in ranked_candidates),
+        return_exceptions=False,
+    )
+
+    eligible_entries: list[dict[str, Any]] = []
+    for candidate, result in fetched_results:
+        if _is_invalid_news_candidate(candidate, last_message):
+            _web_debug(
+                "generic_fetch.entry_rejected_invalid_structure",
+                url=candidate.get("url", ""),
+                title=candidate.get("title", ""),
+            )
+            continue
+        if isinstance(result, Exception):
+            _web_debug("generic_fetch.fetch_exception", url=candidate.get("url", ""), error=repr(result))
+            snippet_lines = _candidate_snippet_lines(candidate)
+            if not snippet_lines:
+                continue
+            result = "\n".join(snippet_lines)
+        if not isinstance(result, str):
+            result = str(result)
+        if result.startswith("Error") or result.startswith("URL rechazada") or _is_no_info_response(result):
+            _web_debug(
+                "generic_fetch.fetch_bad_result",
+                url=candidate.get("url", ""),
+                result_preview=result[:300],
+            )
+            snippet_lines = _candidate_snippet_lines(candidate)
+            if not snippet_lines:
+                continue
+            result = "\n".join(snippet_lines)
+
+        body_lines = _extract_generic_content_lines(result, query_terms)
+        candidate_score = _score_generic_candidate(candidate, query_terms, query_source_group)
+        content_score = len(body_lines) * 2
+        if query_terms and not body_lines:
+            result_blob = result.lower()
+            if any(term in result_blob for term in query_terms):
+                content_score = 1
+        if not body_lines and content_score <= 1:
+            snippet_lines = _candidate_snippet_lines(candidate)
+            if snippet_lines:
+                body_lines = snippet_lines
+                content_score = 3
+            else:
+                continue
+
+        score = candidate_score + content_score
+        if score <= 0:
+            continue
+        if _is_recent_web_information_query(last_message):
+            if score < policy.min_score or len(body_lines) < policy.candidate_min_body_lines:
+                _web_debug(
+                    "generic_fetch.entry_rejected_recent_threshold",
+                    url=candidate.get("url", ""),
+                    score=score,
+                    min_score=policy.min_score,
+                    body_lines_count=len(body_lines),
+                    min_body_lines=policy.candidate_min_body_lines,
+                )
+                continue
+
+        fallback_lines = [line.strip() for line in result.splitlines() if line.strip() and not line.strip().lower().startswith(("url:", "sources:", "http")) and "http" not in line.lower()]
+        summary_lines = body_lines or _extract_generic_content_lines(search_text, query_terms) or fallback_lines[:5]
+        if len(summary_lines) < 3 and fallback_lines:
+            seen_lines = set(summary_lines)
+            for line in fallback_lines:
+                if line not in seen_lines:
+                    summary_lines.append(line)
+                    seen_lines.add(line)
+                if len(summary_lines) >= 6:
+                    break
+        sources = _extract_sources_from_text(result)
+        if not sources:
+            sources = [{"title": candidate.get("title") or candidate["url"], "url": candidate["url"]}]
+        if _is_recent_web_information_query(last_message) and len(sources) < policy.candidate_min_sources:
+            _web_debug(
+                "generic_fetch.entry_rejected_sources",
+                url=candidate.get("url", ""),
+                source_count=len(sources),
+                min_sources=policy.candidate_min_sources,
+            )
+            continue
+
+        eligible_entries.append({
+            "summary_lines": summary_lines[:10],
+            "sources": sources,
+            "score": score,
+            "candidate": candidate,
+        })
+
+    _web_debug(
+        "generic_fetch.eligible_entries",
+        eligible_count=len(eligible_entries),
+        urls=[entry["candidate"].get("url", "") for entry in eligible_entries],
+    )
+    return eligible_entries
+
+
 async def _run_generic_web_search_strategy_impl(
     last_message: str,
     web_search_runtime_args: Optional[dict[str, Any]] = None,
@@ -3111,114 +3231,7 @@ async def _run_generic_web_search_strategy_impl(
             "search_text": search_text,
         }
 
-    fetch_prompt = _build_generic_fetch_prompt(last_message)
-
-    async def _fetch_candidate(candidate: dict[str, str]) -> tuple[dict[str, str], Any]:
-        try:
-            # use_dynamic=False: requests HTTP es suficiente para artículos de noticias
-            # y evita lanzar N browsers Chromium en paralelo (que es lo que causaba el timeout)
-            result = await _fetch_web_page_follow_redirect(candidate["url"], fetch_prompt, use_dynamic=False)
-            return candidate, result
-        except Exception as exc:  # pragma: no cover - defensive
-            return candidate, exc
-
-    fetched_results = await asyncio.gather(
-        *(_fetch_candidate(candidate) for candidate in ranked_candidates),
-        return_exceptions=False,
-    )
-
-    eligible_entries: list[dict[str, Any]] = []
-    for candidate, result in fetched_results:
-        if _is_invalid_news_candidate(candidate, last_message):
-            _web_debug(
-                "generic_fetch.entry_rejected_invalid_structure",
-                url=candidate.get("url", ""),
-                title=candidate.get("title", ""),
-            )
-            continue
-        if isinstance(result, Exception):
-            _web_debug("generic_fetch.fetch_exception", url=candidate.get("url", ""), error=repr(result))
-            snippet_lines = _candidate_snippet_lines(candidate)
-            if not snippet_lines:
-                continue
-            result = "\n".join(snippet_lines)
-        if not isinstance(result, str):
-            result = str(result)
-        if result.startswith("Error") or result.startswith("URL rechazada") or _is_no_info_response(result):
-            _web_debug(
-                "generic_fetch.fetch_bad_result",
-                url=candidate.get("url", ""),
-                result_preview=result[:300],
-            )
-            snippet_lines = _candidate_snippet_lines(candidate)
-            if not snippet_lines:
-                continue
-            result = "\n".join(snippet_lines)
-
-        body_lines = _extract_generic_content_lines(result, query_terms)
-        candidate_score = _score_generic_candidate(candidate, query_terms, query_source_group)
-        content_score = len(body_lines) * 2
-        if query_terms and not body_lines:
-            result_blob = result.lower()
-            if any(term in result_blob for term in query_terms):
-                content_score = 1
-        if not body_lines and content_score <= 1:
-            snippet_lines = _candidate_snippet_lines(candidate)
-            if snippet_lines:
-                body_lines = snippet_lines
-                content_score = 3
-            else:
-                continue
-
-        score = candidate_score + content_score
-        if score <= 0:
-            continue
-        if _is_recent_web_information_query(last_message):
-            if score < recent_min_score or len(body_lines) < recent_candidate_min_body_lines:
-                _web_debug(
-                    "generic_fetch.entry_rejected_recent_threshold",
-                    url=candidate.get("url", ""),
-                    score=score,
-                    min_score=recent_min_score,
-                    body_lines_count=len(body_lines),
-                    min_body_lines=recent_candidate_min_body_lines,
-                )
-                continue
-
-        fallback_lines = [line.strip() for line in result.splitlines() if line.strip() and not line.strip().lower().startswith(("url:", "sources:", "http")) and "http" not in line.lower()]
-        summary_lines = body_lines or _extract_generic_content_lines(search_text, query_terms) or fallback_lines[:5]
-        if len(summary_lines) < 3 and fallback_lines:
-            seen_lines = set(summary_lines)
-            for line in fallback_lines:
-                if line not in seen_lines:
-                    summary_lines.append(line)
-                    seen_lines.add(line)
-                if len(summary_lines) >= 6:
-                    break
-        sources = _extract_sources_from_text(result)
-        if not sources:
-            sources = [{"title": candidate.get("title") or candidate["url"], "url": candidate["url"]}]
-        if _is_recent_web_information_query(last_message) and len(sources) < recent_candidate_min_sources:
-            _web_debug(
-                "generic_fetch.entry_rejected_sources",
-                url=candidate.get("url", ""),
-                source_count=len(sources),
-                min_sources=recent_candidate_min_sources,
-            )
-            continue
-
-        eligible_entries.append({
-            "summary_lines": summary_lines[:10],
-            "sources": sources,
-            "score": score,
-            "candidate": candidate,
-        })
-
-    _web_debug(
-        "generic_fetch.eligible_entries",
-        eligible_count=len(eligible_entries),
-        urls=[entry["candidate"].get("url", "") for entry in eligible_entries],
-    )
+    eligible_entries = await _fetch_and_score_entries(ranked_candidates, last_message, ctx, policy, search_text)
 
     if query_horizon == "week" and eligible_entries:
         recent_article_entries = [
