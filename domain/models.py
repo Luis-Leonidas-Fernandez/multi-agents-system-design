@@ -7,8 +7,6 @@ from typing import TypedDict, Annotated, Literal
 
 from pydantic import BaseModel
 
-from domain.agent_roles import AGENT_NAMES
-
 AgentName = Literal["math_agent", "analysis_agent", "code_agent", "web_scraping_agent"]
 
 
