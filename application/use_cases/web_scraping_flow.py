@@ -42,6 +42,7 @@ from application.policies.web_source_policy import (
     get_query_source_terms,
     get_recent_query_requirements,
     get_source_domain_priority,
+    is_recent_web_information_query,
     score_domain_boost,
 )
 from application.policies.candidate_scoring import (
@@ -49,6 +50,7 @@ from application.policies.candidate_scoring import (
     _candidate_source_priority,
     _rank_candidates_by_source_policy,
 )
+from application.policies.web_search_context import QueryContext, RecentPolicy
 from domain.country_profile import GEO_ENGLISH
 from domain.country_resolver import GENERIC_WEB_STOPWORDS, GEOGRAPHY_TERMS, extract_query_geography
 from domain.topic_detector import TOPIC_ANGLES, TOPIC_ANGLES_EN, detect_news_topic
@@ -847,6 +849,13 @@ async def _legacy_run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
+                _fetch_fast_result = {"messages": [AIMessage(content=fetch_result)], "next_agent": state.get("next_agent", "")}
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    is_safe, _ = await evaluate_trajectory_safe_fn(_fetch_fast_result, "web_scraping_node")
+                    if not is_safe:
+                        _emit_node_outcome(rid, "web_scraping_node", "blocked", phase="post_guard",
+                                          agent="web_scraping_agent", duration_ms=duration_ms, reason="agentdog", followup_likely=True)
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return {
                     "messages": [AIMessage(content=fetch_result)],
                     "scrape_tracker": new_tracker,
@@ -957,6 +966,13 @@ async def _legacy_run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
+                _sports_fast_result = {"messages": [AIMessage(content=summary)], "next_agent": state.get("next_agent", "")}
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    is_safe, _ = await evaluate_trajectory_safe_fn(_sports_fast_result, "web_scraping_node")
+                    if not is_safe:
+                        _emit_node_outcome(rid, "web_scraping_node", "blocked", phase="post_guard",
+                                          agent="web_scraping_agent", duration_ms=duration_ms, reason="agentdog", followup_likely=True)
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
@@ -1002,6 +1018,13 @@ async def _legacy_run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
+                _fallback_fast_result = {"messages": [AIMessage(content=summary)], "next_agent": state.get("next_agent", "")}
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    is_safe, _ = await evaluate_trajectory_safe_fn(_fallback_fast_result, "web_scraping_node")
+                    if not is_safe:
+                        _emit_node_outcome(rid, "web_scraping_node", "blocked", phase="post_guard",
+                                          agent="web_scraping_agent", duration_ms=duration_ms, reason="agentdog", followup_likely=True)
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
@@ -1039,6 +1062,13 @@ async def _legacy_run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
+                _webinfo_fast_result = {"messages": [AIMessage(content=summary)], "next_agent": state.get("next_agent", "")}
+                if should_evaluate_guard_fn("web_scraping_node"):
+                    is_safe, _ = await evaluate_trajectory_safe_fn(_webinfo_fast_result, "web_scraping_node")
+                    if not is_safe:
+                        _emit_node_outcome(rid, "web_scraping_node", "blocked", phase="post_guard",
+                                          agent="web_scraping_agent", duration_ms=duration_ms, reason="agentdog", followup_likely=True)
+                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
                 return {
                     "messages": [AIMessage(content=summary)],
                     "scrape_tracker": new_tracker,
@@ -1250,18 +1280,7 @@ def _extract_generic_query_terms(text: str) -> list[str]:
     return terms
 
 
-def _is_recent_web_information_query(text: str) -> bool:
-    lowered = (text or "").lower()
-    recent_terms = (
-        "today", "hoy", "latest", "recent", "current", "actual", "actuales",
-        "última", "últimas", "ultimo", "último", "ultimas", "ultimos",
-        "this week", "esta semana", "semana", "week",
-    )
-    if not any(term in lowered for term in recent_terms):
-        return False
-    if any(term in lowered for term in ("price", "precio", "cotiza", "cotización", "cotizacion")):
-        return False
-    return True
+_is_recent_web_information_query = is_recent_web_information_query
 
 
 def _should_use_country_recent_news_strategy(
@@ -2748,37 +2767,24 @@ async def _fetch_web_page_follow_redirect(url: str, prompt: str, *, use_dynamic:
     return result
 
 
-async def _run_generic_web_search_strategy_impl(
-    last_message: str,
-    web_search_runtime_args: Optional[dict[str, Any]] = None,
-) -> Optional[dict[str, Any]]:
-    from tools import search_web
-    from tools.web_tools import fetch_web_page
-
+def _build_query_context(last_message: str) -> tuple[QueryContext, RecentPolicy]:
     query_terms = _extract_generic_query_terms(last_message)
     query_source_group = detect_query_source_group(last_message)
     source_terms = list(get_query_source_terms(last_message))
     if source_terms:
-        merged_terms: list[str] = []
+        merged: list[str] = []
         for term in query_terms + source_terms:
-            if term not in merged_terms:
-                merged_terms.append(term)
-        query_terms = merged_terms
-    query_horizon = detect_recent_query_horizon(last_message) if _is_recent_web_information_query(last_message) else None
-    recent_requirements = get_recent_query_requirements(query_horizon)
-    recent_min_score = recent_requirements["min_score"]
-    recent_min_body_lines = recent_requirements["min_body_lines"]
-    recent_min_sources = recent_requirements["min_sources"]
-    recent_min_candidates = recent_requirements["min_candidates"]
-    recent_candidate_min_score = recent_requirements["candidate_min_score"] or recent_min_score
-    recent_candidate_min_body_lines = 1 if query_horizon == "week" else recent_min_body_lines
-    recent_candidate_min_sources = recent_requirements["candidate_min_sources"] or 1
-    loop = asyncio.get_running_loop()
+            if term not in merged:
+                merged.append(term)
+        query_terms = merged
 
-    # Date filter for search.
-    # "esta semana/hoy" → 14 days (not 7 — Tavily returns only hub/portal pages with days=7,
-    # no specific articles; 14 still excludes content older than 2 weeks like Dec-2025 events).
-    # Any other recent news query → 30 days.
+    query_horizon = (
+        detect_recent_query_horizon(last_message)
+        if _is_recent_web_information_query(last_message)
+        else None
+    )
+    reqs = get_recent_query_requirements(query_horizon)
+
     search_age_days: Optional[int] = None
     if query_horizon == "week":
         search_age_days = 14
@@ -2786,6 +2792,45 @@ async def _run_generic_web_search_strategy_impl(
         search_age_days = 45
     elif _is_recent_web_information_query(last_message):
         search_age_days = 30
+
+    ctx = QueryContext(
+        query_terms=query_terms,
+        query_source_group=query_source_group,
+        source_terms=source_terms,
+        query_horizon=query_horizon,
+        search_age_days=search_age_days,
+    )
+    policy = RecentPolicy(
+        min_score=reqs["min_score"],
+        min_body_lines=reqs["min_body_lines"],
+        min_sources=reqs["min_sources"],
+        min_candidates=reqs["min_candidates"],
+        candidate_min_body_lines=1 if query_horizon == "week" else reqs["min_body_lines"],
+        candidate_min_sources=reqs["candidate_min_sources"] or 1,
+    )
+    return ctx, policy
+
+
+async def _run_generic_web_search_strategy_impl(
+    last_message: str,
+    web_search_runtime_args: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    from tools import search_web
+    from tools.web_tools import fetch_web_page
+
+    ctx, policy = _build_query_context(last_message)
+    query_terms = ctx.query_terms
+    query_source_group = ctx.query_source_group
+    source_terms = ctx.source_terms
+    query_horizon = ctx.query_horizon
+    search_age_days = ctx.search_age_days
+    recent_min_score = policy.min_score
+    recent_min_body_lines = policy.min_body_lines
+    recent_min_sources = policy.min_sources
+    recent_min_candidates = policy.min_candidates
+    recent_candidate_min_body_lines = policy.candidate_min_body_lines
+    recent_candidate_min_sources = policy.candidate_min_sources
+    loop = asyncio.get_running_loop()
 
     if query_horizon == "week":
         # OpenClaw-style search: one provider-backed result set, then rank/deduplicate

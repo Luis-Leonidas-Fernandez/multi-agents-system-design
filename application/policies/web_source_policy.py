@@ -271,3 +271,17 @@ def get_group_language(group_name: Optional[str]) -> Optional[str]:
 def _strip_accents(text: str) -> str:
     """Remove diacritics so 'japon' matches 'japón', 'ultima' matches 'última', etc."""
     return _normalize_text(text)
+
+
+def is_recent_web_information_query(text: str) -> bool:
+    lowered = (text or "").lower()
+    recent_terms = (
+        "today", "hoy", "latest", "recent", "current", "actual", "actuales",
+        "última", "últimas", "ultimo", "último", "ultimas", "ultimos",
+        "this week", "esta semana", "semana", "week",
+    )
+    if not any(term in lowered for term in recent_terms):
+        return False
+    if any(term in lowered for term in ("price", "precio", "cotiza", "cotización", "cotizacion")):
+        return False
+    return True
