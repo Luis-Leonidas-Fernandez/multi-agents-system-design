@@ -44,6 +44,11 @@ from application.policies.web_source_policy import (
     get_source_domain_priority,
     score_domain_boost,
 )
+from application.policies.candidate_scoring import (
+    _score_generic_candidate,
+    _candidate_source_priority,
+    _rank_candidates_by_source_policy,
+)
 from domain.country_profile import GEO_ENGLISH
 from domain.country_resolver import GENERIC_WEB_STOPWORDS, GEOGRAPHY_TERMS, extract_query_geography
 from domain.topic_detector import TOPIC_ANGLES, TOPIC_ANGLES_EN, detect_news_topic
@@ -1672,77 +1677,6 @@ def _build_angle_queries(last_message: str, search_age_days: Optional[int]) -> l
 
 
 
-def _score_generic_candidate(candidate: dict[str, str], query_terms: list[str], query_source_group: Optional[str] = None) -> int:
-    blob = " ".join([candidate.get("title", ""), candidate.get("snippet", ""), candidate.get("url", "")]).lower()
-    score = 0
-    for term in query_terms:
-        if term in blob:
-            score += 3
-    if re.search(r"\b\d+\s*-\s*\d+\b", blob):
-        score += 2
-    url = candidate.get("url", "")
-    path = urlparse(url).path.lower()
-    segments = [segment for segment in path.split("/") if segment]
-    if re.search(r"(19|20)\d{2}[/\-]?\d{2}[/\-]?\d{2}", path) or re.search(r"\d{6,8}", path):
-        score += 4
-    if len(segments) >= 3:
-        score += 2
-    if len(segments) <= 2 and not re.search(r"(19|20)\d{2}[/\-]?\d{2}[/\-]?\d{2}", path):
-        score -= 3
-    if any(seg in {"topic", "topics", "tag", "tags", "category", "categories", "archive", "author"} for seg in segments):
-        score -= 4
-    if any(noise in blob for noise in ("login", "signin", "cookie", "privacy", "archive", "perfil")):
-        score -= 2
-    score += score_domain_boost(query_source_group, url)
-
-    # Penalize candidates whose title matches zero query terms — likely off-topic.
-    # e.g. a celebrity article mentions "seguridad" in the snippet but the title
-    # ("Terrible momento en vivo: la cronista de TN") has no relevant term.
-    # Stopword-only terms (len < 4) are excluded from this check to avoid false
-    # positives on queries with no long meaningful terms.
-    title_lower = candidate.get("title", "").lower()
-    snippet_lower = candidate.get("snippet", "").lower()
-    meaningful_terms = [t for t in query_terms if len(t) >= 4]
-    if meaningful_terms and not any(t in title_lower for t in meaningful_terms):
-        if candidate.get("source_kind") == "section_fallback" and any(t in snippet_lower for t in meaningful_terms):
-            pass
-        else:
-            score -= 6
-    if candidate.get("source_kind") == "homepage_fallback":
-        score -= 8
-    if candidate.get("source_kind") == "section_fallback":
-        score -= 3
-    if _is_hub_like_candidate(candidate):
-        score -= 12
-
-    return score
-
-
-def _candidate_source_priority(candidate: dict[str, str], query_source_group: Optional[str]) -> int:
-    url = candidate.get("url", "")
-    return get_source_domain_priority(query_source_group, url)
-
-
-def _rank_candidates_by_source_policy(
-    candidates: list[dict[str, str]],
-    query_terms: list[str],
-    query_source_group: Optional[str],
-) -> list[dict[str, str]]:
-    if not candidates:
-        return []
-    if not query_source_group:
-        return sorted(
-            candidates,
-            key=lambda c: _score_generic_candidate(c, query_terms, query_source_group),
-            reverse=True,
-        )
-    return sorted(
-        candidates,
-        key=lambda c: (
-            _candidate_source_priority(c, query_source_group),
-            -_score_generic_candidate(c, query_terms, query_source_group),
-        ),
-    )
 
 
 
