@@ -79,8 +79,8 @@ class DefaultPressSourceDiscovery(IPressSourceDiscovery):
         source_terms: list[str],
         runtime_args: Optional[dict[str, Any]] = None,
     ) -> tuple[list[str], list[str]]:
-        from application.use_cases.web_scraping_flow import _discover_country_press_sources
-        return await _discover_country_press_sources(
+        from application.services.press_discovery import discover_country_press_sources
+        return await discover_country_press_sources(
             query,
             source_group,
             source_terms,

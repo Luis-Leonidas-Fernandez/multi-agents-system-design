@@ -51,10 +51,10 @@ class DefaultDynamicPressDiscovery(IDynamicPressSourceDiscovery):
         geography: str,
         runtime_args: Optional[dict[str, Any]] = None,
     ) -> tuple[list[str], list[str]]:
-        from application.use_cases.web_scraping_flow import (
-            _web_debug,
-            _discover_country_press_sources_via_directory,
-            _slugify_periodicos_label,
+        from application.services.press_discovery import (
+            web_debug as _web_debug,
+            discover_country_press_sources_via_directory as _discover_country_press_sources_via_directory,
+            slugify_periodicos_label as _slugify_periodicos_label,
         )
 
         # 1. Caché de sesión
@@ -107,9 +107,9 @@ class DefaultDynamicPressDiscovery(IDynamicPressSourceDiscovery):
         runtime_args: Optional[dict[str, Any]] = None,
     ) -> tuple[list[str], list[str]]:
         """Busca medios del país vía Tavily usando site:periodicos.com.ar."""
-        from application.use_cases.web_scraping_flow import (
-            _web_debug,
-            _extract_country_press_sources,
+        from application.services.press_discovery import (
+            web_debug as _web_debug,
+            extract_country_press_sources as _extract_country_press_sources,
         )
 
         try:
