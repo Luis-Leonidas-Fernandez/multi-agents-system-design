@@ -7,14 +7,15 @@ reconstruir tras reinicios sin perder historial.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, replace
+from dataclasses import asdict, dataclass, replace
 import asyncio
-import json
 import logging
 from pathlib import Path
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Mapping, Literal, cast
+
+from infra.stores import AppendOnlyStore
 
 
 BackgroundTaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -92,30 +93,15 @@ class BackgroundTaskStore:
         return self._base_dir / session_id / "BACKGROUND_TASKS.jsonl"
 
     def append_record(self, record: BackgroundTaskRecord) -> None:
-        path = self._session_path(record.session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(asdict(record), ensure_ascii=False, default=str)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(payload + "\n")
+        AppendOnlyStore.append(self._session_path(record.session_id), record)
 
     def load_records(self, session_id: str) -> list[dict[str, Any]]:
-        path = self._session_path(session_id)
-        if not path.exists():
-            return []
         latest: dict[str, dict[str, Any]] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for record in AppendOnlyStore.load_lines(self._session_path(session_id)):
             task_id = str(record.get("task_id") or "")
-            if not task_id:
-                continue
-            latest[task_id] = record
-        return sorted(latest.values(), key=lambda record: (record.get("created_at_ms") or 0, record.get("updated_at_ms") or 0, record.get("task_id") or ""))
+            if task_id:
+                latest[task_id] = record
+        return sorted(latest.values(), key=lambda r: (r.get("created_at_ms") or 0, r.get("updated_at_ms") or 0, r.get("task_id") or ""))
 
     def list_sessions(self) -> list[str]:
         if not self._base_dir.exists():

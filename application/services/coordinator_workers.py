@@ -18,6 +18,8 @@ from typing import Any, Callable, Mapping
 
 from langchain_core.messages import HumanMessage
 
+from infra.stores import AppendOnlyStore
+
 from application.services.agent_registry import get_agent_spec
 from application.helpers.config_flow_helpers import get_web_search_runtime_config
 from application.helpers.url_helpers import _extract_web_fetch_redirect_url
@@ -113,26 +115,10 @@ class CoordinatorWorkerStore:
         return [record for record in payload if isinstance(record, dict)]
 
     def append_message(self, message: CoordinatorMessage) -> None:
-        path = self._messages_path(message.session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.open("a", encoding="utf-8").write(json.dumps(asdict(message), ensure_ascii=False) + "\n")
+        AppendOnlyStore.append(self._messages_path(message.session_id), message)
 
     def load_messages(self, session_id: str) -> list[dict[str, Any]]:
-        path = self._messages_path(session_id)
-        if not path.exists():
-            return []
-        messages: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                messages.append(payload)
-        return messages
+        return AppendOnlyStore.load_lines(self._messages_path(session_id))
 
 
 class CoordinatorWorkerService:
@@ -364,8 +350,6 @@ class CoordinatorWorkerService:
 
     @staticmethod
     def _extract_unique_score_lines(text: str) -> list[str]:
-        import re
-
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         unique: list[str] = []
         seen: set[str] = set()
@@ -484,7 +468,13 @@ class CoordinatorRuntimeService:
         self._workers.update_worker_status(session_id, worker_id, "running")
 
         async def _runner() -> dict[str, Any]:
+            from application.policies.security_flow import input_guard
             from application.services.agent_registry import get_agent
+
+            guard_state = {"messages": [HumanMessage(content=content)]}
+            guard_result = input_guard(guard_state)
+            if guard_result and guard_result.get("blocked"):
+                return {"worker_id": worker_id, "agent_name": worker.agent_name, "response": "Solicitud bloqueada por política de seguridad."}
 
             agent = get_agent(worker.agent_name)
             result = await agent.ainvoke({"messages": [HumanMessage(content=content)]})
@@ -519,7 +509,13 @@ class CoordinatorRuntimeService:
         self._workers.send_message(session_id, sender, worker_id, content)
         self._workers.update_worker_status(session_id, worker_id, "running")
 
+        from application.policies.security_flow import input_guard
         from application.services.agent_registry import get_agent
+
+        guard_state = {"messages": [HumanMessage(content=content)]}
+        guard_result = input_guard(guard_state)
+        if guard_result and guard_result.get("blocked"):
+            return {"worker_id": worker_id, "agent_name": worker.agent_name, "response": "Solicitud bloqueada por política de seguridad."}
 
         agent = get_agent(worker.agent_name)
         result = await agent.ainvoke({"messages": [HumanMessage(content=content)]})
@@ -585,7 +581,8 @@ class CoordinatorRuntimeService:
                 "urls": execution.get("urls", []),
             }
 
-        probe_results = await asyncio.gather(*(_run(spec) for spec in specs))
+        raw = await asyncio.gather(*(_run(spec) for spec in specs), return_exceptions=True)
+        probe_results = [r for r in raw if isinstance(r, dict)]
         synthesis = self._workers.synthesize_probe_results(category, question, probe_results)
         return {
             **synthesis,
