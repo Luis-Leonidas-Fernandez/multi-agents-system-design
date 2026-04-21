@@ -68,21 +68,21 @@ def test_web_search_registry_imports():
 
 
 def test_main_searxng_bootstrap_helpers(monkeypatch):
-    import main
+    from application.services import cli_lifecycle
 
     monkeypatch.delenv("SEARXNG_AUTO_START", raising=False)
     monkeypatch.delenv("SEARXNG_BASE_URL", raising=False)
 
-    assert main._searxng_auto_start_enabled() is True
-    assert main._searxng_base_url() == "http://localhost:8888"
-    assert main._searxng_is_local_url("http://localhost:8888") is True
-    assert main._searxng_is_local_url("https://search.example.com") is False
+    assert cli_lifecycle._searxng_auto_start_enabled() is True
+    assert cli_lifecycle._searxng_base_url() == "http://localhost:8888"
+    assert cli_lifecycle._searxng_is_local_url("http://localhost:8888") is True
+    assert cli_lifecycle._searxng_is_local_url("https://search.example.com") is False
 
     monkeypatch.setenv("SEARXNG_AUTO_START", "false")
     monkeypatch.setenv("SEARXNG_BASE_URL", "https://search.example.com")
 
-    assert main._searxng_auto_start_enabled() is False
-    assert main._searxng_base_url() == "https://search.example.com"
+    assert cli_lifecycle._searxng_auto_start_enabled() is False
+    assert cli_lifecycle._searxng_base_url() == "https://search.example.com"
 
 
 def test_tools_package_imports():
@@ -673,17 +673,17 @@ def test_inv10_eval_only_in_agents():
     """INV-10: eval() no debe aparecer en ningún módulo nuevo del refactoring."""
     import ast, pathlib
     new_modules = [
-        "domain/models.py", "application/use_cases/scrape_tracker.py",
-        "application/use_cases/agentdog.py",
-        "application/use_cases/price_flow_helpers.py",
-        "application/use_cases/security_flow_helpers.py",
-        "application/use_cases/audit_flow_helpers.py",
-        "application/use_cases/config_flow_helpers.py",
-        "application/use_cases/hitl_flow.py",
-        "application/use_cases/security_flow.py",
-        "application/use_cases/persistence_flow_helpers.py",
-        "application/use_cases/scraping_flow_helpers.py",
-        "application/composition/graph.py", "application/use_cases/agents_factory.py",
+        "domain/models.py", "application/policies/scrape_tracker.py",
+        "application/policies/agentdog.py",
+        "application/helpers/price_flow_helpers.py",
+        "application/helpers/security_flow_helpers.py",
+        "application/helpers/audit_flow_helpers.py",
+        "application/helpers/config_flow_helpers.py",
+        "application/policies/hitl_flow.py",
+        "application/policies/security_flow.py",
+        "application/helpers/persistence_flow_helpers.py",
+        "application/helpers/scraping_flow_helpers.py",
+        "application/composition/graph.py", "application/services/agents_factory.py",
     ]
     root = pathlib.Path(__file__).parent.parent
     for fname in new_modules:

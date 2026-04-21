@@ -3,6 +3,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
+def _handle_inspection_command(user_input, lifecycle, runtime=None):
+    from application.services.cli_dispatch import dispatch_inspection_command
+
+    result = dispatch_inspection_command(user_input, lifecycle, runtime)
+    for line in result.lines:
+        print(line)
+    return result.handled
+
+
 def test_session_replay_service_combina_eventos_en_secciones(monkeypatch):
     from application.services.session_replay import SessionReplayService
 
@@ -63,7 +72,6 @@ def test_format_session_replay_muestra_timeline():
 
 def test_handle_inspection_command_replay(monkeypatch, capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     runtime.build_session_replay = MagicMock(return_value=SimpleNamespace(  # type: ignore[attr-defined]

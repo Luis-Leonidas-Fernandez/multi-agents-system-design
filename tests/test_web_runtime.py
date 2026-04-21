@@ -20,7 +20,7 @@ async def test_web_search_runtime_returns_structured_hits(monkeypatch):
         "   Resumen corto del artículo\n"
     )
 
-    with patch("tools.web_tools.search_web.func", return_value=raw_result):
+    with patch("tools.search_tools.search_web.func", return_value=raw_result):
         response = await runtime.search(
             WebSearchRequest(
                 query="seguridad en italia",
@@ -39,7 +39,7 @@ async def test_web_search_runtime_returns_structured_hits(monkeypatch):
 async def test_web_fetch_runtime_reports_fetch_status():
     runtime = WebFetchRuntime()
 
-    with patch("tools.web_tools.fetch_web_page", new=AsyncMock(return_value="REDIRECT DETECTED\nRedirect URL: https://example.org")):
+    with patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(return_value="REDIRECT DETECTED\nRedirect URL: https://example.org")):
         response = await runtime.fetch(
             WebFetchRequest(
                 url="https://example.com/article",

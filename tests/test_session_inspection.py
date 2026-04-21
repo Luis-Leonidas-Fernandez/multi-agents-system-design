@@ -3,6 +3,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
+def _handle_inspection_command(user_input, lifecycle, runtime=None):
+    from application.services.cli_dispatch import dispatch_inspection_command
+
+    result = dispatch_inspection_command(user_input, lifecycle, runtime)
+    for line in result.lines:
+        print(line)
+    return result.handled
+
+
 def test_format_background_task_summary_muestra_resumen():
     from application.services.session_inspection import format_background_task_summary
 
@@ -206,7 +215,6 @@ def test_format_command_registry_y_detail():
 
 def test_handle_inspection_command_reconoce_inspect(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     lifecycle = SimpleNamespace(
@@ -262,7 +270,6 @@ def test_handle_inspection_command_reconoce_inspect(capsys):
 
 def test_handle_inspection_command_reconoce_task_individual(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     lifecycle = SimpleNamespace(
@@ -281,9 +288,8 @@ def test_handle_inspection_command_reconoce_task_individual(capsys):
 
 def test_handle_inspection_command_lista_prompt_snapshots(monkeypatch, capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
-    monkeypatch.setattr("main.prompt_version_service.list_agents", lambda: ["math_agent", "code_agent"])
+    monkeypatch.setattr("application.services.cli_dispatch.prompt_version_service.list_agents", lambda: ["math_agent", "code_agent"])
     runtime = AgentRuntime(gateway=MagicMock())
     lifecycle = SimpleNamespace(
         context_budget=lambda agent_name=None: {"session_id": "sess-1", "scope": agent_name or "session", "status": "ok", "budget_chars": 1000, "estimated_context_chars": 100, "estimated_remaining_chars": 900, "estimated_tokens": 25, "transcript_message_count": 1, "memory_present": False, "items": []},
@@ -305,10 +311,9 @@ def test_handle_inspection_command_lista_prompt_snapshots(monkeypatch, capsys):
 
 def test_handle_inspection_command_muestra_prompt_individual(monkeypatch, capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
-    monkeypatch.setattr("main.prompt_version_service.load_snapshot", lambda agent: {"agent_name": agent, "prompt_version": "v1", "prompt_hash": "hash", "created_at_ms": 1, "extra_context": "ctx", "system_prompt": "prompt"})
-    monkeypatch.setattr("main.prompt_version_service.load_history", lambda agent: [{"prompt_version": "v1"}])
+    monkeypatch.setattr("application.services.cli_dispatch.prompt_version_service.load_snapshot", lambda agent: {"agent_name": agent, "prompt_version": "v1", "prompt_hash": "hash", "created_at_ms": 1, "extra_context": "ctx", "system_prompt": "prompt"})
+    monkeypatch.setattr("application.services.cli_dispatch.prompt_version_service.load_history", lambda agent: [{"prompt_version": "v1"}])
     runtime = AgentRuntime(gateway=MagicMock())
     lifecycle = SimpleNamespace(
         context_budget=lambda agent_name=None: {"session_id": "sess-1", "scope": agent_name or "session", "status": "ok", "budget_chars": 1000, "estimated_context_chars": 100, "estimated_remaining_chars": 900, "estimated_tokens": 25, "transcript_message_count": 1, "memory_present": False, "items": []},
@@ -332,7 +337,6 @@ def test_handle_inspection_command_muestra_prompt_individual(monkeypatch, capsys
 
 def test_handle_inspection_command_muestra_ruta_de_artifact(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     runtime._artifacts = MagicMock()  # type: ignore[attr-defined]
@@ -358,7 +362,6 @@ def test_handle_inspection_command_muestra_ruta_de_artifact(capsys):
 
 def test_handle_inspection_command_replay(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     runtime.build_session_replay = MagicMock(return_value=SimpleNamespace(  # type: ignore[attr-defined]
@@ -377,10 +380,9 @@ def test_handle_inspection_command_replay(capsys):
 
 def test_handle_inspection_command_cancela_task(monkeypatch, capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     scheduled = []
-    monkeypatch.setattr("main.asyncio.create_task", lambda coro: (scheduled.append(coro), coro.close())[0])
+    monkeypatch.setattr("application.services.cli_dispatch.asyncio.create_task", lambda coro: (scheduled.append(coro), coro.close())[0])
     runtime = AgentRuntime(gateway=MagicMock())
 
     async def cancel_background_task(task_id, reason=None):
@@ -410,7 +412,6 @@ def test_handle_inspection_command_cancela_task(monkeypatch, capsys):
 
 def test_handle_inspection_command_lista_retryables(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     lifecycle = SimpleNamespace(
@@ -436,7 +437,6 @@ def test_handle_inspection_command_lista_retryables(capsys):
 
 def test_handle_inspection_command_context_y_bookmark(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     runtime.build_session_replay = MagicMock(return_value=SimpleNamespace(session_id="sess-ctx", generated_at_ms=1, items=[]))  # type: ignore[attr-defined]
@@ -472,7 +472,6 @@ def test_handle_inspection_command_context_y_bookmark(capsys):
 
 def test_handle_inspection_command_commands_y_command(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=MagicMock())
     lifecycle = SimpleNamespace(

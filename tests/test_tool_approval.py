@@ -1,6 +1,15 @@
 """Tests para la vista previa de aprobación de tools."""
 
 
+def _handle_inspection_command(user_input, lifecycle, runtime=None):
+    from application.services.cli_dispatch import dispatch_inspection_command
+
+    result = dispatch_inspection_command(user_input, lifecycle, runtime)
+    for line in result.lines:
+        print(line)
+    return result.handled
+
+
 def test_tool_approval_service_builds_preview_for_high_risk_tool():
     from application.services.tool_approval import ToolApprovalService
 
@@ -61,7 +70,6 @@ def test_session_inspection_tool_formatters():
 
 def test_handle_inspection_command_tool_and_tools(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
     from unittest.mock import MagicMock
 
     runtime = AgentRuntime(gateway=MagicMock())
@@ -91,7 +99,6 @@ def test_handle_inspection_command_tool_and_tools(capsys):
 
 def test_handle_inspection_command_tool_con_json_args(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
     from unittest.mock import MagicMock
 
     runtime = AgentRuntime(gateway=MagicMock())
@@ -126,7 +133,6 @@ def test_handle_inspection_command_tool_con_json_args(capsys):
 
 def test_handle_inspection_command_tool_con_key_value_args(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
     from unittest.mock import MagicMock
 
     runtime = AgentRuntime(gateway=MagicMock())
@@ -162,7 +168,6 @@ def test_handle_inspection_command_tool_con_key_value_args(capsys):
 
 def test_handle_inspection_command_tool_rechaza_json_invalido(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
     from unittest.mock import MagicMock
 
     runtime = AgentRuntime(gateway=MagicMock())
@@ -178,7 +183,6 @@ def test_handle_inspection_command_tool_rechaza_json_invalido(capsys):
 
 def test_handle_inspection_command_tool_rechaza_formato_invalido(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
     from unittest.mock import MagicMock
 
     runtime = AgentRuntime(gateway=MagicMock())

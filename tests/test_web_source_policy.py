@@ -178,8 +178,8 @@ async def test_country_press_discovery_is_cached_per_country() -> None:
         )
 
     with (
-        patch("tools.web_tools.search_web.func", side_effect=fake_invoke),
-        patch("tools.web_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
+        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         first = await web_scraping_flow._discover_country_press_sources(
             "seguridad en japon",
@@ -250,8 +250,8 @@ async def test_country_press_discovery_falls_back_to_homepage_when_lookup_fails(
         raise AssertionError(f"Unexpected URL: {url}")
 
     with (
-        patch("tools.web_tools.search_web.func", side_effect=fake_invoke),
-        patch("tools.web_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
+        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         domains, titles = await web_scraping_flow._discover_country_press_sources(
             "dame las ultimas noticias sobre seguridad en italia de esta semana",
@@ -287,8 +287,8 @@ async def test_country_press_search_candidates_falls_back_to_source_homepage_whe
 
     with (
         patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=fake_discover)),
-        patch("tools.web_tools.search_web.func", side_effect=fake_invoke),
-        patch("tools.web_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
+        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         candidates, search_text = await _run_country_press_search_candidates(
             "dame las ultimas noticias sobre seguridad en italia de esta semana",
@@ -333,7 +333,7 @@ async def test_country_press_search_candidates_queries_each_diary() -> None:
 
     with (
         patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=fake_discover)),
-        patch("tools.web_tools.search_web.func", side_effect=fake_invoke),
+        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
     ):
         candidates, search_text = await _run_country_press_search_candidates(
             "dame las ultimas noticias sobre seguridad en italia de esta semana",
@@ -421,8 +421,8 @@ async def test_run_generic_web_search_fetch_prefers_local_country_sources_before
         )
 
     with (
-        patch("tools.web_tools.search_web.func", side_effect=[lookup_text, search_text, search_text_alt]),
-        patch("tools.web_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("tools.search_tools.search_web.func", side_effect=[lookup_text, search_text, search_text_alt]),
+        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         result = await _run_generic_web_search_fetch(query)
 

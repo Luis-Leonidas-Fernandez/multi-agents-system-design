@@ -352,11 +352,11 @@ async def test_news_y_sports_usan_search_web_directo():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.search_web.func", side_effect=[
+        patch("tools.search_tools.search_web.func", side_effect=[
             "Web search results for query: \"dame los resultados del futbol de primera division de argentina del dia de hoy\"\n\n1. [ESPN results](https://www.espn.com.ar/futbol/resultados/_/liga/arg.1)\n   Results page\n\nSources:\n- [ESPN results](https://www.espn.com.ar/futbol/resultados/_/liga/arg.1)",
             "Web search results for query: \"dame los resultados del futbol de primera division de argentina del dia de hoy resultados\"\n\n1. [Flashscore results](https://www.flashscore.com.ar/futbol/argentina/liga-profesional/resultados/)\n   Results page\n\nSources:\n- [Flashscore results](https://www.flashscore.com.ar/futbol/argentina/liga-profesional/resultados/)",
         ]),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(side_effect=[
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(side_effect=[
             "URL: https://www.espn.com.ar/futbol/resultados/_/liga/arg.1\n\nResultados de la primera division de futbol argentina del dia de hoy\nRiver Plate 3 - 0 Belgrano (Córdoba)\nCentral Córdoba 1 - 3 Newell's Old Boys\n\nSources:\n- [espn.com.ar](https://www.espn.com.ar/futbol/resultados/_/liga/arg.1)",
             "URL: https://www.flashscore.com.ar/futbol/argentina/liga-profesional/resultados/\n\nResultados argentina futbol primera division\nRiver Plate 3 - 0 Belgrano (Córdoba)\n\nSources:\n- [flashscore.com.ar](https://www.flashscore.com.ar/futbol/argentina/liga-profesional/resultados/)",
         ])),
@@ -385,12 +385,12 @@ async def test_news_economicas_china_no_hardcodea_espn():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.search_web.func", side_effect=[
+        patch("tools.search_tools.search_web.func", side_effect=[
             "Web search results for query: \"periodicos china noticias diarios\"\n\n1. [Xinhua](https://www.xinhuanet.com/)\n   Directorio de prensa de China\n\n2. [China Daily](https://www.chinadaily.com.cn/)\n   Directorio de prensa de China\n\nSources:\n- [Xinhua](https://www.xinhuanet.com/)\n- [China Daily](https://www.chinadaily.com.cn/)",
             "Web search results for query: \"dame las noticias economicas de china de hoy\"\n\n1. [Reuters China economy](https://www.reuters.com/world/china/)\n   China economy slows as market waits\n\n2. [ESPN Tenis](https://www.espn.com.ar/tenis/)\n   Noticias de Tenis\n\nSources:\n- [Reuters China economy](https://www.reuters.com/world/china/)\n- [ESPN Tenis](https://www.espn.com.ar/tenis/)",
             "Web search results for query: \"dame las noticias economicas de china de hoy últimas noticias recientes\"\n\n1. [El Economista China](https://www.eleconomista.es/economia/noticias/13643246/11/25/china-sufre-un-desplome-sin-precedentes-de-la-inversion-y-deja-a-la-economia-sin-motores-en-pleno-vuelo.html)\n   Inversion y economia china\n\nSources:\n- [El Economista China](https://www.eleconomista.es/economia/noticias/13643246/11/25/china-sufre-un-desplome-sin-precedentes-de-la-inversion-y-deja-a-la-economia-sin-motores-en-pleno-vuelo.html)",
         ]),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(side_effect=[
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(side_effect=[
             "URL: https://www.reuters.com/world/china/\n\nNoticias economicas de china del dia de hoy\nChina economy slows as global market waits for policy response\nAnalistas preveen una desaceleracion de la economia china\n\nSources:\n- [Reuters China economy](https://www.reuters.com/world/china/)",
             "URL: https://www.eleconomista.es/economia/noticias/13643246/11/25/china-sufre-un-desplome-sin-precedentes-de-la-inversion-y-deja-a-la-economia-sin-motores-en-pleno-vuelo.html\n\nEconomia de china hoy noticias\nChina sufre un desplome sin precedentes de la inversion y deja a la economia sin motores\n\nSources:\n- [El Economista China](https://www.eleconomista.es/economia/noticias/13643246/11/25/china-sufre-un-desplome-sin-precedentes-de-la-inversion-y-deja-a-la-economia-sin-motores-en-pleno-vuelo.html)",
         ])),
@@ -417,14 +417,14 @@ async def test_news_recientes_de_japon_devuelven_respuesta_y_sources():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.TavilyClient", MagicMock(return_value=MagicMock(search=MagicMock(return_value={"results": [
+        patch("tools.search_tools.TavilyClient", MagicMock(return_value=MagicMock(search=MagicMock(return_value={"results": [
             {
                 "title": "Seguridad de Japón hoy",
                 "url": "https://www.japannews.yomiuri.co.jp/security/today",
                 "content": "Breaking update today about security in Japan",
             }
         ]})))),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(return_value="URL: https://www.japannews.yomiuri.co.jp/security/today\n\nJapón refuerza medidas de seguridad hoy\nTokio anuncia un nuevo operativo\n\nSources:\n- [Japan News](https://www.japannews.yomiuri.co.jp/security/today)")),
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(return_value="URL: https://www.japannews.yomiuri.co.jp/security/today\n\nJapón refuerza medidas de seguridad hoy\nTokio anuncia un nuevo operativo\n\nSources:\n- [Japan News](https://www.japannews.yomiuri.co.jp/security/today)")),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
         from nodes.web_scraping_node import make_web_scraping_node
@@ -463,7 +463,7 @@ async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.TavilyClient", MagicMock(return_value=MagicMock(search=MagicMock(return_value={"results": [
+        patch("tools.search_tools.TavilyClient", MagicMock(return_value=MagicMock(search=MagicMock(return_value={"results": [
             {
                 "title": "CNN Mundo",
                 "url": "https://cnnespanol.cnn.com/mundo",
@@ -475,7 +475,7 @@ async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
                 "content": "Japón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional",
             },
         ]})))),
-        patch("tools.web_tools.fetch_web_page", side_effect=_fetch_by_url),
+        patch("tools.scraping_tools.fetch_web_page", side_effect=_fetch_by_url),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
         from nodes.web_scraping_node import make_web_scraping_node
@@ -507,7 +507,7 @@ async def test_weekly_country_query_uses_snippet_when_daily_fetch_fails():
 
     with (
         patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=_discover)),
-        patch("tools.web_tools.search_web.func", side_effect=[
+        patch("tools.search_tools.search_web.func", side_effect=[
             "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
             "1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)\n"
             "   ANSA reporta novedades de seguridad en Italia\n\n"
@@ -517,7 +517,7 @@ async def test_weekly_country_query_uses_snippet_when_daily_fetch_fails():
             "   Repubblica confirma medidas de seguridad en Italia esta semana\n\n"
             "Sources:\n- [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)",
         ]),
-        patch("tools.web_tools.fetch_web_page", side_effect=_fetch_by_url),
+        patch("tools.scraping_tools.fetch_web_page", side_effect=_fetch_by_url),
     ):
         result = await _run_generic_web_search_fetch("dame las ultimas noticias sobre seguridad en italia de esta semana")
 
@@ -540,13 +540,13 @@ async def test_weekly_country_query_uses_single_snippet_before_generic_fallback(
 
     with (
         patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=_discover)),
-        patch("tools.web_tools.search_web.func", return_value=(
+        patch("tools.search_tools.search_web.func", return_value=(
             "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
             "1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)\n"
             "   ANSA reporta novedades de seguridad en Italia\n\n"
             "Sources:\n- [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)"
         )),
-        patch("tools.web_tools.fetch_web_page", side_effect=_fetch_by_url),
+        patch("tools.scraping_tools.fetch_web_page", side_effect=_fetch_by_url),
     ):
         result = await _run_generic_web_search_fetch("dame las ultimas noticias sobre seguridad en italia de esta semana")
 
@@ -563,8 +563,8 @@ async def test_recent_generic_web_query_requires_sufficient_context():
     from application.use_cases.web_scraping_flow import _run_generic_web_search_fetch
 
     with (
-        patch("tools.web_tools.search_web.func", return_value="Web search results for query: \"dame las ultimas noticias sobre seguridad de japon hoy April 2026\"\n\n1. [Japan update](https://example.com/japan)\n   Short snippet\n\nSources:\n- [Japan update](https://example.com/japan)"),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(return_value="URL: https://example.com/japan\n\nSolo una línea insuficiente\n\nSources:\n- [Japan update](https://example.com/japan)")),
+        patch("tools.search_tools.search_web.func", return_value="Web search results for query: \"dame las ultimas noticias sobre seguridad de japon hoy April 2026\"\n\n1. [Japan update](https://example.com/japan)\n   Short snippet\n\nSources:\n- [Japan update](https://example.com/japan)"),
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(return_value="URL: https://example.com/japan\n\nSolo una línea insuficiente\n\nSources:\n- [Japan update](https://example.com/japan)")),
     ):
         result = await _run_generic_web_search_fetch("dame las ultimas noticias sobre seguridad de japon hoy")
 
@@ -578,7 +578,7 @@ async def test_weekly_generic_web_query_combines_multiple_sources():
     # The OpenClaw-style flow uses a single generic search result set and then ranks/
     # deduplicates hits before fetching the best article URLs.
     with (
-        patch("tools.web_tools.search_web.func", return_value=(
+        patch("tools.search_tools.search_web.func", return_value=(
             "Web search results for query: \"dame las ultimas noticias sobre seguridad de japon esta semana\"\n\n"
             "1. [NHK: Japan security roundup](https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/)\n"
             "   Japón refuerza medidas de seguridad esta semana\n\n"
@@ -591,7 +591,7 @@ async def test_weekly_generic_web_query_combines_multiple_sources():
             "- [Reuters: Japan security and China tensions](https://www.reuters.com/world/asia-pacific/japan-security-china-tensions-2026-04-06/)\n"
             "- [Japón y sus aliados](https://www.nippon.com/es/news/yjj2026040500456/)"
         )),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(side_effect=[
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(side_effect=[
             "URL: https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/\n\nJapón refuerza medidas de seguridad esta semana\nTokio anuncia un nuevo operativo\n\nSources:\n- [NHK](https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/)",
             "URL: https://www.reuters.com/world/asia-pacific/japan-security-china-tensions-2026-04-06/\n\nTensiones de seguridad entre Japón y China aumentan esta semana\nWashington sigue de cerca el despliegue militar japonés\n\nSources:\n- [Reuters](https://www.reuters.com/world/asia-pacific/japan-security-china-tensions-2026-04-06/)",
             "URL: https://www.nippon.com/es/news/yjj2026040500456/\n\nJapón mantiene contactos diplomáticos con sus aliados en Asia esta semana\nLas conversaciones diplomáticas refuerzan la posición japonesa\n\nSources:\n- [Nippon](https://www.nippon.com/es/news/yjj2026040500456/)",
@@ -635,7 +635,7 @@ async def test_url_directo_usa_web_fetch_explicitamente():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(return_value="URL: https://example.com\n\nResumen corto\n\nSources:\n- [example.com](https://example.com)")),
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(return_value="URL: https://example.com\n\nResumen corto\n\nSources:\n- [example.com](https://example.com)")),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
         from nodes.web_scraping_node import make_web_scraping_node
@@ -672,11 +672,11 @@ async def test_sports_query_filtra_fuentes_no_argentinas():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.search_web.func", side_effect=[
+        patch("tools.search_tools.search_web.func", side_effect=[
             "Web search results for query: \"dame los resultados del futbol argentino del dia de hoy\"\n\n1. [Sopitas](https://www.sopitas.com/fm/francia-98-juan-inaki-ignacio-antonio-historia-futbolista-river-plate-banda/)\n   Historia de un jugador\n\nSources:\n- [Sopitas](https://www.sopitas.com/fm/francia-98-juan-inaki-ignacio-antonio-historia-futbolista-river-plate-banda/)",
             "Web search results for query: \"dame los resultados del futbol argentino del dia de hoy últimas noticias recientes\"\n\n1. [ESPN resultados](https://www.espn.com.ar/futbol/resultados/_/liga/arg.1)\n   Resultados de la liga argentina\n\nSources:\n- [ESPN resultados](https://www.espn.com.ar/futbol/resultados/_/liga/arg.1)",
         ]),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(side_effect=[
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(side_effect=[
             "URL: https://www.espn.com.ar/futbol/resultados/_/liga/arg.1\n\nResultados del futbol argentino del dia de hoy\nRiver Plate 3 - 0 Belgrano (Córdoba)\nCentral Córdoba 1 - 3 Newell's Old Boys\n\nSources:\n- [espn.com.ar](https://www.espn.com.ar/futbol/resultados/_/liga/arg.1)",
         ])),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
@@ -706,11 +706,11 @@ async def test_sports_query_aplica_contexto_geografico_al_fetch():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.search_web.func", side_effect=[
+        patch("tools.search_tools.search_web.func", side_effect=[
             "Web search results for query: \"dame los resultados del futbol ecuatoriano del dia de hoy\"\n\n1. [Marcador en directo de Fútbol - Sofascore](https://www.sofascore.com/es/futbol/ecuador/2026-04-06)\n   Resultados de Ecuador\n\nSources:\n- [Marcador en directo de Fútbol - Sofascore](https://www.sofascore.com/es/futbol/ecuador/2026-04-06)",
             "",
         ]),
-        patch("tools.web_tools.fetch_web_page", fetch_mock),
+        patch("tools.scraping_tools.fetch_web_page", fetch_mock),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
         from nodes.web_scraping_node import make_web_scraping_node
@@ -737,11 +737,11 @@ async def test_sports_query_rechaza_lineas_extranjeras_en_respuesta():
         patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("nodes.web_scraping_node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("nodes.web_scraping_node._should_evaluate_guard", return_value=True),
-        patch("tools.web_tools.search_web.func", side_effect=[
+        patch("tools.search_tools.search_web.func", side_effect=[
             "Web search results for query: \"dame los resultados del futbol ecuatoriano del dia de hoy\"\n\n1. [Marcador en directo de Fútbol - Sofascore](https://www.sofascore.com/es/futbol/ecuador/2026-04-06)\n   Resultados de Ecuador\n\nSources:\n- [Marcador en directo de Fútbol - Sofascore](https://www.sofascore.com/es/futbol/ecuador/2026-04-06)",
             "",
         ]),
-        patch("tools.web_tools.fetch_web_page", AsyncMock(return_value="URL: https://www.sofascore.com/es/futbol/ecuador/2026-04-06\n\nResultados del futbol ecuatoriano del dia de hoy\nBarcelona SC 2 - 1 Emelec\nGirona 1 - 0 Villarreal\nJuventus 2 - 0 Génova\n\nSources:\n- [sofascore](https://www.sofascore.com/es/futbol/ecuador/2026-04-06)")),
+        patch("tools.scraping_tools.fetch_web_page", AsyncMock(return_value="URL: https://www.sofascore.com/es/futbol/ecuador/2026-04-06\n\nResultados del futbol ecuatoriano del dia de hoy\nBarcelona SC 2 - 1 Emelec\nGirona 1 - 0 Villarreal\nJuventus 2 - 0 Génova\n\nSources:\n- [sofascore](https://www.sofascore.com/es/futbol/ecuador/2026-04-06)")),
         patch("nodes.web_scraping_node.get_runtime_policy", return_value={}),
     ):
         from nodes.web_scraping_node import make_web_scraping_node

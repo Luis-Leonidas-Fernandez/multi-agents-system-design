@@ -1,6 +1,15 @@
 """Tests para el retrieval inteligente de memoria."""
 
 
+def _handle_inspection_command(user_input, lifecycle, runtime=None):
+    from application.services.cli_dispatch import dispatch_inspection_command
+
+    result = dispatch_inspection_command(user_input, lifecycle, runtime)
+    for line in result.lines:
+        print(line)
+    return result.handled
+
+
 def test_memory_retrieval_service_busca_por_terminos(tmp_path):
     from application.services.memory_retrieval import MemoryRetrievalService
 
@@ -55,7 +64,6 @@ def test_format_memory_search_results_muestra_hallazgos():
 
 def test_handle_inspection_command_memory(monkeypatch, capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=None)
     runtime._memory_retrieval = type("Stub", (), {  # type: ignore[attr-defined]
@@ -76,7 +84,6 @@ def test_handle_inspection_command_memory(monkeypatch, capsys):
 
 def test_handle_inspection_command_memory_sin_query(capsys):
     from application.services.runtime import AgentRuntime
-    from main import _handle_inspection_command
 
     runtime = AgentRuntime(gateway=None)
     runtime._memory_retrieval = type("Stub", (), {  # type: ignore[attr-defined]
