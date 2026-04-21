@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage
 from application.services.agent_registry import get_agent_spec
 from application.helpers.config_flow_helpers import get_web_search_runtime_config
 from application.helpers.url_helpers import _extract_web_fetch_redirect_url
+from domain.web_text_utils import _extract_urls_from_text
 from application.services.background_tasks import background_task_service, BackgroundTaskService
 
 
@@ -44,18 +45,6 @@ async def _extract_url_query(url: str) -> dict[str, Any]:
         if redirect_url:
             result = await fetch_web_page(url=redirect_url, prompt="Extraé y resumí la información relevante de esta página web.", use_dynamic=True)
     return {"main_text": result if isinstance(result, str) else str(result)}
-
-
-def _extract_urls_from_text(text: str) -> list[str]:
-    urls = re.findall(r"https?://[^\s)\]]+", text or "")
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for url in urls:
-        normalized = url.rstrip(".,;:")
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            cleaned.append(normalized)
-    return cleaned
 
 
 @dataclass(frozen=True)
