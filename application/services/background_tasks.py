@@ -324,7 +324,9 @@ class BackgroundTaskService:
                     cancel_reason=reason,
                 )
             )
-        return asdict(cancelled) if cancelled is not None else None
+        if cancelled is None:
+            return None
+        return cancelled if isinstance(cancelled, dict) else asdict(cancelled)
 
     async def retry_task(
         self,
