@@ -715,11 +715,11 @@ async def _summarize_if_long(
             summary = f"{summary.strip()}\n\n{sources_block.strip()}"
         return summary
     except Exception:
-        # If the model backend is unavailable, preserve the raw content instead of
-        # aborting the whole turn with a connection error.
+        # If the model backend is unavailable, truncate to 200 words to preserve context quarantine.
+        truncated = " ".join(body_text.split()[:200])
         if sources_block:
-            return f"{body_text.strip()}\n\n{sources_block.strip()}"
-        return body_text.strip()
+            return f"{truncated}\n\n{sources_block.strip()}"
+        return truncated
 
 
 async def _run_retry_agent(
@@ -3079,6 +3079,33 @@ async def _synthesize_search_summary(
         return _enforce_synthesis_format(raw_summary)
 
 
+async def _guardrail_fast_result(
+    summary: str,
+    new_tracker: dict[str, Any],
+    rid: str,
+    t0: float,
+    should_evaluate_guard_fn: Callable,
+    evaluate_trajectory_safe_fn: Callable,
+) -> dict[str, Any]:
+    fast_result: dict[str, Any] = {
+        "messages": [AIMessage(content=summary)],
+        "scrape_tracker": new_tracker,
+    }
+    if should_evaluate_guard_fn("web_scraping_node"):
+        _is_safe, _ = await evaluate_trajectory_safe_fn(fast_result, "web_scraping_node")
+        if not _is_safe:
+            _emit_node_outcome(
+                rid, "web_scraping_node", "blocked", phase="post_guard",
+                agent="web_scraping_agent",
+                duration_ms=int((time.time() - t0) * 1000),
+                reason="agentdog", followup_likely=True,
+                **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
+                **_extract_followup({"messages": []}, "success"), **_node_meta(),
+            )
+            return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
+    return fast_result
+
+
 async def run_web_scraping_flow(
     state: AgentState,
     agent,
@@ -3105,19 +3132,16 @@ async def run_web_scraping_flow(
     if hitl_enabled:
         url_info = f" → URLs: {', '.join(explicit_urls)}" if explicit_urls else ""
         preview = last_message[:120] + ("..." if len(last_message) > 120 else "")
-        needs_confirmation = bool(explicit_urls)
 
         confirmed = True
-        if needs_confirmation:
-            confirmed = False
-            if confirmation_handler is not None:
-                confirmed = await confirmation_handler.confirm(
-                    f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
-                )
-            elif ask_confirmation_compat is not None:
-                confirmed = await ask_confirmation_compat(
-                    f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
-                )
+        if confirmation_handler is not None:
+            confirmed = await confirmation_handler.confirm(
+                f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
+            )
+        elif ask_confirmation_compat is not None:
+            confirmed = await ask_confirmation_compat(
+                f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
+            )
         if not confirmed:
             _emit_node_outcome(
                 rid, "web_scraping_node", "blocked", phase="pre_guard",
@@ -3171,23 +3195,10 @@ async def run_web_scraping_flow(
                     **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
                 summary, _, _ = _finalize_web_user_summary(summary, last_message, None)
-                _fast_result = {
-                    "messages": [AIMessage(content=summary)],
-                    "scrape_tracker": new_tracker,
-                }
-                if should_evaluate_guard_fn("web_scraping_node"):
-                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
-                    if not _is_safe:
-                        _emit_node_outcome(
-                            rid, "web_scraping_node", "blocked", phase="post_guard",
-                            agent="web_scraping_agent",
-                            duration_ms=int((time.time() - t0) * 1000),
-                            reason="agentdog", followup_likely=True,
-                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
-                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
-                        )
-                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
-                return _fast_result
+                return await _guardrail_fast_result(
+                    summary, new_tracker, rid, t0,
+                    should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+                )
 
         if category in {"sports", "news"}:
             discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
@@ -3232,23 +3243,10 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                _fast_result = {
-                    "messages": [AIMessage(content=summary)],
-                    "scrape_tracker": new_tracker,
-                }
-                if should_evaluate_guard_fn("web_scraping_node"):
-                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
-                    if not _is_safe:
-                        _emit_node_outcome(
-                            rid, "web_scraping_node", "blocked", phase="post_guard",
-                            agent="web_scraping_agent",
-                            duration_ms=int((time.time() - t0) * 1000),
-                            reason="agentdog", followup_likely=True,
-                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
-                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
-                        )
-                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
-                return _fast_result
+                return await _guardrail_fast_result(
+                    summary, new_tracker, rid, t0,
+                    should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+                )
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="news_sports")
 
             from tools import search_web
@@ -3309,23 +3307,10 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                _fast_result = {
-                    "messages": [AIMessage(content=summary)],
-                    "scrape_tracker": new_tracker,
-                }
-                if should_evaluate_guard_fn("web_scraping_node"):
-                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
-                    if not _is_safe:
-                        _emit_node_outcome(
-                            rid, "web_scraping_node", "blocked", phase="post_guard",
-                            agent="web_scraping_agent",
-                            duration_ms=int((time.time() - t0) * 1000),
-                            reason="agentdog", followup_likely=True,
-                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
-                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
-                        )
-                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
-                return _fast_result
+                return await _guardrail_fast_result(
+                    summary, new_tracker, rid, t0,
+                    should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+                )
 
         if is_web_information_query(last_message) or _is_recent_web_information_query(last_message):
             discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)
@@ -3370,23 +3355,10 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                _fast_result = {
-                    "messages": [AIMessage(content=summary)],
-                    "scrape_tracker": new_tracker,
-                }
-                if should_evaluate_guard_fn("web_scraping_node"):
-                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
-                    if not _is_safe:
-                        _emit_node_outcome(
-                            rid, "web_scraping_node", "blocked", phase="post_guard",
-                            agent="web_scraping_agent",
-                            duration_ms=int((time.time() - t0) * 1000),
-                            reason="agentdog", followup_likely=True,
-                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
-                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
-                        )
-                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
-                return _fast_result
+                return await _guardrail_fast_result(
+                    summary, new_tracker, rid, t0,
+                    should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+                )
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="generic_web_info")
 
         agent_hint = (
@@ -3448,23 +3420,10 @@ async def run_web_scraping_flow(
                     ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
                     **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
                 )
-                _fast_result = {
-                    "messages": [AIMessage(content=summary)],
-                    "scrape_tracker": new_tracker,
-                }
-                if should_evaluate_guard_fn("web_scraping_node"):
-                    _is_safe, _ = await evaluate_trajectory_safe_fn(_fast_result, "web_scraping_node")
-                    if not _is_safe:
-                        _emit_node_outcome(
-                            rid, "web_scraping_node", "blocked", phase="post_guard",
-                            agent="web_scraping_agent",
-                            duration_ms=int((time.time() - t0) * 1000),
-                            reason="agentdog", followup_likely=True,
-                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}),
-                            **_extract_followup({"messages": []}, "success"), **_node_meta(),
-                        )
-                        return {"messages": [AIMessage(content="Respuesta retenida por política de seguridad.")]}
-                return _fast_result
+                return await _guardrail_fast_result(
+                    summary, new_tracker, rid, t0,
+                    should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+                )
             _emit_node_outcome(
                 rid, "web_scraping_node", "error", phase="agent",
                 agent="web_scraping_agent",
