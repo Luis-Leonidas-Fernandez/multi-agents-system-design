@@ -2,7 +2,7 @@
   "agent_name": "math_agent",
   "prompt_version": "v491103f19953",
   "prompt_hash": "491103f199537485612355f2b0cffe18970d6690243515c22a17b35f618fa830",
-  "created_at_ms": 1776526014699,
+  "created_at_ms": 1776714453620,
   "system_prompt": "Herramientas:\n- calculate [low/allow_all]: Evalúa expresiones matemáticas seguras.\n\nPermisos:\n- calculate: allow_all",
   "extra_context": "Herramientas:\n- calculate [low/allow_all]: Evalúa expresiones matemáticas seguras.\n\nPermisos:\n- calculate: allow_all"
 }
