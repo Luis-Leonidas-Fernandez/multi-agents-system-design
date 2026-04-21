@@ -111,7 +111,7 @@ def _normalize_search_hits(raw_hits: Any) -> list[dict[str, str]]:
     return hits
 
 
-def _run_tavily_search(
+def _query_tavily_provider(
     query: str,
     allowed_domains: Optional[list[str]],
     blocked_domains: Optional[list[str]],
@@ -147,7 +147,7 @@ def _run_tavily_search(
     return hits[:num_results]
 
 
-def _run_searxng_search(
+def _query_searxng_provider(
     query: str,
     allowed_domains: Optional[list[str]],
     blocked_domains: Optional[list[str]],
@@ -215,7 +215,7 @@ def _run_searxng_search(
     return hits[:num_results]
 
 
-def _run_google_news_rss_search(
+def _query_google_news_rss_provider(
     query: str,
     allowed_domains: Optional[list[str]],
     blocked_domains: Optional[list[str]],
@@ -275,7 +275,7 @@ def _run_google_news_rss_search(
     return hits[:num_results]
 
 
-def _run_web_search_provider(
+def _query_web_search_provider(
     provider_kind: str,
     query: str,
     allowed_domains: Optional[list[str]],
@@ -286,11 +286,11 @@ def _run_web_search_provider(
     time_range: Optional[str] = None,
 ) -> list[dict[str, str]]:
     if provider_kind == "tavily":
-        return _run_tavily_search(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
+        return _query_tavily_provider(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
     if provider_kind == "google_news_rss":
-        return _run_google_news_rss_search(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
+        return _query_google_news_rss_provider(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
     if provider_kind == "searxng":
-        return _run_searxng_search(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
+        return _query_searxng_provider(query, allowed_domains, blocked_domains, num_results, max_age_days, topic=topic, time_range=time_range)
     raise ValueError(f"Proveedor de web search desconocido: {provider_kind}")
 
 
@@ -388,7 +388,7 @@ def _execute_web_search_plan(
                     return cached
 
             try:
-                hits = _run_web_search_provider(
+                hits = _query_web_search_provider(
                     provider_spec.kind,
                     query,
                     allowed_domains,
@@ -475,10 +475,10 @@ __all__ = [
     "_extract_search_candidates_from_text",
     "_normalize_search_hits",
     "_filter_search_hits_by_domains",
-    "_run_tavily_search",
-    "_run_searxng_search",
-    "_run_google_news_rss_search",
-    "_run_web_search_provider",
+    "_query_tavily_provider",
+    "_query_searxng_provider",
+    "_query_google_news_rss_provider",
+    "_query_web_search_provider",
     "_resolve_web_search_plan",
     "_execute_web_search_plan",
     "search_web",
