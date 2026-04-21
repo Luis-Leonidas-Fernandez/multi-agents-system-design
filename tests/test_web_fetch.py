@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tools.web_tools import fetch_web_page
+from tools.scraping_tools import fetch_web_page
 
 
 @pytest.mark.asyncio

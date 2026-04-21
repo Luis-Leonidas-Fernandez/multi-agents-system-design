@@ -118,7 +118,7 @@ class WebFetchRuntime:
     """Resuelve provider y ejecuta fetch con un contrato estable."""
 
     async def fetch(self, request: WebFetchRequest) -> WebFetchResponse:
-        from tools.web_tools import fetch_web_page
+        from tools.scraping_tools import fetch_web_page
 
         provider_name = resolve_web_fetch_provider_name()
         use_dynamic = request.mode != "static"

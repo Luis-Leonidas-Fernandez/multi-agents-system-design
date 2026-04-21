@@ -1578,7 +1578,7 @@ async def _discover_country_press_sources(
         return cached
 
     from tools import search_web
-    from tools.web_tools import fetch_web_page
+    from tools.scraping_tools import fetch_web_page
 
     geography = _extract_query_geography(last_message)
     if geography:
@@ -1756,7 +1756,8 @@ async def _run_country_press_search_candidates(
     query_horizon: Optional[str] = None,
 ) -> tuple[list[dict[str, str]], str]:
     from tools import search_web
-    from tools.web_tools import fetch_web_page, _is_specific_article_hit
+    from tools.scraping_tools import fetch_web_page
+    from domain.web_classifier import _is_specific_article_hit
 
     country_press_domains, country_press_names = await _discover_country_press_sources(
         last_message,
@@ -2243,7 +2244,7 @@ async def _run_week_search_candidates(
 
 
 async def _fetch_web_page_follow_redirect(url: str, prompt: str, *, use_dynamic: bool = True) -> str:
-    from tools.web_tools import fetch_web_page
+    from tools.scraping_tools import fetch_web_page
 
     result = await fetch_web_page(url=url, prompt=prompt, use_dynamic=use_dynamic)
     if not isinstance(result, str):
@@ -2549,7 +2550,7 @@ async def _run_generic_web_search_strategy_impl(
     last_message: str,
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    from tools.web_tools import _is_specific_article_hit
+    from domain.web_classifier import _is_specific_article_hit
     ctx, policy = _build_query_context(last_message)
     query_terms = ctx.query_terms
     query_source_group = ctx.query_source_group

@@ -37,7 +37,7 @@ def _search_web_query(query: str) -> str:
 
 
 async def _extract_url_query(url: str) -> dict[str, Any]:
-    from tools.web_tools import fetch_web_page
+    from tools.scraping_tools import fetch_web_page
 
     result = await fetch_web_page(url=url, prompt="Extraé y resumí la información relevante de esta página web.", use_dynamic=True)
     if isinstance(result, str):
