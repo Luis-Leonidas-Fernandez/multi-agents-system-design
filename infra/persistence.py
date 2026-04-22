@@ -27,7 +27,7 @@ from typing import Optional
 
 from langchain_core.messages import BaseMessage
 
-from application.helpers.persistence_flow_helpers import (
+from domain.persistence_flow_helpers import (
     _role_from_msg,
     _row_to_msg,
     _load_jsonl,

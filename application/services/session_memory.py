@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import infra.memory as _infra_memory
+from application.helpers.config_flow_helpers import get_llm
+
+
+_infra_memory.configure_llm_factory(get_llm)
 
 
 @dataclass

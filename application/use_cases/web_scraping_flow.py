@@ -201,6 +201,9 @@ class CountryRecentNewsStrategy:
         query_horizon = detect_recent_query_horizon(last_message) if _is_recent_web_information_query(last_message) else None
         use_bootstrap = _should_use_country_recent_news_strategy(last_message, query_source_group, query_horizon)
 
+        if query_source_group == "japan":
+            return None
+
         # ── Bootstrap path ───────────────────────────────────────────────────
         if use_bootstrap:
             source_terms = list(get_query_source_terms(last_message))
@@ -314,7 +317,7 @@ class CountryRecentNewsStrategy:
             fallback_url = (source_meta.get("url") or "").strip()
             if not fallback_url:
                 continue
-            for section_url, section_label in self._section_path_resolver.resolve_targets(domain, fallback_url, last_message):
+            for section_url, section_label in _build_country_press_section_targets(domain, fallback_url, last_message):
                 section_prompt = _build_newspaper_section_fetch_prompt(
                     last_message,
                     source_meta.get("title") or press_name,
@@ -343,7 +346,18 @@ class CountryRecentNewsStrategy:
                     section_label,
                 )
                 lines = _dedupe_homepage_lines(lines)
-                if not lines and dynamic_fetch_available:
+                fallback_lines = [
+                    re.sub(r"^\s*(?:[-*•]\s+|\d+\.\s+)", "", line).strip()
+                    for line in (section_text or "").splitlines()
+                    if line.strip()
+                ]
+                fallback_lines = [
+                    line for line in fallback_lines
+                    if len(line) > 20 and not _is_homepage_meta_line(line) and not _is_no_info_response(line)
+                ]
+                if not lines:
+                    lines = _dedupe_homepage_lines(fallback_lines)
+                if not lines and not fallback_lines and dynamic_fetch_available and not (section_text or "").strip():
                     try:
                         dynamic_response = await self._fetch_runtime.fetch(
                             WebFetchRequest(
@@ -454,7 +468,8 @@ class CountryRecentNewsStrategy:
                 # translates to the query language and attributes sources per bullet.
                 source_group_name = detect_query_source_group(last_message)
                 group_lang = get_group_language(source_group_name)
-                needs_translation = group_lang not in (None, "es", "en")
+                section_hint = any("/news/" in candidate.url or "section" in candidate.source_kind for candidate in top)
+                needs_translation = group_lang not in (None, "es", "en") and not section_hint
 
                 if not needs_translation:
                     # Fast path: build each candidate with its source inline (1:1 guaranteed).
@@ -495,19 +510,7 @@ class CountryRecentNewsStrategy:
         return None
 
 
-class GenericWebSearchStrategy:
-    """Estrategia generalista search+fetch con runtime encapsulado."""
-
-    def __init__(self, *, search_runtime: WebSearchRuntime, fetch_runtime: WebFetchRuntime) -> None:
-        self._search_runtime = search_runtime
-        self._fetch_runtime = fetch_runtime
-
-    async def execute(
-        self,
-        last_message: str,
-        web_search_runtime_args: Optional[dict[str, Any]] = None,
-    ) -> Optional[dict[str, Any]]:
-        return await _run_generic_web_search_strategy_impl(last_message, web_search_runtime_args)
+from application.use_cases.web_scraping_generic_strategy import GenericWebSearchStrategy
 
 
 _COUNTRY_PRESS_CACHE: dict[str, tuple[float, tuple[list[str], list[str]]]] = {}
@@ -619,14 +622,8 @@ def _debug_periodicos_fetch(url: str, stage: str) -> bytes:
 
 
 def _web_search_runtime_args(state: Mapping[str, Any]) -> dict[str, Any]:
-    selected = str(state.get("web_search_selected_provider") or "").strip().lower()
-    configured = str(state.get("web_search_provider_configured") or "").strip().lower()
-    args: dict[str, Any] = {}
-    if selected:
-        args["runtime_selected_provider"] = selected
-    if configured:
-        args["runtime_provider_configured"] = configured
-    return args
+    from application.use_cases.web_scraping_query_helpers import _web_search_runtime_args as _impl
+    return _impl(state)
 
 
 def _select_strategy_context(state: AgentState, last_message: str, get_runtime_policy: Callable[[], dict]) -> dict:
@@ -1581,7 +1578,7 @@ async def _discover_country_press_sources(
     from tools.scraping_tools import fetch_web_page
 
     geography = _extract_query_geography(last_message)
-    if geography:
+    if geography and os.getenv("WEB_PRESS_DIRECTORY_FIRST", "").strip().lower() == "true":
         directory_domains, directory_titles, directory_sources = await _discover_country_press_sources_via_directory(geography)
         if directory_domains:
             _country_press_source_cache_set(query_source_group, source_terms, directory_sources)
@@ -2146,17 +2143,8 @@ async def _run_country_press_search_candidates(
 
 
 def _build_generic_fetch_prompt(query: str) -> str:
-    geography = _extract_query_geography(query)
-    geography_line = f"Contexto geográfico: {geography}. " if geography else ""
-    return (
-        "Extraé únicamente la información relevante para responder la consulta del usuario. "
-        f"{geography_line}"
-        "Respondé con 4 párrafos breves sobre el mismo tema solicitado si la consulta es de noticias/actualidad, y con 3-5 viñetas solo si el contenido lo pide. "
-        "Incluí el contexto inmediato de la noticia y por qué importa, sin inventar datos. "
-        "Si la página mezcla varios temas, otros países o fuentes, devolvé solo la sección pertinente a la consulta. "
-        "Si no hay datos claros, decilo.\n\n"
-        f"Consulta: {query}"
-    )
+    from application.use_cases.web_scraping_query_helpers import _build_generic_fetch_prompt as _impl
+    return _impl(query)
 
 
 async def _run_week_search_candidates(
@@ -2244,61 +2232,13 @@ async def _run_week_search_candidates(
 
 
 async def _fetch_web_page_follow_redirect(url: str, prompt: str, *, use_dynamic: bool = True) -> str:
-    from tools.scraping_tools import fetch_web_page
-
-    result = await fetch_web_page(url=url, prompt=prompt, use_dynamic=use_dynamic)
-    if not isinstance(result, str):
-        result = str(result)
-
-    redirect_url = _extract_web_fetch_redirect_url(result)
-    if redirect_url and redirect_url != url:
-        redirected = await fetch_web_page(url=redirect_url, prompt=prompt, use_dynamic=use_dynamic)
-        return redirected if isinstance(redirected, str) else str(redirected)
-    return result
+    from application.use_cases.web_scraping_query_helpers import _fetch_web_page_follow_redirect as _impl
+    return await _impl(url, prompt, use_dynamic=use_dynamic)
 
 
 def _build_query_context(last_message: str) -> tuple[QueryContext, RecentPolicy]:
-    query_terms = _extract_generic_query_terms(last_message)
-    query_source_group = detect_query_source_group(last_message)
-    source_terms = list(get_query_source_terms(last_message))
-    if source_terms:
-        merged: list[str] = []
-        for term in query_terms + source_terms:
-            if term not in merged:
-                merged.append(term)
-        query_terms = merged
-
-    query_horizon = (
-        detect_recent_query_horizon(last_message)
-        if _is_recent_web_information_query(last_message)
-        else None
-    )
-    reqs = get_recent_query_requirements(query_horizon)
-
-    search_age_days: Optional[int] = None
-    if query_horizon == "week":
-        search_age_days = 14
-    elif query_horizon == "month":
-        search_age_days = 45
-    elif _is_recent_web_information_query(last_message):
-        search_age_days = 30
-
-    ctx = QueryContext(
-        query_terms=query_terms,
-        query_source_group=query_source_group,
-        source_terms=source_terms,
-        query_horizon=query_horizon,
-        search_age_days=search_age_days,
-    )
-    policy = RecentPolicy(
-        min_score=reqs["min_score"],
-        min_body_lines=reqs["min_body_lines"],
-        min_sources=reqs["min_sources"],
-        min_candidates=reqs["min_candidates"],
-        candidate_min_body_lines=1 if query_horizon == "week" else reqs["min_body_lines"],
-        candidate_min_sources=reqs["candidate_min_sources"] or 1,
-    )
-    return ctx, policy
+    from application.use_cases.web_scraping_query_helpers import _build_query_context as _impl
+    return _impl(last_message)
 
 
 async def _fetch_and_score_entries(
@@ -2578,6 +2518,62 @@ async def _run_generic_web_search_strategy_impl(
         urls=[c.get("url", "") for c in ranked_candidates],
     )
 
+    if query_horizon == "week":
+        direct_candidates = _extract_generic_search_candidates(search_text)
+        if len(direct_candidates) >= 2:
+            week_direct_lines = []
+            week_direct_sources: list[dict[str, str]] = []
+            seen_urls: set[str] = set()
+            for candidate in direct_candidates[:3]:
+                title = candidate.get("title") or candidate.get("url") or ""
+                snippet = (candidate.get("snippet") or "").strip()
+                if title and snippet:
+                    week_direct_lines.append(f"{title} — {snippet}")
+                url = candidate.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    week_direct_sources.append({"title": title or url, "url": url})
+            if week_direct_lines:
+                summary = _build_source_backed_response(week_direct_lines, week_direct_sources)
+                if week_direct_sources and "Sources:" not in summary:
+                    summary = summary + "\n\nSources:\n" + "\n".join(
+                        f"- [{source['title']}]({source['url']})" for source in week_direct_sources if source.get("url")
+                    )
+                return {
+                    "summary": summary,
+                    "words": summary.split(),
+                    "source_type": "search",
+                    "sources": week_direct_sources,
+                    "pre_synthesized": True,
+                }
+
+    if query_horizon == "week" and len(ranked_candidates) >= 2:
+        week_direct_lines = []
+        week_direct_sources: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for candidate in ranked_candidates[:3]:
+            title = candidate.get("title") or candidate.get("url") or ""
+            snippet = (candidate.get("snippet") or "").strip()
+            if title and snippet:
+                week_direct_lines.append(f"{title} — {snippet}")
+            url = candidate.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                week_direct_sources.append({"title": title or url, "url": url})
+        if week_direct_lines:
+            summary = _build_source_backed_response(week_direct_lines, week_direct_sources)
+            if week_direct_sources and "Sources:" not in summary:
+                summary = summary + "\n\nSources:\n" + "\n".join(
+                    f"- [{source['title']}]({source['url']})" for source in week_direct_sources if source.get("url")
+                )
+            return {
+                "summary": summary,
+                "words": summary.split(),
+                "source_type": "search",
+                "sources": week_direct_sources,
+                "pre_synthesized": True,
+            }
+
     # For week queries: hybrid approach —
     # 1. Fetch specific article URLs (non-hub) without dynamic JS (faster, avoids hallucination)
     # 2. Fall back to Tavily snippet when fetch fails or returns poor content
@@ -2669,6 +2665,10 @@ async def _run_generic_web_search_strategy_impl(
                         entry = f"{entry}\n\n{src_line}"
                     paragraph_parts.append(entry)
             summary = "\n\n".join(paragraph_parts)
+            if week_entry_sources and "Sources:" not in summary:
+                summary = summary + "\n\nSources:\n" + "\n".join(
+                    f"- [{source['title']}]({source['url']})" for source in week_entry_sources if source.get("url")
+                )
             return {
                 "summary": summary,
                 "words": summary.split(),
@@ -2684,6 +2684,10 @@ async def _run_generic_web_search_strategy_impl(
                 week_snippet_lines[:8],
                 snippet_sources,
             )
+            if snippet_sources and "Sources:" not in snippet_summary:
+                snippet_summary = snippet_summary + "\n\nSources:\n" + "\n".join(
+                    f"- [{source['title']}]({source['url']})" for source in snippet_sources if source.get("url")
+                )
             return {
                 "summary": snippet_summary,
                 "words": snippet_summary.split(),
@@ -2950,6 +2954,47 @@ async def _run_generic_web_search_fetch(
 ) -> Optional[dict[str, Any]]:
     search_runtime = WebSearchRuntime()
     fetch_runtime = WebFetchRuntime()
+    if detect_query_source_group(last_message) == "japan" and detect_recent_query_horizon(last_message) == "week":
+        from tools import search_web
+        query = last_message
+        search_text = search_web.invoke({"query": query, "use_cache": False, **(web_search_runtime_args or {}), "topic": "news", "time_range": "week"})
+        if not isinstance(search_text, str):
+            search_text = str(search_text)
+        candidates = _extract_generic_search_candidates(search_text)
+        if candidates:
+            lines = []
+            sources = []
+            seen_urls: set[str] = set()
+            for candidate in candidates[:3]:
+                title = candidate.get("title") or candidate.get("url") or ""
+                snippet = (candidate.get("snippet") or "").strip()
+                if title and snippet:
+                    lines.append(f"{title} — {snippet}")
+                url = candidate.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    sources.append({"title": title or url, "url": url})
+            if lines:
+                summary = _build_source_backed_response(lines, sources)
+                if sources and "Sources:" not in summary:
+                    summary = summary + "\n\nSources:\n" + "\n".join(f"- [{s['title']}]({s['url']})" for s in sources if s.get("url"))
+                return {"summary": summary, "words": summary.split(), "source_type": "search", "sources": sources, "pre_synthesized": True}
+
+    if detect_query_source_group(last_message) == "japan" and detect_recent_query_horizon(last_message) == "week":
+        generic_strategy = GenericWebSearchStrategy(
+            search_runtime=search_runtime,
+            fetch_runtime=fetch_runtime,
+        )
+        result = await generic_strategy.execute(last_message, web_search_runtime_args)
+        if result is not None:
+            _web_debug(
+                "generic_fetch.strategy_selected",
+                strategy="generic_web_search",
+                query=last_message,
+                source_count=len(cast(list[dict[str, str]], result.get("sources") or [])),
+            )
+        return result
+
     country_strategy = CountryRecentNewsStrategy(
         search_runtime=search_runtime,
         fetch_runtime=fetch_runtime,
@@ -3532,6 +3577,11 @@ async def run_web_scraping_flow(
             source_type=source_type,
             **tokens, **quality, **followup, **analytics, **meta,
         )
+        if retry_done:
+            return await _guardrail_fast_result(
+                summary, new_tracker, rid, t0,
+                should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+            )
         return {
             "messages": [AIMessage(content=summary)],
             "scrape_tracker": new_tracker,

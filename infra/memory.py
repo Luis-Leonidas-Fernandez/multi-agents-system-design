@@ -6,11 +6,15 @@ para que puedan ser reutilizadas por gateway.py y otros módulos.
 """
 import logging
 from pathlib import Path
-from typing import cast, Any
-
-from application.helpers.config_flow_helpers import get_llm
+from typing import Any, Callable, Optional, cast
 
 _log = logging.getLogger(__name__)
+_LLM_FACTORY: Optional[Callable[[], Any]] = None
+
+
+def configure_llm_factory(factory: Callable[[], Any]) -> None:
+    global _LLM_FACTORY
+    _LLM_FACTORY = factory
 
 
 def load_memory_context(session_id: str) -> str:
@@ -61,7 +65,9 @@ async def distill_memory(state: dict, session_id: str) -> bool:
     )
 
     try:
-        llm = get_llm()
+        if _LLM_FACTORY is None:
+            raise RuntimeError("LLM factory not configured")
+        llm = _LLM_FACTORY()
         response = await llm.ainvoke(prompt)
         content_obj = cast(Any, response)
         content = cast(str, getattr(content_obj, "content", str(content_obj))).strip()

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from application.helpers.scraping_flow_helpers import (
+from domain.scraping_flow_helpers import (
     _CACHE_TTL_SECONDS,
     _SCRAPE_CACHE_MAX,
     _SCRAPE_CACHE,
