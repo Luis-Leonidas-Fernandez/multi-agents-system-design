@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,3 +52,24 @@ async def test_web_fetch_runtime_reports_fetch_status():
     assert response.provider_name == "default"
     assert response.status == "redirect"
     assert response.fetch_kind == "dynamic"
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_runtime_blocks_before_fetch_or_llm():
+    runtime = WebFetchRuntime()
+
+    with patch("application.services.web_runtime.input_guard", return_value={"blocked": True, "messages": [MagicMock(content="bloqueado")]}), patch(
+        "tools.scraping_tools.fetch_web_page", new=AsyncMock()
+    ) as fetch_mock:
+        response = await runtime.fetch(
+            WebFetchRequest(
+                url="https://example.com/article",
+                prompt="Resumí",
+                mode="dynamic",
+                use_cache=False,
+            )
+        )
+
+    fetch_mock.assert_not_called()
+    assert response.status == "rejected"
+    assert response.content == "bloqueado"
