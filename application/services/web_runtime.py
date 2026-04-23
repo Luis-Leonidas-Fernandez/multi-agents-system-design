@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from langchain_core.messages import HumanMessage
+
 from application.services.web_fetch_registry import (
     get_web_fetch_provider_spec,
     resolve_web_fetch_provider_name,
@@ -13,6 +15,8 @@ from application.services.web_search_registry import (
     get_web_search_provider_spec,
     resolve_web_search_provider_candidates,
 )
+from application.services.web_runtime_helpers import _build_web_search_payload, _classify_web_fetch_status
+from application.policies.security_flow import input_guard
 
 
 @dataclass(frozen=True)
@@ -82,7 +86,7 @@ class WebSearchRuntime:
     """Resuelve provider y ejecuta búsqueda con un contrato estable."""
 
     async def search(self, request: WebSearchRequest) -> WebSearchResponse:
-        from tools import search_web
+        from tools.search_tools import search_web
 
         provider_candidates = resolve_web_search_provider_candidates(
             explicit_provider=request.provider,
@@ -90,18 +94,7 @@ class WebSearchRuntime:
             runtime_provider_configured=request.runtime_provider_configured,
         )
         selected_provider = provider_candidates[0]
-        payload = {
-            "query": request.query,
-            "provider": selected_provider.name,
-            "allowed_domains": request.allowed_domains,
-            "blocked_domains": request.blocked_domains,
-            "num_results": request.count,
-            "max_age_days": request.max_age_days,
-            "topic": request.topic,
-            "time_range": request.time_range,
-            "use_cache": request.use_cache,
-        }
-        payload = {k: v for k, v in payload.items() if v is not None}
+        payload = _build_web_search_payload(request, selected_provider.name)
         search_fn = getattr(search_web, "func", None)
         if callable(search_fn):
             raw_text = str(search_fn(**payload))
@@ -121,6 +114,17 @@ class WebFetchRuntime:
         from tools.scraping_tools import fetch_web_page
 
         provider_name = resolve_web_fetch_provider_name()
+        guard_result = input_guard({"messages": [HumanMessage(content=f"URL: {request.url}\n\nPrompt: {request.prompt}")]})
+        if isinstance(guard_result, dict) and guard_result.get("blocked"):
+            blocked_content = getattr(guard_result["messages"][0], "content", str(guard_result["messages"][0])) if guard_result.get("messages") else "Solicitud bloqueada por política de seguridad."
+            return WebFetchResponse(
+                provider_name=get_web_fetch_provider_spec(provider_name).name,
+                url=request.url,
+                content=blocked_content,
+                fetch_kind="dynamic" if request.mode != "static" else "static",
+                status="rejected",
+            )
+
         use_dynamic = request.mode != "static"
         content = await fetch_web_page(
             url=request.url,
@@ -128,20 +132,12 @@ class WebFetchRuntime:
             use_dynamic=use_dynamic,
             use_cache=request.use_cache,
         )
-        status = "ok"
-        lowered = content.lower()
-        if lowered.startswith("error"):
-            status = "error"
-        elif lowered.startswith("url rechazada"):
-            status = "rejected"
-        elif "redirect detected" in lowered:
-            status = "redirect"
         return WebFetchResponse(
             provider_name=get_web_fetch_provider_spec(provider_name).name,
             url=request.url,
             content=content,
             fetch_kind="dynamic" if use_dynamic else "static",
-            status=status,
+            status=_classify_web_fetch_status(content),
         )
 
 

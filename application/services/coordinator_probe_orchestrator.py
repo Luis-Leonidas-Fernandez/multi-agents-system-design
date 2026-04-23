@@ -14,7 +14,7 @@ from domain.web_text_utils import _extract_urls_from_text
 
 
 def _search_web_query(query: str) -> str:
-    from tools import search_web
+    from tools.search_tools import search_web
 
     from application.helpers.config_flow_helpers import get_web_search_runtime_config
 

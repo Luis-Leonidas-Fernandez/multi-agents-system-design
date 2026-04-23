@@ -13,12 +13,12 @@ from typing import Any
 
 from domain.agent_roles import AGENT_NAMES as _AGENT_NAMES
 
-from tools import (
-    calculate,
-    analyze_data,
-    write_code,
-    extract_price_from_text,
-    search_web,
+from tools.math_tools import calculate
+from tools.data_tools import analyze_data
+from tools.code_tools import write_code
+from tools.price_tools import extract_price_from_text
+from tools.search_tools import search_web
+from tools.scraping_tools import (
     scrape_website_simple,
     scrape_website_dynamic,
     scrape_website_with_json_capture,

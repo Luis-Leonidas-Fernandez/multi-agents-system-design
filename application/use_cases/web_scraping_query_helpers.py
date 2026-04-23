@@ -43,6 +43,11 @@ def _build_generic_fetch_prompt(query: str) -> str:
 
 async def _fetch_web_page_follow_redirect(url: str, prompt: str, *, use_dynamic: bool = True) -> str:
     from tools.scraping_tools import fetch_web_page
+    from tools.web_fetch_helpers import _check_fetch_input_guard
+
+    blocked = _check_fetch_input_guard(url, prompt)
+    if blocked:
+        return blocked
 
     result = await fetch_web_page(url=url, prompt=prompt, use_dynamic=use_dynamic)
     if not isinstance(result, str):
@@ -109,7 +114,7 @@ async def _run_week_search_candidates(
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> tuple[list[dict[str, str]], str]:
     from application.use_cases import web_scraping_flow as _flow
-    from tools import search_web
+    from tools.search_tools import search_web
 
     source_terms = list(get_query_source_terms(last_message))
     loop = asyncio.get_running_loop()
@@ -195,7 +200,7 @@ async def _run_general_search_pipeline(
     web_search_runtime_args: Optional[dict[str, Any]],
 ) -> tuple[list[dict[str, str]], str]:
     from application.use_cases import web_scraping_flow as _flow
-    from tools import search_web
+    from tools.search_tools import search_web
 
     query_terms = ctx.query_terms
     query_source_group = ctx.query_source_group

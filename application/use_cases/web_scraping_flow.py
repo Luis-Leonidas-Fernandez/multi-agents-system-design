@@ -27,6 +27,7 @@ from application.helpers.audit_flow_helpers import (
 from ports.confirmation_port import ConfirmationPort
 from application.helpers.message_flow_helpers import extract_final_ai_text, get_last_message_text, is_web_information_query
 from application.helpers.trace_flow_helpers import get_or_create_request_id
+from application.policies.security_flow import input_guard
 from application.policies.scrape_tracker import (
     _get_category_score,
     _update_scrape_tracker,
@@ -1100,7 +1101,7 @@ async def _discover_country_press_sources(
         _web_debug("country_press.discovery.local_strategy_selected", query_source_group=query_source_group, strategy="cache", domains=cached[0])
         return cached
 
-    from tools import search_web
+    from tools.search_tools import search_web
     from tools.scraping_tools import fetch_web_page
 
     geography = _extract_query_geography(last_message)
@@ -1278,7 +1279,7 @@ async def _run_country_press_search_candidates(
     web_search_runtime_args: Optional[dict[str, Any]] = None,
     query_horizon: Optional[str] = None,
 ) -> tuple[list[dict[str, str]], str]:
-    from tools import search_web
+    from tools.search_tools import search_web
     from tools.scraping_tools import fetch_web_page
     from domain.web_classifier import _is_specific_article_hit
 
@@ -1721,7 +1722,7 @@ async def _run_week_search_candidates(
         )
         return [], country_press_search_text
 
-    from tools import search_web
+    from tools.search_tools import search_web
 
     loop = asyncio.get_running_loop()
     search_invoke_args: dict = {"query": last_message, "use_cache": False, **(web_search_runtime_args or {})}
@@ -1795,7 +1796,7 @@ async def _run_general_search_pipeline(
     loop: asyncio.AbstractEventLoop,
     web_search_runtime_args: Optional[dict[str, Any]],
 ) -> tuple[list[CandidateDict], str]:
-    from tools import search_web
+    from tools.search_tools import search_web
 
     query_terms = ctx.query_terms
     query_source_group = ctx.query_source_group
@@ -2463,6 +2464,10 @@ async def run_web_scraping_flow(
         web_search_runtime_args=web_search_runtime_args,
     )
 
+    guard_result = input_guard({"messages": [HumanMessage(content=last_message)]})
+    if isinstance(guard_result, dict) and guard_result.get("blocked"):
+        return guard_result
+
     try:
         if explicit_urls:
             fetch_prompt = last_message.strip() or "Extraé la información relevante de esta URL."
@@ -2545,7 +2550,7 @@ async def run_web_scraping_flow(
                 )
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="news_sports")
 
-            from tools import search_web
+            from tools.search_tools import search_web
 
             loop = asyncio.get_running_loop()
             _fb2_args: dict = {"query": last_message, "use_cache": False, **web_search_runtime_args}

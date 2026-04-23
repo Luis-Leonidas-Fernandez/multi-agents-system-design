@@ -1,6 +1,6 @@
 """Herramientas de scraping y fetch web para el sistema multi-agentes."""
 
-from typing import Annotated, Optional, Any
+from typing import Annotated, Optional
 from urllib.parse import urlparse
 
 from infra.web_cache import (
@@ -24,11 +24,9 @@ from application.helpers.scraping_flow_helpers import (
 )
 from tools.scraping_core import (
     _domain_allowed,
-    _is_preapproved_url,
-    _html_to_markdownish_text,
     _build_web_fetch_prompt,
-    _build_redirect_message,
 )
+from tools.web_fetch_helpers import build_web_fetch_draft
 from infra import scraping_infra
 
 
@@ -207,78 +205,31 @@ async def web_fetch(
             return cached
 
     try:
-        final_url = url
-        result: dict[str, Any] = {}
-        title_tag = urlparse(url).hostname or url
-        if use_dynamic:
-            import asyncio as _asyncio
-            _fetch_url = url
-            _fetch_wait = wait_for_selector
-            _fetch_extract = extract_selector
-            _fetch_limit = max_chars
-            _fetch_block = block_resources
-            result = await _asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: scraping_infra._scrape_page_sync(
-                    url=_fetch_url,
-                    wait_for_selector=_fetch_wait,
-                    extract_selector=_fetch_extract,
-                    text_limit=_fetch_limit,
-                    block_resources=_fetch_block,
-                ),
-            )
-            fetched_url = str(result.get("url") or url)
-            parsed_original = urlparse(url)
-            parsed_fetched = urlparse(fetched_url)
-            if parsed_original.hostname and parsed_fetched.hostname and parsed_original.hostname != parsed_fetched.hostname:
-                return _build_redirect_message(url, fetched_url, 307, prompt)
-            final_url = fetched_url
-            title = str(result.get("title") or fetched_url)
-            text = str(result.get("main_text") or "")
-            links = list(result.get("links") or [])
-            markdown_content = _html_to_markdownish_text(fetched_url, title, text, links)
-        else:
-            import requests
-            from bs4 import BeautifulSoup
+        draft = await build_web_fetch_draft(
+            url=url,
+            prompt=prompt,
+            use_dynamic=use_dynamic,
+            wait_for_selector=wait_for_selector,
+            extract_selector=extract_selector,
+            max_chars=max_chars,
+            block_resources=block_resources,
+        )
 
-            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-            response.raise_for_status()
-            fetched_url = str(response.url or url)
-            parsed_original = urlparse(url)
-            parsed_fetched = urlparse(fetched_url)
-            if parsed_original.hostname and parsed_fetched.hostname and parsed_original.hostname != parsed_fetched.hostname:
-                status_code = int(getattr(response, "status_code", 302) or 302)
-                return _build_redirect_message(url, fetched_url, status_code, prompt)
-            final_url = fetched_url
-            html = response.content
-            soup = BeautifulSoup(html, "html.parser")
-            title_tag = soup.title.get_text(strip=True) if soup.title else fetched_url
-            text = _extract_text(soup, max_chars, extract_selector=extract_selector)
-            total_links, links_text = _extract_links(soup, fetched_url)
-            links: list[dict[str, str]] = []
-            if links_text:
-                for line in links_text.splitlines():
-                    if ": " in line:
-                        link_text, href = line[2:].split(": ", 1) if line.startswith("- ") else line.split(": ", 1)
-                        links.append({"text": link_text.strip(), "href": href.strip()})
-            markdown_content = _html_to_markdownish_text(fetched_url, title_tag, text, links)
+        if isinstance(draft, str):
+            return draft
+
+        final_url = draft.final_url
+        markdown_content = draft.markdown_content
 
         from application.helpers.config_flow_helpers import get_llm
 
-        is_preapproved = _is_preapproved_url(final_url)
-
         llm = get_llm()
         synthesized = await llm.ainvoke([
-            HumanMessage(content=_build_web_fetch_prompt(markdown_content, prompt, is_preapproved))
+            HumanMessage(content=_build_web_fetch_prompt(markdown_content, prompt, draft.is_preapproved))
         ])
         summary = getattr(synthesized, "content", str(synthesized)).strip()
-        # Use real article title; fall back to hostname if missing
-        if use_dynamic:
-            article_title = str(result.get("title") or "").strip() or (urlparse(final_url).hostname or final_url)
-        else:
-            article_title = title_tag.strip() or (urlparse(final_url).hostname or final_url)
         domain = urlparse(final_url).hostname or final_url
-        result_text = f"{summary}\n\n<<<CITE_THIS: title={article_title}|url={final_url}|domain={domain}>>>"
+        result_text = f"{summary}\n\n<<<CITE_THIS: title={draft.title}|url={final_url}|domain={domain}>>>"
 
         if use_cache:
             _set_web_fetch_cache(cache_key, result_text)

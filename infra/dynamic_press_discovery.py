@@ -113,7 +113,7 @@ class DefaultDynamicPressDiscovery(IDynamicPressSourceDiscovery):
         )
 
         try:
-            from tools import search_web
+            from tools.search_tools import search_web
         except ImportError:
             return [], []
 

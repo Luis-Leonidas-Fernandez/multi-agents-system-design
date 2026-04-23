@@ -17,7 +17,7 @@ async def _run_generic_web_search_fetch(
     search_runtime = WebSearchRuntime()
     fetch_runtime = WebFetchRuntime()
     if _flow.detect_query_source_group(last_message) == "japan" and _flow.detect_recent_query_horizon(last_message) == "week":
-        from tools import search_web
+        from tools.search_tools import search_web
         query = last_message
         search_text = search_web.invoke({"query": query, "use_cache": False, **(web_search_runtime_args or {}), "topic": "news", "time_range": "week"})
         if not isinstance(search_text, str):
