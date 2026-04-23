@@ -4,6 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+def test_web_scraping_ownership_docs_exist():
+    from pathlib import Path
+
+    assert Path("application/use_cases/WEB_SCRAPING_OWNERSHIP.md").exists()
+    assert Path("application/services/WEB_RUNTIME_OWNERSHIP.md").exists()
+
+
 @pytest.mark.asyncio
 async def test_web_scraping_agent_strategy_loads_prompt_from_file():
     from application.use_cases.web_scraping_agent_strategy import _run_web_scraping_agent_strategy
