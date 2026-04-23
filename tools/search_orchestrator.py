@@ -9,7 +9,6 @@ from infra.web_cache import _get_search_cache, _set_search_cache
 from infra.web_circuit_breaker import _circuit_open, _circuit_trip, _is_non_retryable_provider_error
 
 from tools.search_core import _format_search_results, _web_search_debug
-from tools.search_providers import _query_web_search_provider
 
 
 @dataclass(frozen=True)
@@ -89,6 +88,8 @@ def _execute_web_search_plan(
     time_range: Optional[str] = None,
 ) -> str:
     try:
+        from tools.search_tools import _query_web_search_provider
+
         last_error: Exception | None = None
         provider_chain = ",".join(spec.name for spec in plan.provider_candidates)
         _web_search_debug(

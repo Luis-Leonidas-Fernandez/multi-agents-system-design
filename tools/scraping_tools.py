@@ -24,8 +24,6 @@ from application.helpers.scraping_flow_helpers import (
 )
 from tools.scraping_core import (
     _domain_allowed,
-    _filter_search_hits_by_domains,
-    _is_preapproved_host,
     _is_preapproved_url,
     _html_to_markdownish_text,
     _build_web_fetch_prompt,
@@ -295,15 +293,6 @@ async def fetch_web_page(**kwargs) -> str:
 
 
 __all__ = [
-    "_split_domain_list",
-    "_domain_matches",
-    "_domain_allowed",
-    "_filter_search_hits_by_domains",
-    "_is_preapproved_host",
-    "_is_preapproved_url",
-    "_html_to_markdownish_text",
-    "_build_web_fetch_prompt",
-    "_build_redirect_message",
     "scrape_website_simple",
     "scrape_website_dynamic",
     "scrape_website_with_json_capture",
