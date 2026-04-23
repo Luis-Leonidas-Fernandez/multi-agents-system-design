@@ -13,7 +13,16 @@ def test_web_scraping_ownership_docs_exist():
     assert use_cases_doc.exists()
     assert runtime_doc.exists()
     assert "web_scraping_flow.py" in use_cases_doc.read_text(encoding="utf-8")
+    assert "web_scraping_api.py" in use_cases_doc.read_text(encoding="utf-8")
     assert "web_runtime.py" in runtime_doc.read_text(encoding="utf-8")
+
+
+def test_web_scraping_api_barrel_exports_stable_symbols():
+    from application.use_cases import web_scraping_api
+
+    assert callable(web_scraping_api.run_web_scraping_flow)
+    assert callable(web_scraping_api._run_generic_web_search_fetch)
+    assert hasattr(web_scraping_api, "GenericWebSearchStrategy")
 
 
 @pytest.mark.asyncio
