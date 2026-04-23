@@ -7,8 +7,13 @@ import pytest
 def test_web_scraping_ownership_docs_exist():
     from pathlib import Path
 
-    assert Path("application/use_cases/WEB_SCRAPING_OWNERSHIP.md").exists()
-    assert Path("application/services/WEB_RUNTIME_OWNERSHIP.md").exists()
+    use_cases_doc = Path("application/use_cases/WEB_SCRAPING_OWNERSHIP.md")
+    runtime_doc = Path("application/services/WEB_RUNTIME_OWNERSHIP.md")
+
+    assert use_cases_doc.exists()
+    assert runtime_doc.exists()
+    assert "web_scraping_flow.py" in use_cases_doc.read_text(encoding="utf-8")
+    assert "web_runtime.py" in runtime_doc.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
