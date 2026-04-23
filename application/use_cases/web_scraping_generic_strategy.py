@@ -459,4 +459,15 @@ async def _run_generic_web_search_strategy_impl(
     }
 
 
-__all__ = ["_run_generic_web_search_strategy_impl"]
+class GenericWebSearchStrategy:
+    """Compatibility wrapper around the generic web search strategy function."""
+
+    def __init__(self, search_runtime=None, fetch_runtime=None):
+        self.search_runtime = search_runtime
+        self.fetch_runtime = fetch_runtime
+
+    async def execute(self, last_message: str, web_search_runtime_args: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        return await _run_generic_web_search_strategy_impl(last_message, web_search_runtime_args)
+
+
+__all__ = ["_run_generic_web_search_strategy_impl", "GenericWebSearchStrategy"]

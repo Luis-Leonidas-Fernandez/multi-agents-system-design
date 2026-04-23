@@ -90,3 +90,10 @@ async def test_generic_week_strategy_keeps_partial_results_when_one_entry_fails(
     assert result is not None
     assert "Entry one" in result["summary"]
     assert "Entry two" in result["summary"]
+
+
+def test_generic_strategy_exposes_compatibility_class():
+    from application.use_cases.web_scraping_generic_strategy import GenericWebSearchStrategy
+
+    strategy = GenericWebSearchStrategy(search_runtime=object(), fetch_runtime=object())
+    assert hasattr(strategy, "execute")
