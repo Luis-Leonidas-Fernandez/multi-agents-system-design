@@ -8,7 +8,7 @@ import os
 import re
 import time
 import uuid
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from typing import Any, Optional, Callable, Awaitable, Mapping, cast
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -120,13 +120,6 @@ from application.helpers.price_flow_helpers import (
     _extract_structured_price,
     _get_crypto_price_fn,
 )
-from application.services.web_runtime import (
-    WebFetchRequest,
-    WebFetchRuntime,
-    WebSearchRequest,
-    WebSearchRuntime,
-)
-from application.services.web_response_post_filter import apply_web_response_post_filter
 from domain.models import AgentState
 
 
@@ -150,367 +143,13 @@ def _finalize_web_user_summary(
     last_message: str,
     sources: Optional[list[dict[str, str]]] = None,
 ) -> tuple[str, Optional[list[dict[str, str]]], list[str]]:
-    filtered_summary, filtered_sources = apply_web_response_post_filter(
-        summary=summary,
-        query=last_message,
-        sources=sources,
-    )
-    final_words = filtered_summary.split()
-    return filtered_summary, filtered_sources, final_words
+    from application.use_cases.web_scraping_postprocess import _finalize_web_user_summary as _impl
+
+    return _impl(summary, last_message, sources)
 
 
 WebCandidateRecord = WebCandidate
 
-
-
-class CountryRecentNewsStrategy:
-    """Estrategia principal para noticias locales recientes basadas en secciones."""
-
-    def __init__(
-        self,
-        *,
-        search_runtime: WebSearchRuntime,
-        fetch_runtime: WebFetchRuntime,
-        country_resolver: Optional["ICountryResolver"] = None,
-        profile_repo: Optional["ICountryProfileRepository"] = None,
-        section_path_resolver: Optional["ISectionPathResolver"] = None,
-        press_discovery: Optional["IPressSourceDiscovery"] = None,
-        dynamic_discovery: Optional["IDynamicPressSourceDiscovery"] = None,
-    ) -> None:
-        from infra.country_news_adapters import (
-            DefaultCountryResolver,
-            DefaultCountryProfileRepository,
-            DefaultSectionPathResolver,
-            DefaultPressSourceDiscovery,
-        )
-        from infra.dynamic_press_discovery import DefaultDynamicPressDiscovery
-        self._search_runtime = search_runtime
-        self._fetch_runtime = fetch_runtime
-        self._country_resolver = country_resolver or DefaultCountryResolver()
-        self._profile_repo = profile_repo or DefaultCountryProfileRepository()
-        self._section_path_resolver = section_path_resolver or DefaultSectionPathResolver()
-        self._press_discovery = press_discovery or DefaultPressSourceDiscovery()
-        self._dynamic_discovery = dynamic_discovery or DefaultDynamicPressDiscovery()
-
-    async def execute(
-        self,
-        last_message: str,
-        web_search_runtime_args: Optional[dict[str, Any]] = None,
-    ) -> Optional[dict[str, Any]]:
-        query_source_group = detect_query_source_group(last_message)
-        query_horizon = detect_recent_query_horizon(last_message) if _is_recent_web_information_query(last_message) else None
-        use_bootstrap = _should_use_country_recent_news_strategy(last_message, query_source_group, query_horizon)
-
-        if query_source_group == "japan":
-            return None
-
-        # ── Bootstrap path ───────────────────────────────────────────────────
-        if use_bootstrap:
-            source_terms = list(get_query_source_terms(last_message))
-            country_press_domains, country_press_names = await self._press_discovery.discover(
-                last_message,
-                query_source_group,
-                source_terms,
-                web_search_runtime_args,
-            )
-            if not country_press_domains:
-                _emit_country_news_metrics(
-                    geography=query_source_group,
-                    resolution_path="none",
-                    domains_found=0,
-                )
-                return None
-            _emit_country_news_metrics(
-                geography=query_source_group,
-                resolution_path="bootstrap",
-                domains_found=len(country_press_domains),
-            )
-
-        # ── Fase 4: soft gate — país no registrado pero detectable ───────────
-        elif query_source_group is None:
-            inferred_geo = self._country_resolver.resolve(last_message)
-            lowered_msg = (last_message or "").lower()
-            _has_news = any(t in lowered_msg for t in ("noticia", "noticias", "news", "headline", "headlines"))
-            _has_topic = _detect_news_topic(last_message) in {"security", "economy", "politics"}
-            _valid_horizon = query_horizon in {"today", "week", "month"}
-            if not (inferred_geo and _valid_horizon and (_has_news or _has_topic)):
-                return None
-            _web_debug(
-                "country_press.dynamic.attempt",
-                geography=inferred_geo,
-                horizon=query_horizon,
-                reason="source_group_missing",
-            )
-            country_press_domains, country_press_names = await self._dynamic_discovery.discover_for_unknown_country(
-                last_message,
-                inferred_geo,
-                web_search_runtime_args,
-            )
-            if not country_press_domains:
-                _web_debug("country_press.dynamic.no_sources", geography=inferred_geo)
-                _emit_country_news_metrics(
-                    geography=inferred_geo,
-                    resolution_path="none",
-                    domains_found=0,
-                )
-                return None
-            # Fabricar un source_group sintético para que el caché funcione igual.
-            query_source_group = f"dynamic:{inferred_geo.lower()}"
-            source_terms = [inferred_geo.lower()]
-            _country_press_cache_set(query_source_group, source_terms, country_press_domains, country_press_names)
-            _country_press_strategy_cache_set(query_source_group, source_terms, "dynamic")
-            _web_debug("country_press.dynamic.success", geography=inferred_geo, domains=country_press_domains)
-            _emit_country_news_metrics(
-                geography=inferred_geo,
-                resolution_path="dynamic",
-                domains_found=len(country_press_domains),
-            )
-
-        else:
-            # Otro motivo para que el gate falle (deporte, horizonte inválido, etc.)
-            return None
-
-        # ── Continuación común (bootstrap + dynamic) ─────────────────────────
-        query_terms = _extract_generic_query_terms(last_message)
-        for term in source_terms:
-            if term not in query_terms:
-                query_terms.append(term)
-
-        country_press_sources = _country_press_source_cache_get(query_source_group, source_terms)
-        discovery_strategy = _country_press_strategy_cache_get(query_source_group, source_terms)
-        if discovery_strategy == "none" and not country_press_sources:
-            return None
-        sources_by_domain: dict[str, dict[str, str]] = {}
-        for source in country_press_sources:
-            url = source.get("url", "")
-            hostname = (urlparse(url).hostname or "").lower().removeprefix("www.")
-            if hostname and hostname not in sources_by_domain:
-                sources_by_domain[hostname] = source
-
-        structured_candidates: list[WebCandidateRecord] = []
-        seen_urls: set[str] = set()
-        dynamic_fetch_available = True
-        _sec_topic = _detect_news_topic(last_message)
-        _topic_terms_for_filter: dict[str, set[str]] = {
-            "security": {
-                "seguridad", "sicurezza", "crime", "crimen", "cronaca", "polizia", "policia",
-                "policiales", "detenid", "arrestad", "operativo", "homicidio", "asesin",
-                "robo", "narco", "violencia", "sucesos", "delito", "fiscal", "tribunal",
-                "ertzaintza", "mossos", "guardia civil", "omicid", "arrest", "blitz",
-            },
-            "economy": {
-                "econom", "mercad", "mercato", "finanz", "inflac", "presupuesto",
-                "negocios", "empresa", "bolsa", "pib", "deuda",
-            },
-            "politics": {
-                "politic", "govern", "parlament", "elecci", "presidente", "ministro",
-                "congreso", "senado", "partido", "decreto",
-            },
-        }
-        _filter_terms_for_section = _topic_terms_for_filter.get(_sec_topic, set())
-
-        for idx, domain in enumerate(country_press_domains):
-            press_name = country_press_names[idx] if idx < len(country_press_names) else domain
-            source_meta = sources_by_domain.get(domain, {"title": press_name, "url": _default_press_homepage_url(domain)})
-            if not _is_press_source_relevant_for_query(source_meta, last_message):
-                continue
-            fallback_url = (source_meta.get("url") or "").strip()
-            if not fallback_url:
-                continue
-            for section_url, section_label in _build_country_press_section_targets(domain, fallback_url, last_message):
-                section_prompt = _build_newspaper_section_fetch_prompt(
-                    last_message,
-                    source_meta.get("title") or press_name,
-                    section_label,
-                )
-                try:
-                    fetch_response = await self._fetch_runtime.fetch(
-                        WebFetchRequest(
-                            url=section_url,
-                            prompt=section_prompt,
-                            mode="static",
-                            use_cache=False,
-                        )
-                    )
-                except Exception:
-                    continue
-                section_text = fetch_response.content
-                issue = _classify_fetch_error(section_text)
-                if issue == "missing_playwright":
-                    dynamic_fetch_available = False
-                if issue in {"not_found", "blocked", "dns", "fetch_error"}:
-                    continue
-                lines = _filter_section_lines_for_query(
-                    _extract_section_content_lines(section_text, last_message, section_label),
-                    last_message,
-                    section_label,
-                )
-                lines = _dedupe_homepage_lines(lines)
-                fallback_lines = [
-                    re.sub(r"^\s*(?:[-*•]\s+|\d+\.\s+)", "", line).strip()
-                    for line in (section_text or "").splitlines()
-                    if line.strip()
-                ]
-                fallback_lines = [
-                    line for line in fallback_lines
-                    if len(line) > 20 and not _is_homepage_meta_line(line) and not _is_no_info_response(line)
-                ]
-                if not lines:
-                    lines = _dedupe_homepage_lines(fallback_lines)
-                if not lines and not fallback_lines and dynamic_fetch_available and not (section_text or "").strip():
-                    try:
-                        dynamic_response = await self._fetch_runtime.fetch(
-                            WebFetchRequest(
-                                url=section_url,
-                                prompt=section_prompt,
-                                mode="dynamic",
-                                use_cache=False,
-                            )
-                        )
-                    except Exception:
-                        continue
-                    dynamic_issue = _classify_fetch_error(dynamic_response.content)
-                    if dynamic_issue == "missing_playwright":
-                        dynamic_fetch_available = False
-                    if dynamic_issue not in {"not_found", "blocked", "dns", "fetch_error", "missing_playwright"}:
-                        lines = _filter_section_lines_for_query(
-                            _extract_section_content_lines(dynamic_response.content, last_message, section_label),
-                            last_message,
-                            section_label,
-                        )
-                        lines = _dedupe_homepage_lines(lines)
-                        section_text = dynamic_response.content
-                if not lines:
-                    continue
-                # Extraemos TODOS los párrafos válidos de la sección (separados por \n\n).
-                # Cada párrafo es una noticia distinta reportada por el LLM.
-                # Luego el dedup cross-fuente al final selecciona las 4 mejores globalmente.
-                raw_blocks = [
-                    " ".join(ln.strip() for ln in block.splitlines() if ln.strip())
-                    for block in (section_text or "").split("\n\n")
-                    if block.strip()
-                ]
-                section_items: list[str] = []
-                seen_block_prefixes: set[str] = set()
-                for block_text in raw_blocks:
-                    if len(block_text) < 20:
-                        continue
-                    if _is_no_info_response(block_text):
-                        continue
-                    block_norm = _strip_accents(block_text.lower())
-                    if not _filter_terms_for_section or any(term in block_norm for term in _filter_terms_for_section):
-                        prefix = " ".join(block_norm.split()[:4])
-                        if prefix and prefix not in seen_block_prefixes:
-                            seen_block_prefixes.add(prefix)
-                            section_items.append(block_text)
-                # Fallback: si el LLM no usó párrafos separados, usamos las líneas filtradas
-                if not section_items:
-                    section_items = [ln for ln in lines if len(ln) > 20]
-                for item_idx, item_text in enumerate(section_items):
-                    candidate_url = section_url if item_idx == 0 else f"{section_url}#n{item_idx}"
-                    if candidate_url in seen_urls:
-                        continue
-                    seen_urls.add(candidate_url)
-                    structured_candidates.append(WebCandidate(
-                        title=f"{source_meta.get('title') or press_name} — {section_label}",
-                        url=candidate_url,
-                        snippet=item_text,
-                        source_kind=SourceKind.SECTION,
-                        evidence_kind=EvidenceKind.SECTION_LINES,
-                        recency=Recency.DATED_RECENT,
-                        specificity=Specificity.CONCRETE,
-                        source_label=section_label,
-                    ))
-
-        if structured_candidates:
-            ordered = sorted(
-                structured_candidates,
-                key=lambda candidate: _candidate_strategy_priority(
-                    candidate.as_candidate(),
-                    query=last_message,
-                    query_horizon=query_horizon,
-                ),
-            )
-            # Dedup cross-candidatos: descartamos párrafos que comparten el núcleo
-            # de la misma noticia (primeras 6 palabras normalizadas en común)
-            def _para_key(text: str) -> str:
-                words = re.sub(r"[^\w\s]", "", _strip_accents(text.lower())).split()
-                return " ".join(words[:6])
-
-            seen_para_keys: set[str] = set()
-            deduped_candidates: list[WebCandidateRecord] = []
-            for c in ordered:
-                key = _para_key(c.snippet)
-                if key and key not in seen_para_keys:
-                    seen_para_keys.add(key)
-                    deduped_candidates.append(c)
-                if len(deduped_candidates) >= 4:
-                    break
-
-            top = deduped_candidates
-            sources = [
-                {"title": candidate.title, "url": candidate.url.split("#")[0]}
-                for candidate in top
-            ]
-            if top and sources:
-                geography = self._country_resolver.resolve(last_message) or ""
-                topic = _detect_news_topic(last_message)
-                topic_label = {
-                    "security": "Seguridad",
-                    "politics": "Política",
-                    "economy": "Economía",
-                }.get(topic, "Noticias")
-                header = f"**{topic_label} en {geography}**" if geography else f"**{topic_label}**"
-
-                # Detect if source language needs translation to query language.
-                # es/en sources → fast path (inline Fuente:, no LLM call).
-                # Other languages (it, ja, ko, etc.) → synthesis path so the LLM
-                # translates to the query language and attributes sources per bullet.
-                source_group_name = detect_query_source_group(last_message)
-                group_lang = get_group_language(source_group_name)
-                section_hint = any("/news/" in candidate.url or "section" in candidate.source_kind for candidate in top)
-                needs_translation = group_lang not in (None, "es", "en") and not section_hint
-
-                if not needs_translation:
-                    # Fast path: build each candidate with its source inline (1:1 guaranteed).
-                    blocks: list[str] = []
-                    for i, candidate in enumerate(top):
-                        if not candidate.snippet:
-                            continue
-                        url = candidate.url.split("#")[0]
-                        src_line = f"Fuente: [{candidate.title}]({url})"
-                        snippet = candidate.snippet
-                        if i == 0:
-                            snippet = f"{header}\n\n{snippet}"
-                        blocks.append(f"{snippet}\n\n{src_line}")
-                    summary = "\n\n".join(blocks)
-                    return {
-                        "summary": summary,
-                        "words": summary.split(),
-                        "source_type": "search",
-                        "sources": sources,
-                        "pre_synthesized": True,
-                    }
-                else:
-                    # Translation path: build labeled content so _synthesize_search_summary
-                    # can translate AND attribute each bullet to its source.
-                    labeled_parts = [
-                        f"[{candidate.title}]: {candidate.snippet}"
-                        for candidate in top if candidate.snippet
-                    ]
-                    raw_for_synthesis = f"{header}\n\n" + "\n\n".join(labeled_parts)
-                    return {
-                        "summary": raw_for_synthesis,
-                        "words": raw_for_synthesis.split(),
-                        "source_type": "search",
-                        "sources": sources,
-                        "pre_synthesized": False,
-                        "has_labeled_content": True,
-                    }
-        return None
-
-
-from application.use_cases.web_scraping_generic_strategy import GenericWebSearchStrategy
 
 
 _COUNTRY_PRESS_CACHE: dict[str, tuple[float, tuple[list[str], list[str]]]] = {}
@@ -598,18 +237,9 @@ def _default_press_homepage_url(domain: str) -> str:
 
 
 def _build_no_local_sources_response(last_message: str) -> dict[str, Any]:
-    geography = _extract_query_geography(last_message) or "ese país"
-    summary = (
-        f"No encontré fuentes locales confiables de {geography} para esta semana. "
-        "Prefiero no mezclar resultados globales ruidosos o tangenciales."
-    )
-    return {
-        "summary": summary,
-        "words": summary.split(),
-        "source_type": "search",
-        "sources": [],
-        "pre_synthesized": True,
-    }
+    from application.use_cases.web_scraping_postprocess import _build_no_local_sources_response as _impl
+
+    return _impl(last_message)
 
 
 def _debug_periodicos_fetch(url: str, stage: str) -> bytes:
@@ -627,96 +257,17 @@ def _web_search_runtime_args(state: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _select_strategy_context(state: AgentState, last_message: str, get_runtime_policy: Callable[[], dict]) -> dict:
-    from application.policies.scrape_tracker import (
-        _detect_query_category,
-        _get_strategy,
-        _score_to_reliability,
-        _API_VALIDATION_EPSILON,
-        _exploration_rate,
-    )
+    from application.use_cases.web_scraping_strategy_context import _select_strategy_context as _impl
 
-    tracker    = state.get("scrape_tracker") or {}
-    turn_count = (tracker.get("_turn_count") or 0) + 1
-    category   = _detect_query_category(last_message)
-    prior_score       = _get_category_score(tracker, category, turn_count)
-    prior_reliability = _score_to_reliability(prior_score)
-
-    _rt           = get_runtime_policy().get(category, {})
-    _top_promoted = (_rt.get("promoted") or [None])[0]
-    ml_recommended: Optional[str] = (
-        _top_promoted.get("strategy") if isinstance(_top_promoted, dict) else _top_promoted
-    )
-
-    import random
-
-    if _is_allowed_public_price_request(state.get("messages", []), "web_scraping_node"):
-        strategy, exploring = "api_price", False
-        exp_rate = 0.0
-    elif category == "crypto_price":
-        if random.random() < _API_VALIDATION_EPSILON:
-            strategy, exploring = "force_search", True
-        else:
-            strategy, exploring = "api_price", False
-        exp_rate = _API_VALIDATION_EPSILON
-    else:
-        exp_rate  = _exploration_rate(prior_score)
-        exploring = random.random() < exp_rate
-        strategy  = _get_strategy(tracker, category, prior_score, exploring=exploring)
-
-    prediction_match: Optional[bool] = (
-        (strategy == ml_recommended) if ml_recommended is not None else None
-    )
-
-    return {
-        "tracker": tracker, "turn_count": turn_count, "category": category,
-        "prior_score": prior_score, "prior_reliability": prior_reliability,
-        "ml_recommended": ml_recommended, "strategy": strategy,
-        "exploring": exploring, "exp_rate": exp_rate, "prediction_match": prediction_match,
-    }
+    return _impl(state, last_message, get_runtime_policy)
 
 
 async def _summarize_if_long(
     text: str, rid: str, get_llm_fn: Callable, *, is_retry: bool = False
 ) -> str:
-    if len(text.split()) <= 200:
-        return text
+    from application.use_cases.web_scraping_retry_flow import _summarize_if_long as _impl
 
-    sources_block = ""
-    body_text = text
-    if "Sources:" in text:
-        body_text, sources_block = text.split("Sources:", 1)
-        sources_block = "Sources:" + sources_block
-
-    tags = ["web_scraping", "context_quarantine", "summary"]
-    if is_retry:
-        tags.append("retry")
-    try:
-        llm = get_llm_fn()
-        summary_response = await llm.ainvoke(
-            [HumanMessage(content=(
-                "Resume el siguiente texto en máximo 200 palabras, "
-                f"conservando los datos más importantes:\n\n{body_text[:4000]}"
-            ))],
-            config=RunnableConfig(
-                tags=tags,
-                metadata={
-                    "node":              "web_scraping_node",
-                    "request_id":        rid,
-                    "raw_words":         len(body_text.split()),
-                    "summary_triggered": True,
-                },
-            ),
-        )
-        summary = cast(str, summary_response.content)
-        if sources_block:
-            summary = f"{summary.strip()}\n\n{sources_block.strip()}"
-        return summary
-    except Exception:
-        # If the model backend is unavailable, truncate to 200 words to preserve context quarantine.
-        truncated = " ".join(body_text.split()[:200])
-        if sources_block:
-            return f"{truncated}\n\n{sources_block.strip()}"
-        return truncated
+    return await _impl(text, rid, get_llm_fn, is_retry=is_retry)
 
 
 async def _run_retry_agent(
@@ -725,34 +276,9 @@ async def _run_retry_agent(
     rid: str,
     get_llm_fn: Callable,
 ) -> tuple[Optional[str], list[str], dict[str, Any], dict[str, Any]]:
-    retry_hint = (
-        f"[Sistema | auto-retry por bajo rendimiento | estrategia=force_search]\n"
-        + "Usa search_web directamente — no intentes scraping de páginas.\n\n"
-    )
-    retry_result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=retry_hint + last_message)]},
-        config=RunnableConfig(
-            tags=["web_scraping", "agent", "high_risk", "context_quarantine", "retry"],
-            metadata={
-                "node":       "web_scraping_node",
-                "agent":      "web_scraping_agent",
-                "request_id": rid,
-                "retry":      True,
-            },
-        ),
-    )
+    from application.use_cases.web_scraping_retry_flow import _run_retry_agent as _impl
 
-    retry_text = extract_final_ai_text(retry_result.get("messages", []))
-    if not retry_text:
-        return None, [], {}, {}
-
-    summary = await _summarize_if_long(retry_text, rid, get_llm_fn, is_retry=True)
-    return (
-        summary,
-        retry_text.split(),
-        _extract_tokens(retry_result),
-        _extract_quality(retry_result),
-    )
+    return await _impl(agent, last_message, rid, get_llm_fn)
 
 
 # ============================================================================
@@ -2248,117 +1774,9 @@ async def _fetch_and_score_entries(
     policy: RecentPolicy,
     search_text: str,
 ) -> list[dict[str, Any]]:
-    fetch_prompt = _build_generic_fetch_prompt(last_message)
-    query_terms = ctx.query_terms
-    query_source_group = ctx.query_source_group
+    from application.use_cases.web_scraping_search_pipeline import _fetch_and_score_entries as _impl
 
-    async def _fetch_candidate(candidate: CandidateDict) -> tuple[CandidateDict, Any]:
-        try:
-            # use_dynamic=False: requests HTTP es suficiente para artículos de noticias
-            # y evita lanzar N browsers Chromium en paralelo (que es lo que causaba el timeout)
-            result = await _fetch_web_page_follow_redirect(candidate["url"], fetch_prompt, use_dynamic=False)
-            return candidate, result
-        except Exception as exc:  # pragma: no cover - defensive
-            return candidate, exc
-
-    fetched_results = await asyncio.gather(
-        *(_fetch_candidate(candidate) for candidate in ranked_candidates),
-        return_exceptions=False,
-    )
-
-    eligible_entries: list[dict[str, Any]] = []
-    for candidate, result in fetched_results:
-        if _is_invalid_news_candidate(candidate, last_message):
-            _web_debug(
-                "generic_fetch.entry_rejected_invalid_structure",
-                url=candidate.get("url", ""),
-                title=candidate.get("title", ""),
-            )
-            continue
-        if isinstance(result, Exception):
-            _web_debug("generic_fetch.fetch_exception", url=candidate.get("url", ""), error=repr(result))
-            snippet_lines = _candidate_snippet_lines(candidate)
-            if not snippet_lines:
-                continue
-            result = "\n".join(snippet_lines)
-        if not isinstance(result, str):
-            result = str(result)
-        if result.startswith("Error") or result.startswith("URL rechazada") or _is_no_info_response(result):
-            _web_debug(
-                "generic_fetch.fetch_bad_result",
-                url=candidate.get("url", ""),
-                result_preview=result[:300],
-            )
-            snippet_lines = _candidate_snippet_lines(candidate)
-            if not snippet_lines:
-                continue
-            result = "\n".join(snippet_lines)
-
-        body_lines = _extract_generic_content_lines(result, query_terms)
-        candidate_score = _score_generic_candidate(candidate, query_terms, query_source_group)
-        content_score = len(body_lines) * 2
-        if query_terms and not body_lines:
-            result_blob = result.lower()
-            if any(term in result_blob for term in query_terms):
-                content_score = 1
-        if not body_lines and content_score <= 1:
-            snippet_lines = _candidate_snippet_lines(candidate)
-            if snippet_lines:
-                body_lines = snippet_lines
-                content_score = 3
-            else:
-                continue
-
-        score = candidate_score + content_score
-        if score <= 0:
-            continue
-        if _is_recent_web_information_query(last_message):
-            if score < policy.min_score or len(body_lines) < policy.candidate_min_body_lines:
-                _web_debug(
-                    "generic_fetch.entry_rejected_recent_threshold",
-                    url=candidate.get("url", ""),
-                    score=score,
-                    min_score=policy.min_score,
-                    body_lines_count=len(body_lines),
-                    min_body_lines=policy.candidate_min_body_lines,
-                )
-                continue
-
-        fallback_lines = [line.strip() for line in result.splitlines() if line.strip() and not line.strip().lower().startswith(("url:", "sources:", "http")) and "http" not in line.lower()]
-        summary_lines = body_lines or _extract_generic_content_lines(search_text, query_terms) or fallback_lines[:5]
-        if len(summary_lines) < 3 and fallback_lines:
-            seen_lines = set(summary_lines)
-            for line in fallback_lines:
-                if line not in seen_lines:
-                    summary_lines.append(line)
-                    seen_lines.add(line)
-                if len(summary_lines) >= 6:
-                    break
-        sources = _extract_sources_from_text(result)
-        if not sources:
-            sources = [{"title": candidate.get("title") or candidate["url"], "url": candidate["url"]}]
-        if _is_recent_web_information_query(last_message) and len(sources) < policy.candidate_min_sources:
-            _web_debug(
-                "generic_fetch.entry_rejected_sources",
-                url=candidate.get("url", ""),
-                source_count=len(sources),
-                min_sources=policy.candidate_min_sources,
-            )
-            continue
-
-        eligible_entries.append({
-            "summary_lines": summary_lines[:10],
-            "sources": sources,
-            "score": score,
-            "candidate": candidate,
-        })
-
-    _web_debug(
-        "generic_fetch.eligible_entries",
-        eligible_count=len(eligible_entries),
-        urls=[entry["candidate"].get("url", "") for entry in eligible_entries],
-    )
-    return eligible_entries
+    return await _impl(ranked_candidates, last_message, ctx, policy, search_text)
 
 
 async def _run_week_search_pipeline(
@@ -2366,22 +1784,9 @@ async def _run_week_search_pipeline(
     ctx: QueryContext,
     web_search_runtime_args: Optional[dict[str, Any]],
 ) -> tuple[list[CandidateDict], str, Optional[dict[str, Any]]]:
-    """Returns (diverse_candidates, search_text, early_response). Caller returns early_response immediately if not None."""
-    diverse_candidates, search_text = await _run_week_search_candidates(
-        last_message, ctx.search_age_days, ctx.query_terms, ctx.query_source_group, web_search_runtime_args
-    )
-    local_source_strategy = _country_press_strategy_cache_get(ctx.query_source_group, ctx.source_terms)
-    _web_debug(
-        "generic_fetch.week_candidates",
-        query=last_message,
-        search_age_days=ctx.search_age_days,
-        candidate_count=len(diverse_candidates),
-        local_source_strategy=local_source_strategy,
-        urls=[c.get("url", "") for c in diverse_candidates],
-    )
-    if ctx.query_source_group and not diverse_candidates and local_source_strategy in {"cache", "directory", "policy", "lookup"}:
-        return [], search_text, _build_no_local_sources_response(last_message)
-    return diverse_candidates, search_text, None
+    from application.use_cases.web_scraping_search_pipeline import _run_week_search_pipeline as _impl
+
+    return await _impl(last_message, ctx, web_search_runtime_args)
 
 
 async def _run_general_search_pipeline(
@@ -2952,76 +2357,9 @@ async def _run_generic_web_search_fetch(
     last_message: str,
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    search_runtime = WebSearchRuntime()
-    fetch_runtime = WebFetchRuntime()
-    if detect_query_source_group(last_message) == "japan" and detect_recent_query_horizon(last_message) == "week":
-        from tools import search_web
-        query = last_message
-        search_text = search_web.invoke({"query": query, "use_cache": False, **(web_search_runtime_args or {}), "topic": "news", "time_range": "week"})
-        if not isinstance(search_text, str):
-            search_text = str(search_text)
-        candidates = _extract_generic_search_candidates(search_text)
-        if candidates:
-            lines = []
-            sources = []
-            seen_urls: set[str] = set()
-            for candidate in candidates[:3]:
-                title = candidate.get("title") or candidate.get("url") or ""
-                snippet = (candidate.get("snippet") or "").strip()
-                if title and snippet:
-                    lines.append(f"{title} — {snippet}")
-                url = candidate.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    sources.append({"title": title or url, "url": url})
-            if lines:
-                summary = _build_source_backed_response(lines, sources)
-                if sources and "Sources:" not in summary:
-                    summary = summary + "\n\nSources:\n" + "\n".join(f"- [{s['title']}]({s['url']})" for s in sources if s.get("url"))
-                return {"summary": summary, "words": summary.split(), "source_type": "search", "sources": sources, "pre_synthesized": True}
+    from application.use_cases.web_scraping_fetch_dispatch import _run_generic_web_search_fetch as _impl
 
-    if detect_query_source_group(last_message) == "japan" and detect_recent_query_horizon(last_message) == "week":
-        generic_strategy = GenericWebSearchStrategy(
-            search_runtime=search_runtime,
-            fetch_runtime=fetch_runtime,
-        )
-        result = await generic_strategy.execute(last_message, web_search_runtime_args)
-        if result is not None:
-            _web_debug(
-                "generic_fetch.strategy_selected",
-                strategy="generic_web_search",
-                query=last_message,
-                source_count=len(cast(list[dict[str, str]], result.get("sources") or [])),
-            )
-        return result
-
-    country_strategy = CountryRecentNewsStrategy(
-        search_runtime=search_runtime,
-        fetch_runtime=fetch_runtime,
-    )
-    local_result = await country_strategy.execute(last_message, web_search_runtime_args)
-    if local_result is not None:
-        _web_debug(
-            "generic_fetch.strategy_selected",
-            strategy="country_recent_news",
-            query=last_message,
-            source_count=len(cast(list[dict[str, str]], local_result.get("sources") or [])),
-        )
-        return local_result
-
-    generic_strategy = GenericWebSearchStrategy(
-        search_runtime=search_runtime,
-        fetch_runtime=fetch_runtime,
-    )
-    result = await generic_strategy.execute(last_message, web_search_runtime_args)
-    if result is not None:
-        _web_debug(
-            "generic_fetch.strategy_selected",
-            strategy="generic_web_search",
-            query=last_message,
-            source_count=len(cast(list[dict[str, str]], result.get("sources") or [])),
-        )
-    return result
+    return await _impl(last_message, web_search_runtime_args)
 
 
 
@@ -3032,97 +2370,9 @@ async def _synthesize_search_summary(
     sources: list[dict[str, str]],
     has_labeled_content: bool = False,
 ) -> str:
-    """Passes raw search content through LLM to produce a clean, structured response."""
-    try:
-        llm = get_llm_fn()
-        sources_block = _format_sources(sources)
-        clean_lines = []
-        for line in raw_summary.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped in ("...", "[...]"):
-                continue
-            # Markdown headers from raw scraped pages
-            if re.match(r"^#{1,3}\s", stripped):
-                continue
-            # Author bylines: "Name Name · date" or "Name Name - date"
-            if re.search(r"\w+\s+\w+\s+[·\-]\s+\d{1,2}\s+de\s+\w+", stripped):
-                continue
-            # Image slugs and filenames with timestamps
-            if re.match(r"^\d{8,14}[_\-]\w", stripped):
-                continue
-            # URL-path-like slugs without spaces
-            if re.match(r"^[\w\-]+(?:[_\-][\w\-]+){3,}$", stripped) and " " not in stripped:
-                continue
-            # Lines with heavily hyphenated words (image alt text artifacts)
-            if any(word.count("-") >= 3 for word in stripped.split()):
-                continue
-            clean_lines.append(stripped)
-        import datetime
-        today_str = datetime.date.today().strftime("%d de %B de %Y")
-        clean_content = "\n\n".join(clean_lines[:40])
-        query_terms_for_dedup = _extract_generic_query_terms(query)
-        query_horizon_local = detect_recent_query_horizon(query) if _is_recent_web_information_query(query) else None
-        # Cuando el contenido está en otro idioma, la instrucción de traducción debe
-        # ir al INICIO del prompt — si va enterrada en las reglas, el LLM la ignora.
-        translation_prefix = ""
-        if has_labeled_content:
-            translation_prefix = (
-                "⚠️ TRADUCCIÓN OBLIGATORIA: El contenido de abajo puede estar en otro idioma "
-                "(italiano, japonés, etc.). DEBES traducir TODO a español rioplatense. "
-                "NUNCA copies texto en otro idioma — siempre traducí.\n\n"
-            )
-        prompt = (
-            f"{translation_prefix}"
-            f"Fecha actual: {today_str}\n"
-            f"Consulta del usuario: {query}\n\n"
-            f"Información recopilada de la web:\n{clean_content}\n\n"
-            "Sintetizá una respuesta clara respondiendo ÚNICAMENTE con lo que está en el texto de arriba. "
-            "PROHIBIDO usar conocimiento propio o información que no esté en el texto provisto.\n\n"
-            "Reglas de contenido:\n"
-            "- IDIOMA: respondé siempre en el mismo idioma que la consulta del usuario\n"
-            "- IGNORÁ completamente: pie de fotos, descripciones de imágenes, nombres de personas sin contexto noticioso, títulos de anime/manga, fragmentos sin información útil\n"
-            "- PRIORIZÁ: artículos con hechos concretos, cifras, eventos, decisiones o noticias verificables\n"
-            "- Si el contenido disponible no responde bien la consulta, indicalo brevemente\n\n"
-            "Reglas de formato:\n"
-            "- Cada punto DEBE comenzar con '•' seguido de un espacio\n"
-            "- Cada artículo/fuente del texto = UN punto separado, pero TODOS deben responder al mismo tema solicitado.\n"
-            "  Ejemplo: si la consulta es seguridad japonesa, podés usar un artículo sobre misiles y otro sobre una embajada,\n"
-            "  pero no mezcles clima, deportes o política general.\n"
-            "- NUNCA combines dos artículos en un solo punto. Cada punto viene de UNA sola fuente y no debe repetir la misma noticia.\n"
-            "- Si un artículo tiene información irrelevante para la consulta (noticias de otro país, entretenimiento, deportes sin relación), omitilo.\n"
-            "- OBLIGATORIO: dejá UNA línea en blanco entre cada punto\n"
-            "- Cada punto tiene 2-3 oraciones con el hecho concreto, quiénes están involucrados y por qué importa\n"
-            "- NO uses títulos ni headers (##, ###) dentro de la respuesta\n"
-        )
-        if has_labeled_content:
-            # Contenido etiquetado [titulo]: snippet — el LLM puede atribuir por punto.
-            # No agregar sources_block al final: el LLM lo hace inline.
-            prompt += (
-                "- OBLIGATORIO: después del texto de cada punto, en una nueva línea escribí exactamente "
-                "'Fuente: [titulo]' usando el título entre corchetes del texto de arriba "
-                "(ej: '[La Repubblica]: ...' → 'Fuente: La Repubblica')\n"
-                "- NO incluyas una sección Sources al final"
-            )
-        else:
-            prompt += "- NO incluyas una sección Sources — se agrega automáticamente"
-        if query_horizon_local == "week":
-            cutoff = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%d/%m/%Y')
-            prompt += f"\n- Solo incluí eventos de los últimos 30 días (desde el {cutoff}). Descartá cualquier evento más antiguo aunque esté en el texto."
-        elif query_horizon_local:
-            prompt += f"\n- Solo incluí eventos ocurridos en los últimos 30 días. Descartá cualquier evento más antiguo."
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
-        synthesized = getattr(response, "content", str(response)).strip()
-        # Strip any LLM-generated Sources section (always unreliable) and replace with real one
-        synthesized = re.split(r"\n\s*sources\s*:", synthesized, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-        synthesized = _enforce_synthesis_format(synthesized)
-        synthesized = _dedup_synthesis_bullets(synthesized, query_terms_for_dedup)
-        if not has_labeled_content and sources_block:
-            synthesized = f"{synthesized}\n\n{sources_block}"
-        return synthesized
-    except Exception as _synth_exc:
-        import logging
-        logging.warning(f"_synthesize_search_summary FAILED: {type(_synth_exc).__name__}: {_synth_exc}")
-        return _enforce_synthesis_format(raw_summary)
+    from application.use_cases.web_scraping_synthesis import _synthesize_search_summary as _impl
+
+    return await _impl(raw_summary, query, get_llm_fn, sources, has_labeled_content)
 
 
 async def _guardrail_fast_result(
@@ -3543,17 +2793,36 @@ async def run_web_scraping_flow(
                 scrape_reliability=reliability, strategy="web_search_fetch",
                 source_type=source_type, category=category, **tokens, **_node_meta(),
             )
-            retry_summary, retry_words, retry_tokens, retry_quality = await _run_retry_agent(
-                agent, last_message, rid, get_llm_fn,
+            from application.use_cases.web_scraping_retry_helpers import handle_unreliable_retry
+
+            return await handle_unreliable_retry(
+                agent=agent,
+                last_message=last_message,
+                rid=rid,
+                get_llm_fn=get_llm_fn,
+                summary=summary,
+                words=cast(list[str], words),
+                tokens=cast(dict[str, Any], tokens),
+                quality=cast(dict[str, Any], quality),
+                tracker=tracker,
+                category=category,
+                turn_count=turn_count,
+                prior_reliability=prior_reliability,
+                prior_score=prior_score,
+                source_type=source_type,
+                t0=t0,
+                should_evaluate_guard_fn=should_evaluate_guard_fn,
+                evaluate_trajectory_safe_fn=evaluate_trajectory_safe_fn,
+                update_scrape_tracker_fn=_update_scrape_tracker,
+                get_category_score_fn=_get_category_score,
+                emit_node_outcome_fn=_emit_node_outcome,
+                extract_tokens_fn=_extract_tokens,
+                extract_quality_fn=_extract_quality,
+                extract_followup_fn=_extract_followup,
+                node_meta_fn=_node_meta,
+                guardrail_fast_result_fn=_guardrail_fast_result,
+                run_retry_agent_fn=_run_retry_agent,
             )
-            if retry_summary is not None:
-                summary = retry_summary
-                words = cast(list[str], retry_words or [])
-                tokens = cast(dict[str, Any], retry_tokens or {})
-                quality = cast(dict[str, Any], retry_quality or {})
-            retry_done = True
-            duration_ms = int((time.time() - t0) * 1000)
-            reliability = _scrape_reliability(len(words))
 
         cost_usd = tokens.get("estimated_cost_usd")
         new_tracker, analytics = cast(tuple[dict[str, Any], dict[str, Any]], _update_scrape_tracker(
