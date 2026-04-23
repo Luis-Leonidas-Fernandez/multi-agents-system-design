@@ -1,9 +1,9 @@
 """Fachada pública para descubrimiento de fuentes de prensa.
 
-Expone funciones de web_scraping_flow como API pública para que infra/
+Expone funciones de web_scraping_api como API pública para que infra/
 pueda importarlas sin acceder a privadas de un use_case directamente.
 """
-from application.use_cases.web_scraping_flow import (
+from application.use_cases.web_scraping_api import (
     _discover_country_press_sources as discover_country_press_sources,
     _discover_country_press_sources_via_directory as discover_country_press_sources_via_directory,
     _extract_country_press_sources as extract_country_press_sources,
