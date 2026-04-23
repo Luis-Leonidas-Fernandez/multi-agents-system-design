@@ -23,6 +23,7 @@ def test_web_scraping_api_barrel_exports_stable_symbols():
     assert callable(web_scraping_api.run_web_scraping_flow)
     assert callable(web_scraping_api._run_generic_web_search_fetch)
     assert hasattr(web_scraping_api, "GenericWebSearchStrategy")
+    assert hasattr(web_scraping_api, "CountryRecentNewsStrategy")
 
 
 @pytest.mark.asyncio

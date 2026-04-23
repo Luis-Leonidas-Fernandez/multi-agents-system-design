@@ -28,6 +28,7 @@ from ports.confirmation_port import ConfirmationPort
 from application.helpers.message_flow_helpers import extract_final_ai_text, get_last_message_text, is_web_information_query
 from application.helpers.trace_flow_helpers import get_or_create_request_id
 from application.services.prompt_loader import load_agent_prompt
+from application.services.web_runtime import WebFetchRequest
 from application.policies.security_flow import input_guard
 from application.policies.scrape_tracker import (
     _get_category_score,
@@ -1510,7 +1511,6 @@ async def run_web_scraping_flow(
         url_info = f" → URLs: {', '.join(explicit_urls)}" if explicit_urls else ""
         preview = last_message[:120] + ("..." if len(last_message) > 120 else "")
 
-        confirmed = True
         if confirmation_handler is not None:
             confirmed = await confirmation_handler.confirm(
                 f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
@@ -1519,6 +1519,14 @@ async def run_web_scraping_flow(
             confirmed = await ask_confirmation_compat(
                 f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
             )
+        else:
+            _emit_node_outcome(
+                rid, "web_scraping_node", "blocked", phase="pre_guard",
+                agent="web_scraping_agent",
+                duration_ms=int((time.time() - t0) * 1000),
+                reason="hitl_missing_confirmation_handler",
+            )
+            return {"messages": [AIMessage(content="Operación cancelada: falta un handler de confirmación.")]}
         if not confirmed:
             _emit_node_outcome(
                 rid, "web_scraping_node", "blocked", phase="pre_guard",
@@ -1551,6 +1559,9 @@ async def run_web_scraping_flow(
     try:
         if explicit_urls:
             fetch_prompt = last_message.strip() or "Extraé la información relevante de esta URL."
+            fetch_guard = input_guard({"messages": [HumanMessage(content=f"URL: {explicit_urls[0]}\n\nPrompt: {fetch_prompt}")]})
+            if isinstance(fetch_guard, dict) and fetch_guard.get("blocked"):
+                return fetch_guard
             fetch_result = await _fetch_web_page_follow_redirect(explicit_urls[0], fetch_prompt, use_dynamic=True)
             if isinstance(fetch_result, str) and not fetch_result.startswith("Error") and not fetch_result.startswith("URL rechazada"):
                 summary = fetch_result.strip()

@@ -110,6 +110,13 @@ def test_tools_package_imports():
     assert web_fetch is not None
 
 
+def test_web_scraping_barrel_imports():
+    from application.use_cases.web_scraping_api import run_web_scraping_flow, CountryRecentNewsStrategy
+
+    assert callable(run_web_scraping_flow)
+    assert CountryRecentNewsStrategy is not None
+
+
 def test_application_input_guard_use_case_imports():
     from application.use_cases.input_guard_flow import run_input_guard
     assert callable(run_input_guard)
