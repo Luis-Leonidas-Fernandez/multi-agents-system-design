@@ -55,6 +55,9 @@ async def _fetch_web_page_follow_redirect(url: str, prompt: str, *, use_dynamic:
 
     redirect_url = _extract_web_fetch_redirect_url(result)
     if redirect_url and redirect_url != url:
+        blocked = _check_fetch_input_guard(redirect_url, prompt)
+        if blocked:
+            return blocked
         redirected = await fetch_web_page(url=redirect_url, prompt=prompt, use_dynamic=use_dynamic)
         return redirected if isinstance(redirected, str) else str(redirected)
     return result

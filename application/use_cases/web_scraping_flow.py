@@ -27,6 +27,7 @@ from application.helpers.audit_flow_helpers import (
 from ports.confirmation_port import ConfirmationPort
 from application.helpers.message_flow_helpers import extract_final_ai_text, get_last_message_text, is_web_information_query
 from application.helpers.trace_flow_helpers import get_or_create_request_id
+from application.services.prompt_loader import load_agent_prompt
 from application.policies.security_flow import input_guard
 from application.policies.scrape_tracker import (
     _get_category_score,
@@ -1796,100 +1797,9 @@ async def _run_general_search_pipeline(
     loop: asyncio.AbstractEventLoop,
     web_search_runtime_args: Optional[dict[str, Any]],
 ) -> tuple[list[CandidateDict], str]:
-    from tools.search_tools import search_web
+    from application.use_cases.web_scraping_query_helpers import _run_general_search_pipeline as _impl
 
-    query_terms = ctx.query_terms
-    query_source_group = ctx.query_source_group
-    source_terms = ctx.source_terms
-    query_horizon = ctx.query_horizon
-    search_age_days = ctx.search_age_days
-
-    country_press_domains, country_press_names = await _discover_country_press_sources(
-        last_message,
-        query_source_group,
-        source_terms,
-        web_search_runtime_args,
-    )
-    search_invoke_args: dict = {"query": last_message, "use_cache": False, **(web_search_runtime_args or {})}
-    if search_age_days is not None:
-        search_invoke_args["max_age_days"] = search_age_days
-    if _is_recent_web_information_query(last_message):
-        search_invoke_args["topic"] = "news"
-        if query_horizon == "today":
-            search_invoke_args["time_range"] = "day"
-    if country_press_domains and not search_invoke_args.get("allowed_domains"):
-        search_invoke_args["allowed_domains"] = country_press_domains
-    if country_press_names:
-        search_invoke_args["query"] = f"{last_message} {' '.join(country_press_names[:4])}".strip()
-
-    search_text = await loop.run_in_executor(
-        None,
-        lambda: search_web.invoke(search_invoke_args),
-    )
-    if not isinstance(search_text, str):
-        search_text = str(search_text)
-
-    candidates = _extract_generic_search_candidates(search_text)
-    ranked_candidates = _rank_candidates_by_source_policy(
-        [
-            c for c in candidates
-            if not _is_non_news_candidate(c)
-            and not _is_invalid_news_candidate(c, last_message)
-        ],
-        query_terms,
-        query_source_group,
-    )[:8]
-
-    diverse_candidates = _dedup_candidates_by_event(ranked_candidates, query_terms)
-    _web_debug(
-        "generic_fetch.initial_search",
-        query=last_message,
-        invoke_args=search_invoke_args,
-        candidate_count=len(candidates),
-        ranked_candidate_count=len(ranked_candidates),
-        diverse_candidate_count=len(diverse_candidates),
-        search_preview=search_text[:500],
-    )
-
-    if len(diverse_candidates) < 3:
-        alt_invoke_args: dict = {"query": last_message + " últimas noticias recientes", "use_cache": False, **(web_search_runtime_args or {})}
-        if search_age_days is not None:
-            alt_invoke_args["max_age_days"] = search_age_days
-        if _is_recent_web_information_query(last_message):
-            alt_invoke_args["topic"] = "news"
-            if query_horizon == "today":
-                alt_invoke_args["time_range"] = "day"
-        if country_press_domains and not alt_invoke_args.get("allowed_domains"):
-            alt_invoke_args["allowed_domains"] = country_press_domains
-        if country_press_names:
-            alt_invoke_args["query"] = f"{last_message} últimas noticias recientes {' '.join(country_press_names[:4])}".strip()
-        alt_search_text = await loop.run_in_executor(
-            None,
-            lambda q=alt_invoke_args: search_web.invoke(q),
-        )
-        if not isinstance(alt_search_text, str):
-            alt_search_text = str(alt_search_text)
-        alt_candidates = [
-            c for c in _extract_generic_search_candidates(alt_search_text)
-            if not _is_non_news_candidate(c)
-            and not _is_invalid_news_candidate(c, last_message)
-        ]
-        for c in _rank_candidates_by_source_policy(alt_candidates, query_terms, query_source_group):
-            if len(diverse_candidates) >= 4:
-                break
-            if not any(_same_event(c, d, query_terms) for d in diverse_candidates):
-                diverse_candidates.append(c)
-        search_text = search_text + "\n" + alt_search_text
-        _web_debug(
-            "generic_fetch.alt_search",
-            query=alt_invoke_args["query"],
-            invoke_args=alt_invoke_args,
-            alt_candidate_count=len(alt_candidates),
-            diverse_candidate_count=len(diverse_candidates),
-            alt_preview=alt_search_text[:500],
-        )
-
-    return diverse_candidates, search_text
+    return await _impl(last_message, ctx, loop, web_search_runtime_args)
 
 
 async def _run_generic_web_search_strategy_impl(
@@ -2474,6 +2384,7 @@ async def run_web_scraping_flow(
             fetch_result = await _fetch_web_page_follow_redirect(explicit_urls[0], fetch_prompt, use_dynamic=True)
             if isinstance(fetch_result, str) and not fetch_result.startswith("Error") and not fetch_result.startswith("URL rechazada"):
                 summary = fetch_result.strip()
+                summary, _, _ = _finalize_web_user_summary(summary, last_message, None)
                 words = summary.split()
                 duration_ms = int((time.time() - t0) * 1000)
                 reliability = _scrape_reliability(len(words))
@@ -2662,21 +2573,10 @@ async def run_web_scraping_flow(
                 )
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="generic_web_info")
 
-        agent_hint = (
-            "[Sistema | web] Usa search_web para descubrir fuentes dinámicamente. "
-            "Si la consulta es de información reciente, incluí el año actual en la búsqueda. "
-            "Para noticias o información reciente, hacé varias búsquedas antes de responder; search_web puede usarse varias veces. "
-            "Después usa web_fetch sobre varias URLs relevantes, no solo la primera. "
-            "Si la consulta pide noticias o actualidad, reuní varias fuentes antes de responder. "
-            "Si una fuente mezcla temas, países o resultados no relacionados, recházala y vuelve a buscar. "
-            "Si web_fetch informa un redirect a otro host, repetí web_fetch con la URL de redirect. "
-            "No respondas hasta tener fuentes que apoyen directamente la afirmación; si aparece una noticia vieja, un evento futuro o una página evergreen, descartala. "
-            "Si la respuesta es de noticias o actualidad, desarrollala en 4 párrafos breves sobre el mismo tema solicitado, sin repetir noticias. "
-            "Tu respuesta final debe incluir un bloque Sources con enlaces markdown.\n\n"
-        )
+        agent_prompt = load_agent_prompt("web_scraping_agent")
         try:
             raw_result = await agent.ainvoke(
-                {"messages": [HumanMessage(content=agent_hint + last_message)]},
+                {"messages": [HumanMessage(content=f"{agent_prompt}\n\n{last_message}")]},
                 config=RunnableConfig(
                     tags=["web_scraping", "agent", "high_risk", "context_quarantine"],
                     metadata={
@@ -2870,4 +2770,4 @@ async def run_web_scraping_flow(
             followup_likely=True,
             **_node_meta(),
         )
-        raise
+        return {"messages": [AIMessage(content="No pude procesar la consulta de forma segura. Probá de nuevo en unos minutos.")]}
