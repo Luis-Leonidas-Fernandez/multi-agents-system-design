@@ -18,7 +18,7 @@ from application.use_cases.supervisor_chain import build_supervisor_chain
 from application.policies.web_source_policy import detect_recent_query_horizon
 from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard
 from domain.models import AgentState
-from application.policies.security_flow import input_guard
+from features.security.api import input_guard, run_input_guard, decide_after_guard
 
 # Maps coordinator agent names to their guardrail node names
 _AGENT_TO_GUARDRAIL_NODE: dict[str, str] = {
@@ -197,15 +197,11 @@ def _entry_node_name() -> str:
 
 async def input_guard_node(state: AgentState) -> dict[str, Any]:
     """Genera request_id del turno y aplica el middleware de seguridad."""
-    from application.use_cases.input_guard_flow import run_input_guard
-
     return await run_input_guard(state, input_guard, lambda: str(uuid.uuid4()))
 
 
 def route_after_guard(state: dict[str, Any]) -> str:
     """Usa state['blocked'] en lugar de comparar el contenido del mensaje."""
-    from application.use_cases.guard_decision import decide_after_guard
-
     decision = decide_after_guard(state)
     if decision == "__end__":
         return END

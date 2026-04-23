@@ -118,12 +118,12 @@ def test_web_scraping_barrel_imports():
 
 
 def test_application_input_guard_use_case_imports():
-    from application.use_cases.input_guard_flow import run_input_guard
+    from features.security.api import run_input_guard
     assert callable(run_input_guard)
 
 
 def test_application_finer_grained_use_case_imports():
-    from application.use_cases.guard_decision import decide_after_guard as decide_after_guard_direct
+    from features.security.api import decide_after_guard as decide_after_guard_direct
     from application.use_cases.routing_decision import decide_agent_route as decide_agent_route_direct
     from application.use_cases.supervisor_chain import build_supervisor_chain as build_supervisor_chain_direct
     from application.use_cases.supervisor_routing import run_supervisor_routing as run_supervisor_routing_direct
@@ -136,7 +136,7 @@ def test_application_finer_grained_use_case_imports():
 
 
 def test_application_security_use_case_imports():
-    from application.policies.security_flow import input_guard
+    from features.security.api import input_guard
     assert callable(input_guard)
 
 
@@ -148,7 +148,7 @@ def test_application_hitl_use_case_imports():
 
 
 def test_application_guard_use_case_imports():
-    from application.use_cases.guard_decision import decide_after_guard
+    from features.security.api import decide_after_guard
     assert callable(decide_after_guard)
 
 
