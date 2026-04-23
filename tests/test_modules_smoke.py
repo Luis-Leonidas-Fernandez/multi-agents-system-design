@@ -111,7 +111,7 @@ def test_tools_package_imports():
 
 
 def test_web_scraping_barrel_imports():
-    from application.use_cases.web_scraping_api import run_web_scraping_flow, CountryRecentNewsStrategy
+    from features.web_scraping.api import run_web_scraping_flow, CountryRecentNewsStrategy
 
     assert callable(run_web_scraping_flow)
     assert CountryRecentNewsStrategy is not None

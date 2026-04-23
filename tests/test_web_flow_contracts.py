@@ -18,7 +18,7 @@ def test_web_scraping_ownership_docs_exist():
 
 
 def test_web_scraping_api_barrel_exports_stable_symbols():
-    from application.use_cases import web_scraping_api
+    from features.web_scraping import api as web_scraping_api
 
     assert callable(web_scraping_api.run_web_scraping_flow)
     assert callable(web_scraping_api._run_generic_web_search_fetch)

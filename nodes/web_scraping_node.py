@@ -8,7 +8,7 @@ from typing import Callable, Awaitable, Any, cast
 
 from langchain_core.messages import AIMessage
 from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard
-from application.use_cases.web_scraping_api import run_web_scraping_flow
+from features.web_scraping.api import run_web_scraping_flow
 from ports.confirmation_port import ConfirmationPort
 from ports.llm_port import LLMFactory
 import application.policies.hitl_flow as hitl_flow
