@@ -6,17 +6,17 @@ from typing import Any, Mapping
 
 from langchain_core.messages import HumanMessage
 
-from application.helpers.url_helpers import _extract_web_fetch_redirect_url
+from core.helpers.url_helpers import _extract_web_fetch_redirect_url
 from application.policies.security_flow import input_guard
 from application.services.agent_registry import get_agent
-from application.services.background_tasks import BackgroundTaskService, background_task_service
-from domain.web_text_utils import _extract_urls_from_text
+from features.sessions.application.background_tasks import BackgroundTaskService, background_task_service
+from features.web_scraping.domain.text_utils import _extract_urls_from_text
 
 
 def _search_web_query(query: str) -> str:
-    from tools.search_tools import search_web
+    from features.web_scraping.infrastructure.search_tools import search_web
 
-    from application.helpers.config_flow_helpers import get_web_search_runtime_config
+    from core.helpers.config_flow_helpers import get_web_search_runtime_config
 
     runtime_cfg = get_web_search_runtime_config()
     runtime_args = {
@@ -27,7 +27,7 @@ def _search_web_query(query: str) -> str:
 
 
 async def _extract_url_query(url: str) -> dict[str, Any]:
-    from tools.scraping_tools import fetch_web_page
+    from features.web_scraping.infrastructure.scraping_tools import fetch_web_page
 
     result = await fetch_web_page(url=url, prompt="Extraé y resumí la información relevante de esta página web.", use_dynamic=True)
     if isinstance(result, str):

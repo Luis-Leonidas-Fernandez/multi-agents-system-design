@@ -31,7 +31,7 @@ def test_tool_impact_service_detecta_simbolos_reales_del_repo(tmp_path):
 
     (tmp_path / "application" / "services").mkdir(parents=True)
     (tmp_path / "application" / "services" / "runtime.py").write_text(
-        "from application.services.session_bookmarks import SessionBookmarkService\n\nclass AgentRuntime:\n    def create_bookmark(self):\n        return SessionBookmarkService()\n",
+        "from features.sessions.application.session_bookmarks import SessionBookmarkService\n\nclass AgentRuntime:\n    def create_bookmark(self):\n        return SessionBookmarkService()\n",
         encoding="utf-8",
     )
     (tmp_path / "application" / "services" / "session_bookmarks.py").write_text(
@@ -65,4 +65,4 @@ def test_tool_impact_service_para_web_json_capture_estima_artifacto(tmp_path):
 
     assert preview.discovery_basis in {"heuristic", "repo-aware"}
     assert preview.scope in {"network", "artifact-write"}
-    assert any("data_trading/" in file for file in preview.affected_files) or preview.affected_files == tuple()
+    assert any("data/web_scraping/data_trading/" in file for file in preview.affected_files) or preview.affected_files == tuple()

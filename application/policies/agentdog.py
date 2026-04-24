@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from langchain_core.messages import AIMessage, ToolMessage
 
-from application.helpers import audit_flow_helpers as audit_helpers
-from tools.crypto_price import CRYPTO_KEYWORDS
+from core.helpers import audit_flow_helpers as audit_helpers
+from features.price.api import CRYPTO_KEYWORDS
 
 _BTC_KEYWORDS: frozenset = frozenset({"bitcoin", "btc"})
 

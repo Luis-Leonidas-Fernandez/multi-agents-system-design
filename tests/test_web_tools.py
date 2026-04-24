@@ -3,7 +3,7 @@ Tests for search_web and scrape helpers in tools/web_tools.py.
 
 search_web now resolves providers through the registry and can fall back from a
 configured provider to the next available one when no explicit provider was selected.
-Mocks patch tools.search_tools.TavilyClient and requests.get so the underlying
+Mocks patch features.web_scraping.infrastructure.search_tools.TavilyClient and requests.get so the underlying
 network calls are controlled. Hits use provider format:
   {"title": "...", "url": "...", "content": "..."}
 """
@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.search_tools import _resolve_web_search_plan, search_web
-from tools.scraping_tools import scrape_website_simple
+from features.web_scraping.infrastructure.search_tools import _resolve_web_search_plan, search_web
+from features.web_scraping.infrastructure.scraping_tools import scrape_website_simple
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ def test_search_web_honors_explicit_tavily_provider(monkeypatch):
 
     hits = [_tavily_article("Explicit provider", "https://example.com/explicit", "Explicit content")]
 
-    with patch("tools.search_tools.TavilyClient", _make_tavily_client(hits)) as tavily_mock:
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", _make_tavily_client(hits)) as tavily_mock:
         result = search_web.invoke({"query": "explicit provider", "provider": "tavily", "use_cache": False})
 
     assert tavily_mock.return_value.search.call_count == 1
@@ -88,7 +88,7 @@ def test_search_web_honors_runtime_selected_provider_and_keeps_fallback(monkeypa
 
     hits = [_tavily_article("Runtime provider", "https://example.com/runtime", "Runtime content")]
 
-    with patch("tools.search_tools.TavilyClient", _make_tavily_client(hits)) as tavily_mock:
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", _make_tavily_client(hits)) as tavily_mock:
         result = search_web.invoke({
             "query": "runtime provider",
             "runtime_selected_provider": "tavily",
@@ -119,7 +119,7 @@ def test_resolve_web_search_plan_prefers_runtime_selected_provider(monkeypatch):
 
 
 def test_resolve_web_search_plan_precedence_chain(monkeypatch, tmp_path):
-    from application.helpers.config_flow_helpers import get_web_search_runtime_config
+    from core.helpers.config_flow_helpers import get_web_search_runtime_config
 
     config_path = tmp_path / "web-search.json"
     config_path.write_text("{\"provider_configured\": \"tavily\"}", encoding="utf-8")
@@ -174,7 +174,7 @@ def test_search_web_falls_back_to_searxng_when_tavily_fails(monkeypatch):
     searxng_results = [_searxng_article("SearXNG fallback", "https://example.org/searxng", "Fallback content")]
     searxng_response = _make_searxng_response(searxng_results)
 
-    with patch("tools.search_tools.TavilyClient", mock_cls) as tavily_cls, patch(
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", mock_cls) as tavily_cls, patch(
         "requests.get", return_value=searxng_response
     ) as searxng_get:
         result = search_web.invoke({"query": "fallback", "use_cache": False})
@@ -271,7 +271,7 @@ def test_search_web_tags_article_url_as_article(monkeypatch):
         "Tokio anuncia medidas de seguridad",
     )]
 
-    with patch("tools.search_tools.TavilyClient", _make_tavily_client(hits)):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", _make_tavily_client(hits)):
         result = search_web.invoke({"query": "japan security", "use_cache": False})
 
     assert "[article]" in result
@@ -287,7 +287,7 @@ def test_search_web_tags_hub_url_as_hub(monkeypatch):
         "Latest headlines",
     )]
 
-    with patch("tools.search_tools.TavilyClient", _make_tavily_client(hits)):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", _make_tavily_client(hits)):
         result = search_web.invoke({"query": "news today", "use_cache": False})
 
     assert "[hub]" in result
@@ -297,7 +297,7 @@ def test_search_web_includes_call_web_fetch_hint(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     hits = [_tavily_article("Some Article", "https://example.com/article-slug", "Content here")]
 
-    with patch("tools.search_tools.TavilyClient", _make_tavily_client(hits)):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", _make_tavily_client(hits)):
         result = search_web.invoke({"query": "something", "use_cache": False})
 
     assert "Call web_fetch" in result
@@ -306,7 +306,7 @@ def test_search_web_includes_call_web_fetch_hint(monkeypatch):
 def test_search_web_returns_no_results_when_empty(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
 
-    with patch("tools.search_tools.TavilyClient", _make_tavily_client([])):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", _make_tavily_client([])):
         result = search_web.invoke({"query": "something", "use_cache": False})
 
     assert "No results found" in result
@@ -318,7 +318,7 @@ def test_search_web_passes_blocked_domains_to_tavily(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     mock_cls = _make_tavily_client([])
 
-    with patch("tools.search_tools.TavilyClient", mock_cls):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", mock_cls):
         search_web.invoke({
             "query": "test",
             "blocked_domains": ["bad.example.com"],
@@ -333,7 +333,7 @@ def test_search_web_passes_allowed_domains_to_tavily(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     mock_cls = _make_tavily_client([])
 
-    with patch("tools.search_tools.TavilyClient", mock_cls):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", mock_cls):
         search_web.invoke({
             "query": "test",
             "allowed_domains": ["trusted.example.com"],
@@ -348,7 +348,7 @@ def test_search_web_passes_max_age_days_to_tavily(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     mock_cls = _make_tavily_client([])
 
-    with patch("tools.search_tools.TavilyClient", mock_cls):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", mock_cls):
         search_web.invoke({"query": "recent news", "max_age_days": 7, "use_cache": False})
 
     call_kwargs = mock_cls.return_value.search.call_args.kwargs
@@ -359,7 +359,7 @@ def test_search_web_omits_days_when_max_age_days_is_none(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     mock_cls = _make_tavily_client([])
 
-    with patch("tools.search_tools.TavilyClient", mock_cls):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", mock_cls):
         search_web.invoke({"query": "general query", "max_age_days": None, "use_cache": False})
 
     call_kwargs = mock_cls.return_value.search.call_args.kwargs
@@ -375,7 +375,7 @@ def test_search_web_caches_result_for_same_query(monkeypatch):
     mock_cls = _make_tavily_client(hits)
 
     cache_key_suffix = "caching_test_unique_xyz"
-    with patch("tools.search_tools.TavilyClient", mock_cls):
+    with patch("features.web_scraping.infrastructure.search_tools.TavilyClient", mock_cls):
         first = search_web.invoke({"query": cache_key_suffix, "use_cache": True})
         second = search_web.invoke({"query": cache_key_suffix, "use_cache": True})
 

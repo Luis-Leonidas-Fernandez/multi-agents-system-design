@@ -9,7 +9,7 @@ import pytest
 # ==================== analyze_data ====================
 
 def test_analyze_data_json_array_numerico():
-    from tools.data_tools import analyze_data
+    from features.analysis.api import analyze_data
     result = analyze_data.invoke({"data": "[10, 20, 30, 40, 50]"})
     assert "5 valores" in result
     assert "Media" in result
@@ -17,7 +17,7 @@ def test_analyze_data_json_array_numerico():
 
 
 def test_analyze_data_json_array_stats_correctas():
-    from tools.data_tools import analyze_data
+    from features.analysis.api import analyze_data
     result = analyze_data.invoke({"data": "[2, 4, 6, 8]"})
     assert "Mínimo" in result and "2" in result
     assert "Máximo" in result and "8" in result
@@ -25,7 +25,7 @@ def test_analyze_data_json_array_stats_correctas():
 
 
 def test_analyze_data_json_tabular():
-    from tools.data_tools import analyze_data
+    from features.analysis.api import analyze_data
     data = json.dumps([
         {"ventas": 100, "mes": "ene"},
         {"ventas": 200, "mes": "feb"},
@@ -38,7 +38,7 @@ def test_analyze_data_json_tabular():
 
 
 def test_analyze_data_csv():
-    from tools.data_tools import analyze_data
+    from features.analysis.api import analyze_data
     csv_data = "mes,ventas\nene,100\nfeb,200\nmar,150"
     result = analyze_data.invoke({"data": csv_data})
     assert "3 filas" in result
@@ -46,7 +46,7 @@ def test_analyze_data_csv():
 
 
 def test_analyze_data_fallback_texto():
-    from tools.data_tools import analyze_data
+    from features.analysis.api import analyze_data
     result = analyze_data.invoke({"data": "Tenemos datos de clientes de los últimos 3 meses"})
     assert "análisis" in result.lower() or "Datos recibidos" in result
     # No debe ser el stub hardcodeado original
@@ -54,7 +54,7 @@ def test_analyze_data_fallback_texto():
 
 
 def test_analyze_data_no_retorna_stub_hardcodeado():
-    from tools.data_tools import analyze_data
+    from features.analysis.api import analyze_data
     result = analyze_data.invoke({"data": "[1, 2, 3]"})
     assert "patrones interesantes" not in result
     assert "análisis estadístico adicional" not in result
@@ -63,7 +63,7 @@ def test_analyze_data_no_retorna_stub_hardcodeado():
 # ==================== write_code ====================
 
 def test_write_code_python_retorna_codigo_valido():
-    from tools.code_tools import write_code
+    from features.code.api import write_code
     result = write_code.invoke({"task": "calcular el factorial de un número", "language": "python"})
     assert "```python" in result
     assert "def " in result
@@ -71,33 +71,33 @@ def test_write_code_python_retorna_codigo_valido():
 
 
 def test_write_code_python_nombre_funcion_generado():
-    from tools.code_tools import write_code
+    from features.code.api import write_code
     result = write_code.invoke({"task": "ordenar una lista de enteros", "language": "python"})
     assert "def " in result
     assert "pass" not in result     # no debe ser el stub original vacío
 
 
 def test_write_code_python_docstring():
-    from tools.code_tools import write_code
+    from features.code.api import write_code
     result = write_code.invoke({"task": "verificar si un número es primo", "language": "python"})
     assert '"""' in result          # docstring presente
 
 
 def test_write_code_javascript():
-    from tools.code_tools import write_code
+    from features.code.api import write_code
     result = write_code.invoke({"task": "invertir una cadena", "language": "javascript"})
     assert "```javascript" in result
     assert "function" in result
 
 
 def test_write_code_typescript():
-    from tools.code_tools import write_code
+    from features.code.api import write_code
     result = write_code.invoke({"task": "parsear un JSON", "language": "typescript"})
     assert "```typescript" in result
 
 
 def test_write_code_no_retorna_stub_hardcodeado():
-    from tools.code_tools import write_code
+    from features.code.api import write_code
     result = write_code.invoke({"task": "mi tarea", "language": "python"})
     # No debe ser el template vacío original
     assert "# Tu código aquí" not in result
@@ -105,7 +105,7 @@ def test_write_code_no_retorna_stub_hardcodeado():
 
 
 def test_write_code_go():
-    from tools.code_tools import write_code
+    from features.code.api import write_code
     result = write_code.invoke({"task": "buscar elemento en slice", "language": "go"})
     assert "```go" in result
     assert "func" in result

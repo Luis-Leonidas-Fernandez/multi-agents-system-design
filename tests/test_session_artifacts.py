@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 
 def test_session_artifact_service_exporta_bundle(tmp_path):
-    from application.services.session_artifacts import SessionArtifactService, SessionArtifactStore
+    from features.sessions.application.session_artifacts import SessionArtifactService, SessionArtifactStore
 
     persistence_backend = MagicMock()
     persistence_backend.load_messages.return_value = [
@@ -27,7 +27,7 @@ def test_session_artifact_service_exporta_bundle(tmp_path):
     background_task_backend.load_session_tasks.return_value = [
         {"task_id": "task-1", "status": "completed"},
     ]
-    from application.services.background_tasks import BackgroundTaskSummary
+    from features.sessions.application.background_tasks import BackgroundTaskSummary
 
     background_task_backend.describe_session.return_value = BackgroundTaskSummary(
         session_id="sess-1",
@@ -53,7 +53,7 @@ def test_session_artifact_service_exporta_bundle(tmp_path):
     prompt_version_backend.snapshot_path.return_value = tmp_path / "prompts" / "math_agent" / "PROMPT_SNAPSHOT.json"
     prompt_version_backend.history_path.return_value = tmp_path / "prompts" / "math_agent" / "PROMPT_HISTORY.jsonl"
 
-    from application.services.context_budget import ContextBudgetItem, SessionContextBudget
+    from features.sessions.application.context_budget import ContextBudgetItem, SessionContextBudget
 
     context_budget_backend = MagicMock()
     context_budget_backend.build_report.return_value = SessionContextBudget(
@@ -108,7 +108,7 @@ def test_session_artifact_service_exporta_bundle(tmp_path):
 
 
 def test_session_artifact_store_lista_y_carga(tmp_path):
-    from application.services.session_artifacts import SessionArtifact, SessionArtifactStore
+    from features.sessions.application.session_artifacts import SessionArtifact, SessionArtifactStore
 
     store = SessionArtifactStore(base_dir=tmp_path)
     artifact = SessionArtifact(
@@ -168,11 +168,11 @@ def test_runtime_session_artifact_path_delega_en_servicio():
 
     runtime = AgentRuntime(gateway=MagicMock())
     runtime._artifacts = MagicMock()  # type: ignore[attr-defined]
-    runtime._artifacts.artifact_path.return_value = "sessions/sess-5/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
+    runtime._artifacts.artifact_path.return_value = "data/sessions/sess-5/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
 
     result = runtime.session_artifact_path("sess-5")
 
-    assert result == "sessions/sess-5/SESSION_ARTIFACT.json"
+    assert result == "data/sessions/sess-5/SESSION_ARTIFACT.json"
     runtime._artifacts.artifact_path.assert_called_once_with("sess-5")  # type: ignore[attr-defined]
 
 
@@ -181,10 +181,10 @@ def test_session_lifecycle_artifact_path_delega_en_runtime():
 
     runtime = AgentRuntime(gateway=MagicMock())
     runtime._artifacts = MagicMock()  # type: ignore[attr-defined]
-    runtime._artifacts.artifact_path.return_value = "sessions/sess-6/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
+    runtime._artifacts.artifact_path.return_value = "data/sessions/sess-6/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
 
     lifecycle = SessionLifecycle(runtime=runtime, session_id="sess-6")
     result = lifecycle.artifact_path()
 
-    assert result == "sessions/sess-6/SESSION_ARTIFACT.json"
+    assert result == "data/sessions/sess-6/SESSION_ARTIFACT.json"
     runtime._artifacts.artifact_path.assert_called_once_with("sess-6")  # type: ignore[attr-defined]

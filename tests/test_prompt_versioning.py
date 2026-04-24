@@ -2,7 +2,7 @@
 
 
 def test_prompt_version_service_calcula_hash_estable():
-    from application.services.prompt_versioning import PromptVersionService
+    from features.sessions.application.prompt_versioning import PromptVersionService
 
     service = PromptVersionService()
     snapshot_a = service.build_snapshot("math_agent", "system prompt", "extra")
@@ -13,7 +13,7 @@ def test_prompt_version_service_calcula_hash_estable():
 
 
 def test_prompt_version_store_persiste_historial(tmp_path):
-    from application.services.prompt_versioning import PromptSnapshotStore, PromptVersionService
+    from features.sessions.application.prompt_versioning import PromptSnapshotStore, PromptVersionService
 
     store = PromptSnapshotStore(base_dir=tmp_path)
     service = PromptVersionService(store=store)
@@ -32,7 +32,7 @@ def test_prompt_version_store_persiste_historial(tmp_path):
 
 
 def test_session_inspection_format_prompt_snapshot():
-    from application.services.session_inspection import format_prompt_snapshot, format_prompt_snapshot_list
+    from features.sessions.application.session_inspection import format_prompt_snapshot, format_prompt_snapshot_list
 
     lines = format_prompt_snapshot(
         {
@@ -52,7 +52,7 @@ def test_session_inspection_format_prompt_snapshot():
 
 
 def test_session_inspection_format_prompt_snapshot_incluye_paths():
-    from application.services.session_inspection import format_prompt_snapshot
+    from features.sessions.application.session_inspection import format_prompt_snapshot
 
     lines = format_prompt_snapshot(
         {
@@ -62,8 +62,8 @@ def test_session_inspection_format_prompt_snapshot_incluye_paths():
             "created_at_ms": 1,
             "extra_context": "x",
             "system_prompt": "y",
-            "snapshot_path": "prompts/math_agent/PROMPT_SNAPSHOT.json",
-            "history_path": "prompts/math_agent/PROMPT_HISTORY.jsonl",
+            "snapshot_path": "agents/prompts/math_agent/PROMPT_SNAPSHOT.json",
+            "history_path": "agents/prompts/math_agent/PROMPT_HISTORY.jsonl",
         }
     )
 
@@ -72,7 +72,7 @@ def test_session_inspection_format_prompt_snapshot_incluye_paths():
 
 
 def test_prompt_version_service_expone_rutas(tmp_path):
-    from application.services.prompt_versioning import PromptSnapshotStore, PromptVersionService
+    from features.sessions.application.prompt_versioning import PromptSnapshotStore, PromptVersionService
 
     service = PromptVersionService(store=PromptSnapshotStore(base_dir=tmp_path))
 

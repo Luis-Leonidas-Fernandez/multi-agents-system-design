@@ -16,8 +16,9 @@ env/
 
 # Data & logs
 data_trading/
-logs/
-sessions/
+data/logs/
+data/sessions/
+data/web_scraping/data_trading/
 
 # OS
 .DS_Store

@@ -135,7 +135,7 @@ def test_detect_recent_query_horizon_supports_month_queries() -> None:
 
 
 def test_topic_landings_are_treated_as_hubs_for_recent_news() -> None:
-    from application.use_cases.web_scraping_flow import _is_hub_like_candidate, _is_invalid_news_candidate
+    from features.web_scraping.application.flow import _is_hub_like_candidate, _is_invalid_news_candidate
 
     candidate = {
         "title": "Ultima Ora, notizie in tempo reale - Il Messaggero",
@@ -154,7 +154,7 @@ def test_topic_landings_are_treated_as_hubs_for_recent_news() -> None:
 
 @pytest.mark.asyncio
 async def test_country_press_discovery_is_cached_per_country() -> None:
-    from application.use_cases import web_scraping_api as web_scraping_flow
+    from features.web_scraping import api as web_scraping_flow
 
     web_scraping_flow._COUNTRY_PRESS_CACHE.clear()
     lookup_calls: list[dict[str, object]] = []
@@ -178,8 +178,8 @@ async def test_country_press_discovery_is_cached_per_country() -> None:
         )
 
     with (
-        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
-        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=fake_invoke),
+        patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         first = await web_scraping_flow._discover_country_press_sources(
             "seguridad en japon",
@@ -198,8 +198,8 @@ async def test_country_press_discovery_is_cached_per_country() -> None:
 
 @pytest.mark.asyncio
 async def test_country_recent_news_strategy_prioritizes_section_hits() -> None:
-    from application.use_cases.web_scraping_api import CountryRecentNewsStrategy
-    from application.services.web_runtime import WebFetchRuntime, WebSearchRuntime
+    from features.web_scraping.api import CountryRecentNewsStrategy
+    from features.web_scraping.infrastructure.runtime import WebFetchRuntime, WebSearchRuntime
 
     fetch_runtime = WebFetchRuntime()
     fetch_runtime.fetch = AsyncMock(return_value=type("FetchResponse", (), {
@@ -218,12 +218,12 @@ async def test_country_recent_news_strategy_prioritizes_section_hits() -> None:
 
     with (
         patch("application.services.press_discovery.discover_country_press_sources", new=AsyncMock(return_value=(["huffingtonpost.it"], ["HuffPost Italia"]))),
-        patch("application.use_cases.web_scraping_flow._country_press_source_cache_get", return_value=[{"title": "HuffPost Italia", "url": "https://www.huffingtonpost.it/"}]),
-        patch("application.use_cases.web_scraping_flow._country_press_strategy_cache_get", return_value="bootstrap"),
-        patch("application.use_cases.web_scraping_flow._is_press_source_relevant_for_query", return_value=True),
-        patch("application.use_cases.web_scraping_flow._build_country_press_section_targets", return_value=[("https://www.huffingtonpost.it/news/cronaca/", "cronaca")]),
-        patch("application.use_cases.web_scraping_flow._detect_news_topic", return_value=None),
-        patch("application.use_cases.web_scraping_flow.get_group_language", return_value="es"),
+        patch("features.web_scraping.application.flow._country_press_source_cache_get", return_value=[{"title": "HuffPost Italia", "url": "https://www.huffingtonpost.it/"}]),
+        patch("features.web_scraping.application.flow._country_press_strategy_cache_get", return_value="bootstrap"),
+        patch("features.web_scraping.application.flow._is_press_source_relevant_for_query", return_value=True),
+        patch("features.web_scraping.application.flow._build_country_press_section_targets", return_value=[("https://www.huffingtonpost.it/news/cronaca/", "cronaca")]),
+        patch("features.web_scraping.application.flow._detect_news_topic", return_value=None),
+        patch("features.web_scraping.application.flow.get_group_language", return_value="es"),
     ):
         result = await strategy.execute("dame las ultimas noticias sobre seguridad en italia de esta semana", {})
 
@@ -235,7 +235,7 @@ async def test_country_recent_news_strategy_prioritizes_section_hits() -> None:
 
 @pytest.mark.asyncio
 async def test_country_press_discovery_falls_back_to_homepage_when_lookup_fails() -> None:
-    from application.use_cases import web_scraping_api as web_scraping_flow
+    from features.web_scraping import api as web_scraping_flow
 
     web_scraping_flow._COUNTRY_PRESS_CACHE.clear()
 
@@ -253,8 +253,8 @@ async def test_country_press_discovery_falls_back_to_homepage_when_lookup_fails(
         raise AssertionError(f"Unexpected URL: {url}")
 
     with (
-        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
-        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=fake_invoke),
+        patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         domains, titles = await web_scraping_flow._discover_country_press_sources(
             "dame las ultimas noticias sobre seguridad en italia de esta semana",
@@ -270,7 +270,7 @@ async def test_country_press_discovery_falls_back_to_homepage_when_lookup_fails(
 
 @pytest.mark.asyncio
 async def test_country_press_search_candidates_falls_back_to_source_homepage_when_search_fails() -> None:
-    from application.use_cases.web_scraping_api import _run_country_press_search_candidates
+    from features.web_scraping.api import _run_country_press_search_candidates
 
     async def fake_discover(*args, **kwargs):
         return (["ansa.it"], ["ANSA"])
@@ -289,9 +289,9 @@ async def test_country_press_search_candidates_falls_back_to_source_homepage_whe
         raise AssertionError(f"Unexpected URL: {url}")
 
     with (
-        patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=fake_discover)),
-        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
-        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("features.web_scraping.application.flow._discover_country_press_sources", new=AsyncMock(side_effect=fake_discover)),
+        patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=fake_invoke),
+        patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         candidates, search_text = await _run_country_press_search_candidates(
             "dame las ultimas noticias sobre seguridad en italia de esta semana",
@@ -308,7 +308,7 @@ async def test_country_press_search_candidates_falls_back_to_source_homepage_whe
 
 @pytest.mark.asyncio
 async def test_country_press_search_candidates_queries_each_diary() -> None:
-    from application.use_cases.web_scraping_api import _run_country_press_search_candidates
+    from features.web_scraping.api import _run_country_press_search_candidates
 
     call_payloads: list[dict[str, object]] = []
 
@@ -335,8 +335,8 @@ async def test_country_press_search_candidates_queries_each_diary() -> None:
         )
 
     with (
-        patch("application.use_cases.web_scraping_flow._discover_country_press_sources", new=AsyncMock(side_effect=fake_discover)),
-        patch("tools.search_tools.search_web.func", side_effect=fake_invoke),
+        patch("features.web_scraping.application.flow._discover_country_press_sources", new=AsyncMock(side_effect=fake_discover)),
+        patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=fake_invoke),
     ):
         candidates, search_text = await _run_country_press_search_candidates(
             "dame las ultimas noticias sobre seguridad en italia de esta semana",
@@ -377,7 +377,7 @@ async def test_country_press_search_candidates_queries_each_diary() -> None:
     ],
 )
 async def test_run_generic_web_search_fetch_prefers_local_country_sources_before_global(query: str, local_url: str, trusted_url: str) -> None:
-    from application.use_cases.web_scraping_api import _run_generic_web_search_fetch
+    from features.web_scraping.api import _run_generic_web_search_fetch
 
     lookup_text = (
         f'Web search results for query: "periodicos {query}"\n\n'
@@ -424,8 +424,8 @@ async def test_run_generic_web_search_fetch_prefers_local_country_sources_before
         )
 
     with (
-        patch("tools.search_tools.search_web.func", side_effect=[lookup_text, search_text, search_text_alt]),
-        patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
+        patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=[lookup_text, search_text, search_text_alt]),
+        patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", new=AsyncMock(side_effect=fake_fetch)),
     ):
         result = await _run_generic_web_search_fetch(query)
 

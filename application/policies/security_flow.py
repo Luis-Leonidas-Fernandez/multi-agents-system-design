@@ -4,8 +4,8 @@ from typing import Optional
 
 from langchain_core.messages import AIMessage
 
-from application.helpers.audit_flow_helpers import _emit_guard_audit
-from application.helpers.security_flow_helpers import (
+from core.helpers.audit_flow_helpers import _emit_guard_audit
+from core.helpers.security_flow_helpers import (
     _extract_msg_text,
     _check_patterns,
     get_blocked_patterns,

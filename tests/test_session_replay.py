@@ -13,7 +13,7 @@ def _handle_inspection_command(user_input, lifecycle, runtime=None):
 
 
 def test_session_replay_service_combina_eventos_en_secciones(monkeypatch):
-    from application.services.session_replay import SessionReplayService
+    from features.sessions.application.session_replay import SessionReplayService
 
     artifact = SimpleNamespace(
         session_id="sess-1",
@@ -32,7 +32,7 @@ def test_session_replay_service_combina_eventos_en_secciones(monkeypatch):
         ],
         background_tasks=[{"task_id": "task-1", "status": "completed", "attempt_number": 1, "title": "hacer algo"}],
         background_task_summary={"total": 1},
-        prompt_snapshots=[{"agent_name": "math_agent", "prompt_version": "v1", "prompt_hash": "abc", "snapshot_path": "prompts/math_agent/PROMPT_SNAPSHOT.json"}],
+        prompt_snapshots=[{"agent_name": "math_agent", "prompt_version": "v1", "prompt_hash": "abc", "snapshot_path": "agents/prompts/math_agent/PROMPT_SNAPSHOT.json"}],
         trace_ids=["trace-1"],
     )
 
@@ -52,8 +52,8 @@ def test_session_replay_service_combina_eventos_en_secciones(monkeypatch):
 
 
 def test_format_session_replay_muestra_timeline():
-    from application.services.session_replay import ReplayTimelineItem, SessionReplay
-    from application.services.session_inspection import format_replay_timeline
+    from features.sessions.application.session_replay import ReplayTimelineItem, SessionReplay
+    from features.sessions.application.session_inspection import format_replay_timeline
 
     replay = SessionReplay(
         session_id="sess-2",

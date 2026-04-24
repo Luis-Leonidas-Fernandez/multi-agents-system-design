@@ -2,7 +2,7 @@
 
 
 def test_should_route_to_web_scraping_para_btc_y_web_info():
-    from application.use_cases.supervisor_shortcuts import should_route_to_web_scraping
+    from features.supervisor.api import should_route_to_web_scraping
 
     assert should_route_to_web_scraping("dame el precio actual de bitcoin") is True
     assert should_route_to_web_scraping("buscame esto en internet") is True

@@ -104,14 +104,14 @@ def _load_runtime_policy() -> dict:
     Busca en:
     1. POLICY_CONFIG env var (path explícito)
     2. ./policy.json (directorio de trabajo)
-    3. ./logs/policy.json (junto al audit log)
+    3. ./config/policy.json (junto a la config)
 
     Retorna {} si no existe — cae al comportamiento heurístico habitual.
     """
     candidates = [
         os.getenv("POLICY_CONFIG", ""),
         "policy.json",
-        "logs/policy.json",
+        "config/policy.json",
     ]
     for path in candidates:
         if not path:

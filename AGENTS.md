@@ -2,7 +2,7 @@
 
 ## Security
 
-- `eval()` is only allowed in `tools/math_tools.py:calculate()` within the math namespace (`safe_dict` with `"__builtins__": {}`). Any other use of `eval()` or `exec()` must be flagged as critical.
+- `eval()` is only allowed in `features/math/application/api.py:calculate()` within the math namespace (`safe_dict` with `"__builtins__": {}`). Any other use of `eval()` or `exec()` must be flagged as critical.
 - The `input_guard` middleware (defined in `application/policies/security_flow.py`, wired as the graph entry point in `application/composition/graph.py`) must always run before any LLM call. Changes that bypass or reorder this step must be rejected.
 - No API keys, tokens, or secrets may be hardcoded. All must come from `os.getenv()` or `.env` via `dotenv`.
 - URL and domain validation for web scraping tools must remain in place. Additions to `allowed_domains` require justification.
@@ -33,7 +33,7 @@
 
 - Raw HTML from web scraping must never be written directly to shared `AgentState`. Only the ≤200-word summary from the sub-agent may reach shared state.
 - `scrape_website_dynamic` must use the sync Playwright API (`sync_playwright`). Async Playwright is reserved for `scrape_website_with_json_capture` only.
-- JSON bundles saved to `data_trading/` must follow the `{slug}_{sha256_10}_{unix_ts}.json` naming convention.
+- JSON bundles saved to `data/web_scraping/data_trading/` must follow the `{slug}_{sha256_10}_{unix_ts}.json` naming convention.
 - The in-memory scrape cache (`_SCRAPE_CACHE`) TTL is 60 seconds. Do not increase it without considering stale price data risk.
 
 ## Async Patterns
@@ -43,9 +43,9 @@
 
 ## Persistence & Sessions
 
-- SQLite is the default backend (`USE_SQLITE=true`). Changes to session schema in `infra/persistence.py` must include a migration path for the existing `sessions.db`.
+- SQLite is the default backend (`USE_SQLITE=true`). Changes to session schema in `features/sessions/infrastructure/persistence.py` must include a migration path for the existing `sessions.db`.
 - The JSONL legacy fallback (`USE_SQLITE=false`) must remain functional and not be silently broken by schema changes.
-- Memory distillation (`infra/memory.py:distill_memory()`) writes to `sessions/{id}/MEMORY.md`. This file is injected as `SystemMessage` on session start — its format must remain stable.
+- Memory distillation (`features/sessions/infrastructure/memory.py:distill_memory()`) writes to `data/sessions/{id}/MEMORY.md`. This file is injected as `SystemMessage` on session start — its format must remain stable.
 
 ## LLM Provider / Config
 

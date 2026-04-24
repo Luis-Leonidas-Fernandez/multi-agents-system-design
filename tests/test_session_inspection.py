@@ -13,7 +13,7 @@ def _handle_inspection_command(user_input, lifecycle, runtime=None):
 
 
 def test_format_background_task_summary_muestra_resumen():
-    from application.services.session_inspection import format_background_task_summary
+    from features.sessions.application.session_inspection import format_background_task_summary
 
     lines = format_background_task_summary(
         {
@@ -38,7 +38,7 @@ def test_format_background_task_summary_muestra_resumen():
 
 
 def test_format_background_task_state_muestra_error_y_resultado():
-    from application.services.session_inspection import format_background_task_state
+    from features.sessions.application.session_inspection import format_background_task_state
 
     lines = format_background_task_state(
         {
@@ -64,7 +64,7 @@ def test_format_background_task_state_muestra_error_y_resultado():
 
 
 def test_format_session_artifact_muestra_artefacto_consolidado():
-    from application.services.session_inspection import format_session_artifact
+    from features.sessions.application.session_inspection import format_session_artifact
 
     lines = format_session_artifact(
         {
@@ -90,7 +90,7 @@ def test_format_session_artifact_muestra_artefacto_consolidado():
 
 
 def test_format_context_budget_muestra_incluido_resumido_y_afuera():
-    from application.services.session_inspection import format_context_budget
+    from features.sessions.application.session_inspection import format_context_budget
 
     lines = format_context_budget(
         {
@@ -119,7 +119,7 @@ def test_format_context_budget_muestra_incluido_resumido_y_afuera():
 
 
 def test_format_session_banner_muestra_contexto_y_atajos():
-    from application.services.session_inspection import format_session_banner
+    from features.sessions.application.session_inspection import format_session_banner
 
     lines = format_session_banner(
         {"session_id": "sess-ui", "message_count": 9, "has_memory": True},
@@ -132,7 +132,7 @@ def test_format_session_banner_muestra_contexto_y_atajos():
 
 
 def test_format_cli_chrome_muestra_estado_y_agentes():
-    from application.services.session_inspection import format_cli_chrome
+    from features.sessions.application.session_inspection import format_cli_chrome
 
     lines = format_cli_chrome(
         {"session_id": "sess-ui", "message_count": 3, "has_memory": False},
@@ -146,7 +146,7 @@ def test_format_cli_chrome_muestra_estado_y_agentes():
 
 
 def test_format_session_selector_y_chat_block():
-    from application.services.session_inspection import format_chat_block, format_session_selector, format_session_transcript, format_shell_frame
+    from features.sessions.application.session_inspection import format_chat_block, format_session_selector, format_session_transcript, format_shell_frame
 
     selector = format_session_selector(["sess-a", "sess-b"])
     chat = format_chat_block("user", "hola\nsegundo renglón")
@@ -175,7 +175,7 @@ def test_format_session_selector_y_chat_block():
 
 
 def test_format_bookmark_list_y_detail():
-    from application.services.session_inspection import format_bookmark_detail, format_bookmark_list
+    from features.sessions.application.session_inspection import format_bookmark_detail, format_bookmark_list
 
     list_lines = format_bookmark_list([
         {"checkpoint_id": "chk-1", "label": "base", "message_count": 2, "has_memory": True}
@@ -189,7 +189,7 @@ def test_format_bookmark_list_y_detail():
             "message_count": 2,
             "has_memory": True,
             "replay_item_count": 7,
-            "artifact_path": "sessions/sess-1/SESSION_ARTIFACT.json",
+            "artifact_path": "data/sessions/sess-1/SESSION_ARTIFACT.json",
             "context_budget": {"report": {"scope": "session", "status": "ok", "estimated_context_chars": 10, "estimated_remaining_chars": 90}},
             "prompt_agents": ["math_agent"],
         }
@@ -202,7 +202,7 @@ def test_format_bookmark_list_y_detail():
 
 def test_format_command_registry_y_detail():
     from application.services.command_registry import SlashCommandSpec
-    from application.services.session_inspection import format_command_detail, format_command_registry
+    from features.sessions.application.session_inspection import format_command_detail, format_command_registry
 
     registry_lines = format_command_registry({"general": [SlashCommandSpec(name="help", summary="muestra ayuda", usage="/help", group="general", aliases=("?",))]})
     detail_lines = format_command_detail({"name": "help", "group": "general", "usage": "/help", "summary": "muestra ayuda", "aliases": ["?"]})
@@ -256,7 +256,7 @@ def test_handle_inspection_command_reconoce_inspect(capsys):
         describe_background_task=lambda task_id: {"task_id": task_id},
         list_bookmarks=lambda: [],
         describe_bookmark=lambda checkpoint_id: None,
-        create_bookmark=lambda label=None, note="": {"checkpoint_id": "chk-1", "label": label or "checkpoint-1", "session_id": "sess-1", "created_at_ms": 1, "message_count": 1, "has_memory": False, "replay_item_count": 1, "artifact_path": "sessions/sess-1/SESSION_ARTIFACT.json", "context_budget": {"report": {"scope": "session", "status": "ok", "estimated_context_chars": 10, "estimated_remaining_chars": 90}}, "prompt_agents": []},
+        create_bookmark=lambda label=None, note="": {"checkpoint_id": "chk-1", "label": label or "checkpoint-1", "session_id": "sess-1", "created_at_ms": 1, "message_count": 1, "has_memory": False, "replay_item_count": 1, "artifact_path": "data/sessions/sess-1/SESSION_ARTIFACT.json", "context_budget": {"report": {"scope": "session", "status": "ok", "estimated_context_chars": 10, "estimated_remaining_chars": 90}}, "prompt_agents": []},
     )
 
     handled = _handle_inspection_command("/inspect", lifecycle, runtime=runtime)
@@ -340,7 +340,7 @@ def test_handle_inspection_command_muestra_ruta_de_artifact(capsys):
 
     runtime = AgentRuntime(gateway=MagicMock())
     runtime._artifacts = MagicMock()  # type: ignore[attr-defined]
-    runtime._artifacts.artifact_path.return_value = "sessions/sess-9/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
+    runtime._artifacts.artifact_path.return_value = "data/sessions/sess-9/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
     lifecycle = SimpleNamespace(
         session_id="sess-9",
         context_budget=lambda agent_name=None: {"session_id": "sess-9", "scope": agent_name or "session", "status": "ok", "budget_chars": 1000, "estimated_context_chars": 100, "estimated_remaining_chars": 900, "estimated_tokens": 25, "transcript_message_count": 1, "memory_present": False, "items": []},
@@ -348,7 +348,7 @@ def test_handle_inspection_command_muestra_ruta_de_artifact(capsys):
         export_artifact=lambda: {"session_id": "sess-9", "message_count": 0, "has_memory": False, "audit_events": [], "background_tasks": [], "prompt_snapshots": [], "trace_ids": [], "background_task_summary": {}},
         list_background_tasks=lambda: [],
         describe_background_task=lambda task_id: None,
-        artifact_path=lambda: "sessions/sess-9/SESSION_ARTIFACT.json",
+        artifact_path=lambda: "data/sessions/sess-9/SESSION_ARTIFACT.json",
         list_bookmarks=lambda: [],
         describe_bookmark=lambda checkpoint_id: None,
     )
@@ -396,7 +396,7 @@ def test_handle_inspection_command_cancela_task(monkeypatch, capsys):
         list_background_tasks=lambda: [],
         list_retryable_background_tasks=lambda: [],
         describe_background_task=lambda task_id: None,
-        artifact_path=lambda: "sessions/sess-10/SESSION_ARTIFACT.json",
+        artifact_path=lambda: "data/sessions/sess-10/SESSION_ARTIFACT.json",
         list_bookmarks=lambda: [],
         describe_bookmark=lambda checkpoint_id: None,
         cancel_background_task=cancel_background_task,
@@ -422,7 +422,7 @@ def test_handle_inspection_command_lista_retryables(capsys):
         list_background_tasks=lambda: [],
         list_retryable_background_tasks=lambda: [{"task_id": "task-1", "status": "failed", "attempt_number": 1, "title": "algo"}],
         describe_background_task=lambda task_id: None,
-        artifact_path=lambda: "sessions/sess-11/SESSION_ARTIFACT.json",
+        artifact_path=lambda: "data/sessions/sess-11/SESSION_ARTIFACT.json",
         cancel_background_task=lambda *args, **kwargs: None,
         list_bookmarks=lambda: [],
         describe_bookmark=lambda checkpoint_id: None,
@@ -448,10 +448,10 @@ def test_handle_inspection_command_context_y_bookmark(capsys):
         list_background_tasks=lambda: [],
         list_retryable_background_tasks=lambda: [],
         describe_background_task=lambda task_id: None,
-        artifact_path=lambda: "sessions/sess-ctx/SESSION_ARTIFACT.json",
+        artifact_path=lambda: "data/sessions/sess-ctx/SESSION_ARTIFACT.json",
         list_bookmarks=lambda: [{"checkpoint_id": "chk-1", "label": "base", "message_count": 2, "has_memory": True}],
-        describe_bookmark=lambda checkpoint_id: {"checkpoint_id": checkpoint_id, "label": "base", "session_id": "sess-ctx", "created_at_ms": 1, "message_count": 2, "has_memory": True, "replay_item_count": 1, "artifact_path": "sessions/sess-ctx/SESSION_ARTIFACT.json", "context_budget": {"report": {"scope": "session", "status": "ok", "estimated_context_chars": 100, "estimated_remaining_chars": 900}}, "prompt_agents": ["math_agent"]},
-        create_bookmark=lambda label=None, note="": {"checkpoint_id": "chk-2", "label": label or "checkpoint-2", "session_id": "sess-ctx", "created_at_ms": 2, "message_count": 2, "has_memory": True, "replay_item_count": 1, "artifact_path": "sessions/sess-ctx/SESSION_ARTIFACT.json", "context_budget": {"report": {"scope": "session", "status": "ok", "estimated_context_chars": 100, "estimated_remaining_chars": 900}}, "prompt_agents": ["math_agent"]},
+        describe_bookmark=lambda checkpoint_id: {"checkpoint_id": checkpoint_id, "label": "base", "session_id": "sess-ctx", "created_at_ms": 1, "message_count": 2, "has_memory": True, "replay_item_count": 1, "artifact_path": "data/sessions/sess-ctx/SESSION_ARTIFACT.json", "context_budget": {"report": {"scope": "session", "status": "ok", "estimated_context_chars": 100, "estimated_remaining_chars": 900}}, "prompt_agents": ["math_agent"]},
+        create_bookmark=lambda label=None, note="": {"checkpoint_id": "chk-2", "label": label or "checkpoint-2", "session_id": "sess-ctx", "created_at_ms": 2, "message_count": 2, "has_memory": True, "replay_item_count": 1, "artifact_path": "data/sessions/sess-ctx/SESSION_ARTIFACT.json", "context_budget": {"report": {"scope": "session", "status": "ok", "estimated_context_chars": 100, "estimated_remaining_chars": 900}}, "prompt_agents": ["math_agent"]},
     )
 
     handled_context = _handle_inspection_command("/context math_agent", lifecycle, runtime=runtime)
@@ -482,7 +482,7 @@ def test_handle_inspection_command_commands_y_command(capsys):
         list_background_tasks=lambda: [],
         list_retryable_background_tasks=lambda: [],
         describe_background_task=lambda task_id: None,
-        artifact_path=lambda: "sessions/sess-commands/SESSION_ARTIFACT.json",
+        artifact_path=lambda: "data/sessions/sess-commands/SESSION_ARTIFACT.json",
         list_bookmarks=lambda: [],
         describe_bookmark=lambda checkpoint_id: None,
         create_bookmark=lambda label=None, note="": {},

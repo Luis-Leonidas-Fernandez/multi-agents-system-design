@@ -11,8 +11,8 @@ import shlex
 from dataclasses import dataclass
 
 from application.services.command_registry import COMMAND_REGISTRY
-from application.services.prompt_versioning import prompt_version_service
-from application.services.session_inspection import (
+from features.sessions.application.prompt_versioning import prompt_version_service
+from features.sessions.application.session_inspection import (
     format_background_task_state,
     format_background_task_summary,
     format_bookmark_detail,

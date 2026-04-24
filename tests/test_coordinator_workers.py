@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from application.services.coordinator_workers import CoordinatorWorkerService, CoordinatorWorkerStore
-from application.services.coordinator_workers import CoordinatorRuntimeService
+from features.sessions.application.coordinator_workers import CoordinatorWorkerService, CoordinatorWorkerStore
+from features.sessions.application.coordinator_workers import CoordinatorRuntimeService
 
 
 def test_spawn_list_and_message_persistence(tmp_path):
@@ -41,7 +41,7 @@ def test_broadcast_message_reaches_all_workers(tmp_path):
 
 
 def test_refine_query_removes_noise_and_deduplicates():
-    from application.services.coordinator_workers import CoordinatorWorkerService
+    from features.sessions.application.coordinator_workers import CoordinatorWorkerService
 
     refined = CoordinatorWorkerService._refine_query("dame las últimas noticias de noticias sobre IA en internet hoy")
 
@@ -58,7 +58,7 @@ async def test_parallel_probe_round_synthesizes_best_result(tmp_path):
         type("Worker", (), {"worker_id": "w-search", "worker_name": "search_direct_probe", "agent_name": "web_scraping_agent"})(),
         type("Worker", (), {"worker_id": "w-refine", "worker_name": "search_refined_probe", "agent_name": "web_scraping_agent"})(),
         type("Worker", (), {"worker_id": "w-extract", "worker_name": "extraction_probe", "agent_name": "web_scraping_agent"})(),
-    ])), patch("application.services.coordinator_workers._search_web_query", side_effect=[
+    ])), patch("features.sessions.application.coordinator_workers._search_web_query", side_effect=[
         "Search direct: la teoría de la relatividad especial https://example.com/relatividad",
         "Search refined: la teoría de la relatividad general",
         "Extraction: dato verificable",

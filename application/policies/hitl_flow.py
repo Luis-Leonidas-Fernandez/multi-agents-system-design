@@ -1,7 +1,7 @@
 """Helpers de HITL para nodos de alto riesgo."""
 import os
 
-from ports.confirmation_port import ConfirmationPort
+from core.ports.confirmation_port import ConfirmationPort
 
 
 ConfirmationHandler = ConfirmationPort

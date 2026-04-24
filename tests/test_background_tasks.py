@@ -7,7 +7,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_background_task_service_persiste_lifecycle_completo(tmp_path):
-    from application.services.background_tasks import BackgroundTaskService, BackgroundTaskStore
+    from features.sessions.application.background_tasks import BackgroundTaskService, BackgroundTaskStore
 
     store = BackgroundTaskStore(base_dir=tmp_path)
     service = BackgroundTaskService(store=store, clock=lambda: 1000.0)
@@ -65,7 +65,7 @@ async def test_background_task_service_persiste_lifecycle_completo(tmp_path):
 
 @pytest.mark.asyncio
 async def test_background_task_service_marca_error_y_lo_persiste(tmp_path):
-    from application.services.background_tasks import BackgroundTaskService, BackgroundTaskStore
+    from features.sessions.application.background_tasks import BackgroundTaskService, BackgroundTaskStore
 
     service = BackgroundTaskService(store=BackgroundTaskStore(base_dir=tmp_path), clock=lambda: 2000.0)
 
@@ -153,7 +153,7 @@ def test_session_lifecycle_describe_background_task_delega_en_runtime():
 
 @pytest.mark.asyncio
 async def test_background_task_service_cancela_tarea_en_ejecucion(tmp_path):
-    from application.services.background_tasks import BackgroundTaskService, BackgroundTaskStore
+    from features.sessions.application.background_tasks import BackgroundTaskService, BackgroundTaskStore
 
     service = BackgroundTaskService(store=BackgroundTaskStore(base_dir=tmp_path), clock=lambda: 4000.0)
     started = asyncio.Event()
@@ -178,7 +178,7 @@ async def test_background_task_service_cancela_tarea_en_ejecucion(tmp_path):
 
 @pytest.mark.asyncio
 async def test_background_task_service_retry_creates_new_attempt(tmp_path):
-    from application.services.background_tasks import BackgroundTaskService, BackgroundTaskStore
+    from features.sessions.application.background_tasks import BackgroundTaskService, BackgroundTaskStore
 
     service = BackgroundTaskService(store=BackgroundTaskStore(base_dir=tmp_path), clock=lambda: 5000.0)
 
@@ -266,7 +266,7 @@ async def test_session_lifecycle_submit_background_task_delega_en_runtime():
 
 @pytest.mark.asyncio
 async def test_background_task_service_shutdown_cancela_tareas_activas(tmp_path):
-    from application.services.background_tasks import BackgroundTaskService, BackgroundTaskStore
+    from features.sessions.application.background_tasks import BackgroundTaskService, BackgroundTaskStore
 
     service = BackgroundTaskService(store=BackgroundTaskStore(base_dir=tmp_path), clock=lambda: 3000.0)
     started = asyncio.Event()

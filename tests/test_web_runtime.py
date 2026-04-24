@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from application.services.web_runtime import (
+from features.web_scraping.infrastructure.runtime import (
     WebFetchRequest,
     WebFetchRuntime,
     WebSearchRequest,
@@ -20,7 +20,7 @@ async def test_web_search_runtime_returns_structured_hits(monkeypatch):
         "   Resumen corto del artículo\n"
     )
 
-    with patch("tools.search_tools.search_web.func", return_value=raw_result):
+    with patch("features.web_scraping.infrastructure.search_tools.search_web.func", return_value=raw_result):
         response = await runtime.search(
             WebSearchRequest(
                 query="seguridad en italia",
@@ -39,7 +39,7 @@ async def test_web_search_runtime_returns_structured_hits(monkeypatch):
 async def test_web_fetch_runtime_reports_fetch_status():
     runtime = WebFetchRuntime()
 
-    with patch("tools.scraping_tools.fetch_web_page", new=AsyncMock(return_value="REDIRECT DETECTED\nRedirect URL: https://example.org")):
+    with patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", new=AsyncMock(return_value="REDIRECT DETECTED\nRedirect URL: https://example.org")):
         response = await runtime.fetch(
             WebFetchRequest(
                 url="https://example.com/article",
@@ -58,8 +58,8 @@ async def test_web_fetch_runtime_reports_fetch_status():
 async def test_web_fetch_runtime_blocks_before_fetch_or_llm():
     runtime = WebFetchRuntime()
 
-    with patch("application.services.web_runtime.input_guard", return_value={"blocked": True, "messages": [MagicMock(content="bloqueado")]}), patch(
-        "tools.scraping_tools.fetch_web_page", new=AsyncMock()
+    with patch("features.web_scraping.infrastructure.runtime.input_guard", return_value={"blocked": True, "messages": [MagicMock(content="bloqueado")]}), patch(
+        "features.web_scraping.infrastructure.scraping_tools.fetch_web_page", new=AsyncMock()
     ) as fetch_mock:
         response = await runtime.fetch(
             WebFetchRequest(

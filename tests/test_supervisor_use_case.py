@@ -4,13 +4,13 @@ from unittest.mock import AsyncMock, MagicMock
 from typing import cast
 
 from langchain_core.messages import HumanMessage
-from domain.models import AgentState
+from core.domain.models import AgentState
 
 
 @pytest.mark.asyncio
 async def test_supervisor_use_case_routes_to_expected_agent():
-    from application.use_cases.supervisor_routing import run_supervisor_routing
-    from domain.models import RoutingDecision
+    from features.supervisor.api import run_supervisor_routing
+    from core.domain.models import RoutingDecision
 
     mock_chain = MagicMock()
     mock_chain.ainvoke = AsyncMock(return_value=RoutingDecision(agent="code_agent", reason="test"))
@@ -29,7 +29,7 @@ async def test_supervisor_use_case_routes_to_expected_agent():
 
 @pytest.mark.asyncio
 async def test_supervisor_use_case_btc_shortcut():
-    from application.use_cases.supervisor_routing import run_supervisor_routing
+    from features.supervisor.api import run_supervisor_routing
 
     state = cast(AgentState, {
         "messages": [HumanMessage(content="precio del bitcoin ahora")],

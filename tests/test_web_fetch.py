@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tools.scraping_tools import fetch_web_page
+from features.web_scraping.infrastructure.scraping_tools import fetch_web_page
 
 
 @pytest.mark.asyncio
@@ -11,13 +11,13 @@ async def test_web_fetch_synthesizes_markdown_content():
     llm = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(content="Resumen conciso")))
 
     with (
-        patch("infra.scraping_infra._scrape_page_sync", MagicMock(return_value={
+        patch("features.web_scraping.infrastructure.scraping_infra._scrape_page_sync", MagicMock(return_value={
             "url": "https://example.com/article",
             "title": "Example Article",
             "main_text": "Contenido principal de la pagina",
             "links": [{"text": "More", "href": "https://example.com/more"}],
         })),
-        patch("application.helpers.config_flow_helpers.get_llm", return_value=llm),
+        patch("core.helpers.config_flow_helpers.get_llm", return_value=llm),
     ):
         result = await fetch_web_page(
             url="https://example.com/article",
@@ -47,13 +47,13 @@ async def test_web_fetch_reports_cross_host_redirect():
     llm = SimpleNamespace(ainvoke=AsyncMock())
 
     with (
-        patch("infra.scraping_infra._scrape_page_sync", MagicMock(return_value={
+        patch("features.web_scraping.infrastructure.scraping_infra._scrape_page_sync", MagicMock(return_value={
             "url": "https://redirect.example.org/article",
             "title": "Redirected",
             "main_text": "Contenido movido",
             "links": [],
         })),
-        patch("application.helpers.config_flow_helpers.get_llm", return_value=llm),
+        patch("core.helpers.config_flow_helpers.get_llm", return_value=llm),
     ):
         result = await fetch_web_page(
             url="https://example.com/article",

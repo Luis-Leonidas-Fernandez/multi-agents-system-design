@@ -1,4 +1,4 @@
-from application.services.web_response_post_filter import apply_web_response_post_filter
+from features.web_scraping.application.post_filter import apply_web_response_post_filter
 
 
 def test_security_post_filter_removes_irrelevant_body_line_and_trims_sources():

@@ -12,18 +12,18 @@ from dataclasses import dataclass
 import uuid
 from typing import Optional
 
-from application.services.session_gateway import AgentGateway
-from application.services.background_tasks import BackgroundTaskService, BackgroundTaskState, BackgroundTaskSummary, background_task_service
-from application.services.coordinator_workers import coordinator_runtime_service
-from application.services.context_budget import SessionContextBudget, SessionContextBudgetService, context_budget_service, context_budget_to_dict
-from application.services.session_artifacts import session_artifact_service
-from application.services.session_bookmarks import SessionBookmarkService, session_bookmark_service
-from application.services.session_replay import session_replay_service, SessionReplay
-from application.services.memory_retrieval import MemoryRetrievalService, memory_retrieval_service, MemorySearchHit
+from features.sessions.application.session_gateway import AgentGateway
+from features.sessions.application.background_tasks import BackgroundTaskService, BackgroundTaskState, BackgroundTaskSummary, background_task_service
+from features.sessions.application.coordinator_workers import coordinator_runtime_service
+from features.sessions.application.context_budget import SessionContextBudget, SessionContextBudgetService, context_budget_service, context_budget_to_dict
+from features.sessions.application.session_artifacts import session_artifact_service
+from features.sessions.application.session_bookmarks import SessionBookmarkService, session_bookmark_service
+from features.sessions.application.session_replay import session_replay_service, SessionReplay
+from features.sessions.application.memory_retrieval import MemoryRetrievalService, memory_retrieval_service, MemorySearchHit
 from application.services.tool_approval import ToolApprovalPreview, tool_approval_service
 from application.services.trace_context import TraceContext, TraceContextService, trace_context_service
-from application.services.session_persistence import SessionPersistence, persistence as session_persistence
-from application.services.session_inspection import format_session_banner
+from features.sessions.application.session_persistence import SessionPersistence, persistence as session_persistence
+from features.sessions.application.session_inspection import format_session_banner
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@
 
 def test_tool_audit_store_persiste_y_lee_eventos(tmp_path):
     from application.services.tool_audit import ToolCallAuditEvent
-    from application.services.tool_audit_store import ToolAuditStore
+    from features.sessions.application.tool_audit_store import ToolAuditStore
 
     store = ToolAuditStore(audit_dir=tmp_path)
     event = ToolCallAuditEvent(
@@ -28,7 +28,7 @@ def test_tool_audit_store_persiste_y_lee_eventos(tmp_path):
 
 def test_tool_audit_store_filtra_por_session_y_request(tmp_path):
     from application.services.tool_audit import ToolCallAuditEvent
-    from application.services.tool_audit_store import ToolAuditStore
+    from features.sessions.application.tool_audit_store import ToolAuditStore
 
     store = ToolAuditStore(audit_dir=tmp_path)
     store.append_event(
@@ -61,7 +61,7 @@ def test_tool_audit_store_filtra_por_session_y_request(tmp_path):
 
 def test_tool_audit_store_lista_sesiones(tmp_path):
     from application.services.tool_audit import ToolCallAuditEvent
-    from application.services.tool_audit_store import ToolAuditStore
+    from features.sessions.application.tool_audit_store import ToolAuditStore
 
     store = ToolAuditStore(audit_dir=tmp_path)
     store.append_event(

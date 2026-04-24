@@ -6,8 +6,8 @@ from typing import Any, Mapping, Literal
 import logging
 import time
 
-from application.helpers.audit_flow_helpers import _emit_guard_audit
-from application.services.tool_audit_store import tool_audit_store
+from core.helpers.audit_flow_helpers import _emit_guard_audit
+from features.sessions.application.tool_audit_store import tool_audit_store
 
 
 _log = logging.getLogger(__name__)

@@ -11,7 +11,7 @@ import os
 import sys
 from typing import cast, Optional
 
-from application.helpers.config_flow_helpers import validate_env
+from core.helpers.config_flow_helpers import validate_env
 from application.services.runtime import AgentRuntime
 from application.ui_bridge.protocol import (
     BridgeEmitter,

@@ -2,11 +2,11 @@
 from langchain_core.messages import HumanMessage
 from typing import cast
 
-from domain.models import AgentState
+from core.domain.models import AgentState
 
 
 def test_decide_agent_route_con_agent_valido():
-    from application.use_cases.routing_decision import decide_agent_route
+    from features.supervisor.api import decide_agent_route
 
     state = cast(AgentState, {
         "messages": [HumanMessage(content="Escribe código")],
@@ -21,7 +21,7 @@ def test_decide_agent_route_con_agent_valido():
 
 
 def test_decide_agent_route_reintenta_supervisor():
-    from application.use_cases.routing_decision import decide_agent_route
+    from features.supervisor.api import decide_agent_route
 
     state = cast(AgentState, {
         "messages": [HumanMessage(content="¿qué hago?")],
@@ -36,6 +36,6 @@ def test_decide_agent_route_reintenta_supervisor():
 
 
 def test_decide_agent_route_finaliza_sin_mensajes():
-    from application.use_cases.routing_decision import decide_agent_route
+    from features.supervisor.api import decide_agent_route
 
     assert decide_agent_route(cast(AgentState, {"messages": [], "next_agent": "", "risk_flag": False, "blocked": False, "request_id": "req-3", "scrape_tracker": {}}), ("math_agent",)) == "__end__"

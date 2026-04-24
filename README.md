@@ -8,26 +8,25 @@ Sistema multi-agentes implementado con LangGraph siguiendo el patrón supervisor
 06_multi_agents/
 ├── main.py                # Punto de entrada (REPL interactivo con slash commands)
 ├── requirements.txt
-├── application/           # Capa de aplicación
-│   ├── use_cases/         # Flujos y casos de uso
+├── application/           # Capa de composición, policies y servicios de sesión
 │   ├── services/          # Registries, factories, gateway y servicios de sesión
-│   ├── helpers/           # Helpers compartidos (config, audit, scraping, precio, etc.)
 │   ├── policies/          # Guardrails, HITL y seguridad
 │   └── composition/       # Composition root
 │       └── graph.py       # Grafo supervisor/coordinador y wiring
-├── domain/                # Modelos puros del dominio (AgentState, RoutingDecision, pricing)
+├── core/                  # Contratos y utilidades compartidas (domain/helpers/persistence)
+├── features/              # Slices de negocio (web_scraping, supervisor, security, price, math, analysis, code)
 ├── infra/                 # Infraestructura (persistence.py, scraping_infra.py, memory.py)
-├── ports/                 # Contratos/puertos (llm_port.py, confirmation_port.py)
-├── nodes/                 # Nodos del grafo (adaptadores finos sobre use_cases)
-├── tools/                 # Tools reutilizables para agentes (math, code, data, web, crypto)
+├── core/ports/            # Contratos/puertos compartidos
+├── features/*/infrastructure/  # Nodos/adaptadores por feature
+├── tools/                 # Compatibilidad temporal para tools migradas
+├── integrations/          # Integraciones externas (MCP, APIs auxiliares)
 ├── agents/                # System prompts en Markdown por agente (hot-reload opcional)
-├── prompts/               # Snapshots de prompts versionados por agente
-├── ops/                   # Dashboards y scripts de observabilidad (dashboard.py, analytics.py)
-├── analytics/             # Queries DuckDB sobre sesiones
+├── agents/prompts/        # Snapshots de prompts versionados por agente
+├── features/analytics/    # Dashboards, scripts y queries de observabilidad
 ├── ui/                    # Frontend alternativo (claude_app.py)
-├── sessions/              # Historial persistido de sesiones (SQLite)
+├── data/sessions/         # Historial persistido de sesiones (SQLite)
 ├── docs/                  # Documentación larga y material educativo
-├── flujo/                 # Diagramas de flujo del sistema
+├── docs/flujo/            # Diagramas de flujo del sistema
 ├── tests/                 # Suite de tests (399 passing)
 └── .env.example           # Ejemplo de variables de entorno
 ```
@@ -43,12 +42,12 @@ cp .env.example .env          # agregar OPENAI_API_KEY
 ## Ejecución
 
 ```bash
-python main.py                           # REPL interactivo con historial en sessions/
-docker compose up --build                # containerizado (monta data_trading/ como volumen)
+python main.py                           # REPL interactivo con historial en data/sessions/
+docker compose up --build                # containerizado (monta data/web_scraping/data_trading/ como volumen)
 python application/composition/graph.py  # test rápido del grafo (__main__)
 pytest tests/ -v                         # suite completa (399 tests, no requieren API key)
-python ops/dashboard.py [audit.jsonl]    # dashboard visual del audit log
-python ops/analytics.py [audit.jsonl]    # strategy ranking + learning curve
+python features/analytics/infrastructure/dashboard.py [audit.jsonl]    # dashboard visual del audit log
+python features/analytics/infrastructure/country_news_analytics.py [audit.jsonl]
 ```
 
 ## Variables de entorno
@@ -105,7 +104,7 @@ User → input_guard → supervisor / coordinator → route_agent() → [agente 
 | `math_agent` | `calculate` (safe `eval` con namespace matemático) |
 | `analysis_agent` | `analyze_data` |
 | `code_agent` | `write_code` |
-| `web_scraping_agent` | `scrape_website_simple` (requests+BS4), `scrape_website_dynamic` (Playwright, cache 60s), `scrape_website_with_json_capture` (Playwright async, guarda JSON en `data_trading/`), `extract_price_from_text`, `search_web` (Tavily/DuckDuckGo) |
+| `web_scraping_agent` | `scrape_website_simple` (requests+BS4), `scrape_website_dynamic` (Playwright, cache 60s), `scrape_website_with_json_capture` (Playwright async, guarda JSON en `data/web_scraping/data_trading/`), `extract_price_from_text`, `search_web` (Tavily/DuckDuckGo) |
 
 ### Estado compartido (`AgentState`)
 
@@ -117,14 +116,15 @@ User → input_guard → supervisor / coordinator → route_agent() → [agente 
 | Archivo | Responsabilidad |
 |---|---|
 | `application/composition/graph.py` | `StateGraph`, wiring, `create_supervisor_graph()` |
-| `application/helpers/config_flow_helpers.py` | `get_llm()` — selecciona provider via `LLM_PROVIDER` |
+| `core/helpers/config_flow_helpers.py` | `get_llm()` — selecciona provider via `LLM_PROVIDER` |
 | `application/services/agents_factory.py` | Construcción centralizada de agentes ReAct |
+| `core/helpers/generic_node_factory.py` | Factory compartida para nodos especializados |
 | `application/services/coordinator_mode.py` | Feature flag del modo coordinador |
 | `application/services/coordinator_workers.py` | Spawn y ejecución de workers dinámicos |
 | `application/services/session_gateway.py` | `AgentGateway` + `LaneQueue` (base para integración Telegram/etc.) |
-| `infra/persistence.py` | SQLite backend para historial de sesiones |
-| `infra/memory.py` | `distill_memory()` — destila sesión a `MEMORY.md` e inyecta como contexto |
-| `domain/models.py` | `AgentState`, `RoutingDecision`, modelos Pydantic |
+| `features/sessions/infrastructure/persistence.py` | SQLite backend para historial de sesiones |
+| `features/sessions/infrastructure/memory.py` | `distill_memory()` — destila sesión a `MEMORY.md` e inyecta como contexto |
+| `core/domain/models.py` | `AgentState`, `RoutingDecision`, modelos Pydantic |
 | `main.py` | REPL async con slash commands y sesiones persistidas |
 
 ## Slash commands del REPL
@@ -159,17 +159,17 @@ User → input_guard → supervisor / coordinator → route_agent() → [agente 
 
 **Dashboard visual**:
 ```bash
-python ops/dashboard.py [audit.jsonl]   # genera PNG del audit log
-python ops/analytics.py [audit.jsonl]   # strategy ranking + learning curve (--train para regresión logística)
+python features/analytics/infrastructure/dashboard.py [audit.jsonl]   # genera PNG del audit log
+python features/analytics/infrastructure/country_news_analytics.py [audit.jsonl]
 ```
 
 **Análisis con DuckDB** (requiere `pip install duckdb`):
 ```bash
-duckdb -c ".read analytics/queries.sql"
+duckdb -c ".read features/analytics/infrastructure/queries.sql"
 ```
 Queries incluidas: debugging (score < 0), ranking por `(category, strategy)`, malas decisiones del sistema, comparativa API vs scraping, learning curve, counterfactual insight.
 
-**Memory distillation**: al salir del REPL, `infra/memory.py` destila la sesión en `sessions/{id}/MEMORY.md` y lo inyecta como `SystemMessage` al inicio de la siguiente sesión.
+**Memory distillation**: al salir del REPL, `features/sessions/infrastructure/memory.py` destila la sesión en `data/sessions/{id}/MEMORY.md` y lo inyecta como `SystemMessage` al inicio de la siguiente sesión.
 
 ## Documentación
 

@@ -2,7 +2,7 @@ import json
 
 
 def test_get_web_search_runtime_config_uses_explicit_json_path(tmp_path, monkeypatch):
-    from application.helpers.config_flow_helpers import get_web_search_runtime_config
+    from core.helpers.config_flow_helpers import get_web_search_runtime_config
 
     config_path = tmp_path / "web-search.json"
     config_path.write_text(json.dumps({"selected_provider": "tavily", "provider_configured": "tavily"}), encoding="utf-8")
@@ -16,8 +16,8 @@ def test_get_web_search_runtime_config_uses_explicit_json_path(tmp_path, monkeyp
 
 
 def test_web_search_registry_uses_runtime_config_file(tmp_path, monkeypatch):
-    from application.helpers.config_flow_helpers import get_web_search_runtime_config
-    from application.services.web_search_registry import resolve_web_search_provider_name
+    from core.helpers.config_flow_helpers import get_web_search_runtime_config
+    from features.web_scraping.infrastructure.web_search_registry import resolve_web_search_provider_name
 
     config_path = tmp_path / "web-search.json"
     config_path.write_text(json.dumps({"provider_configured": "tavily"}), encoding="utf-8")

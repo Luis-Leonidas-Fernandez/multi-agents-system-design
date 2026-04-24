@@ -14,7 +14,7 @@ def test_build_agent_prompt_extra_context_arma_bloques_estables():
 
 def test_build_agent_prompt_assembly_usa_loader():
     from application.services.prompt_assembly import build_agent_prompt_assembly
-    from application.services.prompt_versioning import PromptSnapshot
+    from features.sessions.application.prompt_versioning import PromptSnapshot
 
     with patch("application.services.prompt_assembly.build_agent_tool_lines", return_value="tool-lines"), \
          patch("application.services.prompt_assembly.build_agent_permission_lines", return_value="permission-lines"), \

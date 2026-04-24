@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 
 def test_context_budget_service_reporta_incluido_resumido_y_afuera():
-    from application.services.context_budget import SessionContextBudgetService
+    from features.sessions.application.context_budget import SessionContextBudgetService
 
     persistence_backend = MagicMock()
     persistence_backend.load_messages.return_value = [

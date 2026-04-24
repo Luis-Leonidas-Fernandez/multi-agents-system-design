@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from application.services.prompt_loader import load_agent_prompt
-from application.services.prompt_versioning import PromptSnapshot, prompt_version_service
+from features.sessions.application.prompt_versioning import PromptSnapshot, prompt_version_service
 from application.services.tool_registry import build_agent_permission_lines, build_agent_tool_lines
 
 

@@ -11,11 +11,11 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-from application.helpers.config_flow_helpers import validate_env
+from core.helpers.config_flow_helpers import validate_env
 from application.services.agent_registry import get_agent_specs
 from application.services.cli_dispatch import dispatch_inspection_command
 from application.services.runtime import AgentRuntime
-from application.services.session_inspection import (
+from features.sessions.application.session_inspection import (
     format_chat_block,
     format_cli_prompt,
     format_session_selector,
@@ -125,10 +125,10 @@ def bootstrap_searxng() -> None:
 
 def start_dashboard_watcher() -> None:
     try:
-        from ops.build_dashboard import _watch
+        from features.analytics.infrastructure.build_dashboard import _watch
         t = threading.Thread(
             target=_watch,
-            args=(os.getenv("AGENTDOG_AUDIT_LOG", "./logs/agentdog_audit.jsonl"), "dist/index.html"),
+            args=(os.getenv("AGENTDOG_AUDIT_LOG", "./data/logs/agentdog_audit.jsonl"), "features/analytics/dist/index.html"),
             daemon=True,
         )
         t.start()

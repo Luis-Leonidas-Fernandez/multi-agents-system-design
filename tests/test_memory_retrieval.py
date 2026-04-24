@@ -11,7 +11,7 @@ def _handle_inspection_command(user_input, lifecycle, runtime=None):
 
 
 def test_memory_retrieval_service_busca_por_terminos(tmp_path):
-    from application.services.memory_retrieval import MemoryRetrievalService
+    from features.sessions.application.memory_retrieval import MemoryRetrievalService
 
     service = MemoryRetrievalService(sessions_dir=tmp_path)
     session_a = tmp_path / "sess-a"
@@ -29,7 +29,7 @@ def test_memory_retrieval_service_busca_por_terminos(tmp_path):
 
 
 def test_memory_retrieval_service_summarize_y_lista_sessions(tmp_path):
-    from application.services.memory_retrieval import MemoryRetrievalService
+    from features.sessions.application.memory_retrieval import MemoryRetrievalService
 
     service = MemoryRetrievalService(sessions_dir=tmp_path)
     (tmp_path / "sess-c").mkdir()
@@ -43,7 +43,7 @@ def test_memory_retrieval_service_summarize_y_lista_sessions(tmp_path):
 
 
 def test_format_memory_search_results_muestra_hallazgos():
-    from application.services.session_inspection import format_memory_search_results
+    from features.sessions.application.session_inspection import format_memory_search_results
 
     lines = format_memory_search_results(
         "replay",
@@ -51,7 +51,7 @@ def test_format_memory_search_results_muestra_hallazgos():
             {
                 "session_id": "sess-a",
                 "score": 10.0,
-                "memory_path": "sessions/sess-a/MEMORY.md",
+                "memory_path": "data/sessions/sess-a/MEMORY.md",
                 "excerpt": "- Resultado: replay unificado",
                 "matched_terms": ["replay"],
             }
@@ -69,7 +69,7 @@ def test_handle_inspection_command_memory(monkeypatch, capsys):
     runtime._memory_retrieval = type("Stub", (), {  # type: ignore[attr-defined]
         "list_sessions": lambda self: ["sess-a", "sess-b"],
         "search": lambda self, query, limit=5: [
-            type("Hit", (), {"session_id": "sess-a", "score": 12.0, "memory_path": "sessions/sess-a/MEMORY.md", "excerpt": "- replay unificado", "matched_terms": ["replay"], "line_count": 1, "char_count": 10, "modified_at_ms": 1})(),
+            type("Hit", (), {"session_id": "sess-a", "score": 12.0, "memory_path": "data/sessions/sess-a/MEMORY.md", "excerpt": "- replay unificado", "matched_terms": ["replay"], "line_count": 1, "char_count": 10, "modified_at_ms": 1})(),
         ],
     })()  # type: ignore[attr-defined]
 

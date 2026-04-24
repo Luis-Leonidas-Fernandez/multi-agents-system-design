@@ -42,7 +42,7 @@ def test_tool_approval_service_render_lines_incluye_prompt():
 
 
 def test_session_inspection_tool_formatters():
-    from application.services.session_inspection import format_tool_approval_preview, format_tool_catalog, format_tool_impact_preview
+    from features.sessions.application.session_inspection import format_tool_approval_preview, format_tool_catalog, format_tool_impact_preview
 
     lines = format_tool_approval_preview(
         {
@@ -59,7 +59,7 @@ def test_session_inspection_tool_formatters():
             "impact_preview": {"tool_name": "write_code", "agent_name": "code_agent", "category": "code", "scope": "new-file", "confidence": "medium", "estimated_diff_lines": "~12-30 líneas", "affected_files": ["tests/test_x.py"], "side_effects": "cambios locales en el repositorio", "risk_notes": ["Revisar imports"], "generated_at_ms": 1},
         }
     )
-    impact_lines = format_tool_impact_preview({"tool_name": "scrape_website_with_json_capture", "agent_name": "web_scraping_agent", "category": "web", "scope": "artifact-write", "confidence": "high", "estimated_diff_lines": "0 líneas de código, 1 artefacto de datos", "affected_files": ["data_trading/example.json"], "side_effects": "escribe bundles JSON en data_trading/", "risk_notes": ["Puede persistir respuestas JSON"], "generated_at_ms": 1})
+    impact_lines = format_tool_impact_preview({"tool_name": "scrape_website_with_json_capture", "agent_name": "web_scraping_agent", "category": "web", "scope": "artifact-write", "confidence": "high", "estimated_diff_lines": "0 líneas de código, 1 artefacto de datos", "affected_files": ["data/web_scraping/data_trading/example.json"], "side_effects": "escribe bundles JSON en data/web_scraping/data_trading/", "risk_notes": ["Puede persistir respuestas JSON"], "generated_at_ms": 1})
 
     assert any("write_code" in line for line in lines)
     assert any("confirm=yes" in line for line in lines)

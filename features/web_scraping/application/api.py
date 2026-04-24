@@ -1,9 +1,9 @@
 """Feature-level application API for web scraping."""
-from application.use_cases.web_scraping_agent_strategy import _run_web_scraping_agent_strategy
-from application.use_cases.web_scraping_country_press_helpers import _run_country_press_search_candidates
-from application.use_cases.web_scraping_country_strategy import CountryRecentNewsStrategy
-from application.use_cases.web_scraping_fetch_dispatch import _run_generic_web_search_fetch
-from application.use_cases.web_scraping_flow import (
+from features.web_scraping.application.agent_strategy import _run_web_scraping_agent_strategy
+from features.web_scraping.application.country_press_helpers import _run_country_press_search_candidates
+from features.web_scraping.application.country_strategy import CountryRecentNewsStrategy
+from features.web_scraping.application.fetch_dispatch import _run_generic_web_search_fetch
+from features.web_scraping.application.flow import (
     run_web_scraping_flow,
     _select_strategy_context,
     _discover_country_press_sources,
@@ -12,8 +12,8 @@ from application.use_cases.web_scraping_flow import (
     _web_debug,
     _COUNTRY_PRESS_CACHE,
 )
-from application.use_cases.web_scraping_generic_strategy import GenericWebSearchStrategy, _run_generic_web_search_strategy_impl
-from application.use_cases.web_scraping_query_helpers import _fetch_web_page_follow_redirect, _build_generic_fetch_prompt
+from features.web_scraping.application.generic_strategy import GenericWebSearchStrategy, _run_generic_web_search_strategy_impl
+from features.web_scraping.application.query_helpers import _fetch_web_page_follow_redirect, _build_generic_fetch_prompt
 
 __all__ = [
     "run_web_scraping_flow",

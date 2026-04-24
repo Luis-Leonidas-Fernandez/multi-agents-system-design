@@ -22,7 +22,7 @@ jobs:
         run: pip install -r requirements-lint.txt
 
       - name: flake8 — style + function length
-        run: flake8 domain/ application/ infra/ tools/
+        run: flake8 core/ application/ features/ integrations/ tests/ main.py
 
       - name: import-linter — layer rules
         run: lint-imports

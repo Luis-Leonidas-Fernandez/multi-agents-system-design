@@ -9,7 +9,7 @@ from features.web_scraping.api import (
     _extract_country_press_sources as extract_country_press_sources,
     _web_debug as web_debug,
 )
-from domain.web_text_utils import _slugify_periodicos_label as slugify_periodicos_label
+from features.web_scraping.domain.text_utils import _slugify_periodicos_label as slugify_periodicos_label
 
 __all__ = [
     "discover_country_press_sources",

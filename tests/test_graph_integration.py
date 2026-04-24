@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 from typing import cast
 
 from langchain_core.messages import AIMessage, HumanMessage
-from domain.models import AgentState
+from core.domain.models import AgentState
 
 
 def _base_state(message: str = "Hola") -> dict:

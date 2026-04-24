@@ -7,8 +7,8 @@ import re
 from typing import Optional
 from urllib.parse import urlparse
 
-from domain.web_classifier import _is_hub_like_candidate
-from domain.web_models import CandidateDict
+from features.web_scraping.domain.classifier import _is_hub_like_candidate
+from features.web_scraping.domain.models import CandidateDict
 from application.policies.web_source_policy import score_domain_boost, get_source_domain_priority
 
 # --- Scores positivos ---

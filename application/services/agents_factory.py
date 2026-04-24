@@ -19,7 +19,7 @@ from langgraph.prebuilt import create_react_agent
 # misma firma. Se suprime hasta que haya reemplazo drop-in verificado.
 warnings.filterwarnings("ignore", message=".*create_react_agent.*", category=Warning)
 
-from application.helpers.config_flow_helpers import get_llm
+from core.helpers.config_flow_helpers import get_llm
 from application.services.agent_registry import get_agent_temperature
 from application.services.prompt_assembly import build_agent_prompt_assembly
 from application.services.tool_registry import get_tools_for_agent

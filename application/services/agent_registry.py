@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
-from domain.agent_roles import AGENT_NAMES  # noqa: F401  — re-exported for callers
+from core.domain.agent_roles import AGENT_NAMES  # noqa: F401  — re-exported for callers
 
 
 @dataclass(frozen=True)
@@ -110,17 +110,17 @@ def get_node(name: str):
     agent = get_agent(name)
 
     if name == "math_agent":
-        from nodes import make_math_node
+        from features.math.infrastructure.node import make_math_node
         return make_math_node(agent)
     if name == "analysis_agent":
-        from nodes import make_analysis_node
+        from features.analysis.infrastructure.node import make_analysis_node
         return make_analysis_node(agent)
     if name == "code_agent":
-        from nodes import make_code_node
+        from features.code.infrastructure.node import make_code_node
         return make_code_node(agent)
     if name == "web_scraping_agent":
-        from application.helpers.config_flow_helpers import get_llm
-        from nodes import make_web_scraping_node
+        from core.helpers.config_flow_helpers import get_llm
+        from features.web_scraping.infrastructure.node import make_web_scraping_node
         return make_web_scraping_node(agent, get_llm)
 
     get_agent_spec(name)

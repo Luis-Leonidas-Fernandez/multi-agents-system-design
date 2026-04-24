@@ -9,9 +9,9 @@ services:
     # Para modo interactivo (si main.py espera input)
     stdin_open: true
     tty: true
-    # Montar carpeta data_trading para persistir JSONs capturados
+    # Montar carpeta data/web_scraping/data_trading para persistir JSONs capturados
     volumes:
-      - ./data_trading:/app/data_trading
+      - ./data/web_scraping/data_trading:/app/data/web_scraping/data_trading
     restart: unless-stopped
 
   searxng:
@@ -26,5 +26,5 @@ services:
     ports:
       - "8888:8080"
     volumes:
-      - ./searxng:/etc/searxng
+      - ./config/searxng:/etc/searxng
     restart: unless-stopped

@@ -11,20 +11,19 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
-from domain.agent_roles import AGENT_NAMES as _AGENT_NAMES
+from core.domain.agent_roles import AGENT_NAMES as _AGENT_NAMES
 
-from tools.math_tools import calculate
-from tools.data_tools import analyze_data
-from tools.code_tools import write_code
-from tools.price_tools import extract_price_from_text
-from tools.search_tools import search_web
-from tools.scraping_tools import (
+from features.math.api import calculate
+from features.analysis.api import analyze_data
+from features.code.api import write_code
+from features.price.api import get_crypto_price, extract_price_from_text
+from features.web_scraping.infrastructure.search_tools import search_web
+from features.web_scraping.infrastructure.scraping_tools import (
     scrape_website_simple,
     scrape_website_dynamic,
     scrape_website_with_json_capture,
     web_fetch,
 )
-from tools.crypto_price import get_crypto_price
 
 from application.policies.tool_permissions import ToolPermissionMode
 

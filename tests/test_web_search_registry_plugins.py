@@ -2,7 +2,7 @@ import json
 
 
 def test_web_search_registry_discovers_plugin_providers(tmp_path, monkeypatch):
-    from application.services.web_search_registry import list_web_search_provider_specs
+    from features.web_scraping.infrastructure.web_search_registry import list_web_search_provider_specs
 
     plugin_dir = tmp_path / "web_search_provider_plugins"
     plugin_dir.mkdir()
@@ -31,7 +31,7 @@ def test_web_search_registry_discovers_plugin_providers(tmp_path, monkeypatch):
 
 
 def test_web_search_registry_deduplicates_plugin_names(tmp_path, monkeypatch):
-    from application.services.web_search_registry import list_web_search_provider_specs
+    from features.web_scraping.infrastructure.web_search_registry import list_web_search_provider_specs
 
     plugin_dir = tmp_path / "web_search_provider_plugins"
     plugin_dir.mkdir()

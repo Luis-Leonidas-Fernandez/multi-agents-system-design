@@ -10,14 +10,14 @@ from typing import Any, cast
 
 from langgraph.graph import StateGraph, END
 
-from application.helpers.config_flow_helpers import get_llm
+from core.helpers.config_flow_helpers import get_llm
 from application.services.agent_registry import AGENT_NAMES, get_registered_nodes
 from application.services.coordinator_mode import is_coordinator_mode_enabled
-from application.services.coordinator_workers import coordinator_runtime_service
-from application.use_cases.supervisor_chain import build_supervisor_chain
+from features.sessions.application.coordinator_workers import coordinator_runtime_service
+from features.supervisor.api import build_supervisor_chain
 from application.policies.web_source_policy import detect_recent_query_horizon
 from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard
-from domain.models import AgentState
+from core.domain.models import AgentState
 from features.security.api import input_guard, run_input_guard, decide_after_guard
 
 # Maps coordinator agent names to their guardrail node names
@@ -50,7 +50,7 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     Usa structured output (Pydantic) para garantizar que el LLM
     devuelva siempre un agente válido sin necesidad de text-parsing.
     """
-    from application.use_cases.supervisor_routing import run_supervisor_routing
+    from features.supervisor.api import run_supervisor_routing
 
     def chain_factory():
         chain = _get_supervisor_chain()
@@ -183,7 +183,7 @@ async def coordinator_node(state: AgentState) -> dict[str, Any]:
 
 def route_agent(state: dict[str, Any]) -> str:
     """Enruta al nodo correcto según state['next_agent']."""
-    from application.use_cases.routing_decision import decide_agent_route
+    from features.supervisor.api import decide_agent_route
 
     decision = decide_agent_route(cast(AgentState, state), AGENT_NAMES)
     return END if decision == "__end__" else decision

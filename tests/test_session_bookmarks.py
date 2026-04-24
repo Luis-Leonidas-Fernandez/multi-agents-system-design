@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 
 def test_session_bookmark_store_persiste_y_lee(tmp_path):
-    from application.services.session_bookmarks import SessionBookmark, SessionBookmarkStore
+    from features.sessions.application.session_bookmarks import SessionBookmark, SessionBookmarkStore
 
     store = SessionBookmarkStore(base_dir=tmp_path)
     bookmark = SessionBookmark(
@@ -14,7 +14,7 @@ def test_session_bookmark_store_persiste_y_lee(tmp_path):
         note="",
         message_count=2,
         has_memory=True,
-        artifact_path="sessions/sess-1/SESSION_ARTIFACT.json",
+        artifact_path="data/sessions/sess-1/SESSION_ARTIFACT.json",
         replay_item_count=7,
         context_budget={"report": {"scope": "session"}},
         prompt_agents=["math_agent"],
@@ -30,7 +30,7 @@ def test_session_bookmark_store_persiste_y_lee(tmp_path):
 
 
 def test_session_bookmark_service_crea_ids_estables():
-    from application.services.session_bookmarks import SessionBookmarkService, SessionBookmarkStore
+    from features.sessions.application.session_bookmarks import SessionBookmarkService, SessionBookmarkStore
 
     store = MagicMock(spec=SessionBookmarkStore)
     service = SessionBookmarkService(store=store)
@@ -39,7 +39,7 @@ def test_session_bookmark_service_crea_ids_estables():
     bookmark = service.create(
         session_id="sess-2",
         label="mi checkpoint",
-        artifact_path="sessions/sess-2/SESSION_ARTIFACT.json",
+        artifact_path="data/sessions/sess-2/SESSION_ARTIFACT.json",
         message_count=3,
         has_memory=False,
         replay_item_count=4,
@@ -55,7 +55,7 @@ def test_session_bookmark_service_crea_ids_estables():
 
 def test_runtime_bookmark_delega_en_servicio():
     from application.services.runtime import AgentRuntime, SessionLifecycle
-    from application.services.context_budget import ContextBudgetItem, SessionContextBudget
+    from features.sessions.application.context_budget import ContextBudgetItem, SessionContextBudget
     from types import SimpleNamespace
 
     runtime = AgentRuntime(gateway=MagicMock())
@@ -65,7 +65,7 @@ def test_runtime_bookmark_delega_en_servicio():
     runtime._bookmarks.create.return_value = {"checkpoint_id": "chk-2"}  # type: ignore[attr-defined]
     runtime._artifacts = MagicMock()  # type: ignore[attr-defined]
     runtime._artifacts.export_artifact.return_value = SimpleNamespace(message_count=1, has_memory=False, prompt_snapshots=[])
-    runtime._artifacts.artifact_path.return_value = "sessions/sess-3/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
+    runtime._artifacts.artifact_path.return_value = "data/sessions/sess-3/SESSION_ARTIFACT.json"  # type: ignore[attr-defined]
     runtime.build_session_replay = MagicMock(return_value=SimpleNamespace(items=[1, 2]))  # type: ignore[attr-defined]
     runtime.build_context_budget = MagicMock(return_value=SessionContextBudget(  # type: ignore[attr-defined]
         session_id="sess-3",

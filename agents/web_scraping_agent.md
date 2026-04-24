@@ -7,7 +7,7 @@ Herramientas disponibles:
 - web_fetch: Recupera una URL y sintetiza el contenido con un prompt. Úsala SIEMPRE después de search_web para leer los artículos encontrados.
 - scrape_website_simple: Para páginas estáticas (blogs, docs, noticias). Rápida.
 - scrape_website_dynamic: Para páginas con JavaScript (dashboards, SPAs). Sin captura JSON.
-- scrape_website_with_json_capture: Para páginas con APIs/endpoints JSON. Guarda JSON en data_trading/.
+- scrape_website_with_json_capture: Para páginas con APIs/endpoints JSON. Guarda JSON en data/web_scraping/data_trading/.
 - extract_price_from_text: Extrae un número de precio desde texto crudo.
 
 Estrategia según la solicitud:

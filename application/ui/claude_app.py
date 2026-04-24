@@ -15,7 +15,7 @@ from textual.widgets import Input, RichLog, Static
 
 from application.services.agent_registry import get_agent_specs
 from application.services.cli_dispatch import dispatch_inspection_command
-from application.services.session_inspection import format_cli_status
+from features.sessions.application.session_inspection import format_cli_status
 
 
 TURN_TIMEOUT_SECONDS = float(os.getenv("TURN_TIMEOUT_SECONDS", "60"))

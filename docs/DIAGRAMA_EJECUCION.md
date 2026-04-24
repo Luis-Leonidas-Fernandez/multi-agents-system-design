@@ -26,7 +26,7 @@ flowchart TD
     WRITECODE["🔧 write_code()"]
     SCRAPE_S["🔧 scrape_website_simple()\nrequests + BS4"]
     SCRAPE_D["🔧 scrape_website_dynamic()\nPlaywright sync\ncaché 60s"]
-    SCRAPE_J["🔧 scrape_website_with_json_capture()\nPlaywright async\n→ data_trading/*.json"]
+    SCRAPE_J["🔧 scrape_website_with_json_capture()\nPlaywright async\n→ data/web_scraping/data_trading/*.json"]
     EXTRACT_P["🔧 extract_price_from_text()"]
 
     USER --> REPL --> SUP --> ROUTER
@@ -71,4 +71,4 @@ flowchart TD
 - **Verde**: herramientas disponibles para cada agente
 - Los agentes van directo a `END`, no regresan al supervisor
 - El supervisor tiene un shortcut para preguntas de precio BTC que bypasea el LLM
-- `scrape_website_with_json_capture` guarda automáticamente en `data_trading/`
+- `scrape_website_with_json_capture` guarda automáticamente en `data/web_scraping/data_trading/`

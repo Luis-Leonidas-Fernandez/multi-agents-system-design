@@ -4,7 +4,7 @@
 
 ### Cambios principales
 - Centralización de agentes en `application/services/agent_registry.py`.
-- Deduplicación de nodos especializados con `nodes/generic_node.py`.
+- Deduplicación de nodos especializados con `core/helpers/generic_node_factory.py`.
 - Construcción del chain del supervisor en `application/use_cases/supervisor_chain.py`.
 - División fina del supervisor en `application/use_cases/supervisor_chain.py`, `supervisor_routing.py` y `supervisor_shortcuts.py`.
 - Centralización de factories ReAct en `application/services/agents_factory.py` con `_build_specialized_agent`.

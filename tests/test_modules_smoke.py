@@ -15,7 +15,7 @@ from typing import cast
 # ==================== MÓDULOS HOJA ====================
 
 def test_state_imports():
-    from domain.models import AgentName, RoutingDecision, AgentState
+    from core.domain.models import AgentName, RoutingDecision, AgentState
     from application.services.agent_registry import AGENT_NAMES
     from typing import get_args
     assert get_args(AgentName) == AGENT_NAMES
@@ -26,7 +26,7 @@ def test_state_imports():
 
 
 def test_domain_models_imports():
-    from domain.models import AgentName, RoutingDecision, AgentState
+    from core.domain.models import AgentName, RoutingDecision, AgentState
     from typing import get_args
     assert "code_agent" in get_args(AgentName)
     assert RoutingDecision(agent="math_agent", reason="test").agent == "math_agent"
@@ -34,7 +34,7 @@ def test_domain_models_imports():
 
 
 def test_ports_imports():
-    from ports import ConfirmationPort, LLMFactory
+    from core.ports import ConfirmationPort, LLMFactory
     from application.policies.hitl_flow import InputConfirmationHandler
     assert ConfirmationPort is not None
     assert LLMFactory is not None
@@ -42,19 +42,19 @@ def test_ports_imports():
 
 
 def test_config_helpers_imports():
-    from application.helpers.config_flow_helpers import TEMPERATURE, get_llm, validate_env
+    from core.helpers.config_flow_helpers import TEMPERATURE, get_llm, validate_env
     assert isinstance(TEMPERATURE, float)
     assert callable(get_llm)
     assert callable(validate_env)
 
 
 def test_application_use_case_imports():
-    from application.use_cases.web_scraping_flow import run_web_scraping_flow
+    from features.web_scraping.application.flow import run_web_scraping_flow
     assert callable(run_web_scraping_flow)
 
 
 def test_web_search_registry_imports():
-    from application.services.web_search_registry import (
+    from features.web_scraping.infrastructure.web_search_registry import (
         build_web_search_provider_lines,
         get_web_search_provider_kind,
         list_web_search_provider_specs,
@@ -85,14 +85,13 @@ def test_main_searxng_bootstrap_helpers(monkeypatch):
     assert cli_lifecycle._searxng_base_url() == "https://search.example.com"
 
 
-def test_tools_package_imports():
-    from tools import (
-        calculate,
-        analyze_data,
-        write_code,
-        get_crypto_price,
-        extract_price_from_text,
-        search_web,
+def test_feature_tool_imports():
+    from features.math.api import calculate
+    from features.analysis.api import analyze_data
+    from features.code.api import write_code
+    from features.price.api import get_crypto_price, extract_price_from_text
+    from features.web_scraping.infrastructure.search_tools import search_web
+    from features.web_scraping.infrastructure.scraping_tools import (
         scrape_website_simple,
         scrape_website_dynamic,
         scrape_website_with_json_capture,
@@ -117,6 +116,96 @@ def test_web_scraping_barrel_imports():
     assert CountryRecentNewsStrategy is not None
 
 
+def test_web_scraping_domain_barrel_imports():
+    from features.web_scraping.domain.models import CandidateDict, WebCandidate
+    from features.web_scraping.domain.classifier import _is_specific_article_hit
+    from features.web_scraping.domain.text_utils import _slugify_periodicos_label
+
+    assert CandidateDict is not None
+    assert WebCandidate is not None
+    assert callable(_is_specific_article_hit)
+    assert callable(_slugify_periodicos_label)
+
+
+def test_web_scraping_infrastructure_barrel_imports():
+    from features.web_scraping.infrastructure.runtime import WebFetchRuntime, WebSearchRuntime
+    from features.web_scraping.infrastructure.registries import (
+        list_web_fetch_provider_specs,
+        list_web_search_provider_specs,
+    )
+
+    assert callable(WebSearchRuntime)
+    assert callable(WebFetchRuntime)
+    assert callable(list_web_search_provider_specs)
+    assert callable(list_web_fetch_provider_specs)
+
+
+def test_web_scraping_post_filter_barrel_imports():
+    from features.web_scraping.application.post_filter import apply_web_response_post_filter
+
+    assert callable(apply_web_response_post_filter)
+
+
+def test_web_scraping_application_barrel_imports():
+    from features.web_scraping.application.synthesis import _synthesize_search_summary
+    from features.web_scraping.application.postprocess import _finalize_web_user_summary
+    from features.web_scraping.application.query_helpers import _build_query_context
+    from features.web_scraping.application.search_pipeline import _fetch_and_score_entries
+    from features.web_scraping.application.fetch_dispatch import _run_generic_web_search_fetch
+    from features.web_scraping.application.flow import run_web_scraping_flow
+    from features.web_scraping.application.agent_strategy import _run_web_scraping_agent_strategy
+    from features.web_scraping.application.retry_flow import _summarize_if_long
+    from features.web_scraping.application.retry_helpers import handle_unreliable_retry
+    from features.web_scraping.application.country_strategy import CountryRecentNewsStrategy
+    from features.web_scraping.application.country_press_helpers import _run_country_press_search_candidates
+    from features.web_scraping.application.strategy_context import _select_strategy_context
+
+    assert callable(_synthesize_search_summary)
+    assert callable(_finalize_web_user_summary)
+    assert callable(_build_query_context)
+    assert callable(_fetch_and_score_entries)
+    assert callable(_run_generic_web_search_fetch)
+    assert callable(run_web_scraping_flow)
+    assert callable(_run_web_scraping_agent_strategy)
+    assert callable(_summarize_if_long)
+    assert callable(handle_unreliable_retry)
+    assert hasattr(CountryRecentNewsStrategy, "execute")
+    assert callable(_run_country_press_search_candidates)
+    assert callable(_select_strategy_context)
+
+
+def test_price_feature_barrel_imports():
+    from features.price.api import get_crypto_price, extract_price_from_text, CRYPTO_KEYWORDS
+
+    assert callable(get_crypto_price)
+    assert callable(extract_price_from_text)
+    assert "bitcoin" in CRYPTO_KEYWORDS
+
+
+def test_math_feature_barrel_imports():
+    from features.math.api import calculate
+    from features.math.infrastructure.node import make_math_node
+
+    assert calculate is not None
+    assert callable(make_math_node)
+
+
+def test_code_feature_barrel_imports():
+    from features.code.api import write_code
+    from features.code.infrastructure.node import make_code_node
+
+    assert write_code is not None
+    assert callable(make_code_node)
+
+
+def test_analysis_feature_barrel_imports():
+    from features.analysis.api import analyze_data
+    from features.analysis.infrastructure.node import make_analysis_node
+
+    assert analyze_data is not None
+    assert callable(make_analysis_node)
+
+
 def test_application_input_guard_use_case_imports():
     from features.security.api import run_input_guard
     assert callable(run_input_guard)
@@ -124,10 +213,10 @@ def test_application_input_guard_use_case_imports():
 
 def test_application_finer_grained_use_case_imports():
     from features.security.api import decide_after_guard as decide_after_guard_direct
-    from application.use_cases.routing_decision import decide_agent_route as decide_agent_route_direct
-    from application.use_cases.supervisor_chain import build_supervisor_chain as build_supervisor_chain_direct
-    from application.use_cases.supervisor_routing import run_supervisor_routing as run_supervisor_routing_direct
-    from application.use_cases.supervisor_shortcuts import should_route_to_web_scraping
+    from features.supervisor.api import decide_agent_route as decide_agent_route_direct
+    from features.supervisor.api import build_supervisor_chain as build_supervisor_chain_direct
+    from features.supervisor.api import run_supervisor_routing as run_supervisor_routing_direct
+    from features.supervisor.api import should_route_to_web_scraping
     assert callable(decide_after_guard_direct)
     assert callable(decide_agent_route_direct)
     assert callable(build_supervisor_chain_direct)
@@ -153,19 +242,19 @@ def test_application_guard_use_case_imports():
 
 
 def test_application_routing_use_case_imports():
-    from application.use_cases.routing_decision import decide_agent_route
+    from features.supervisor.api import decide_agent_route
     assert callable(decide_agent_route)
 
 
 def test_application_supervisor_use_case_imports():
-    from application.use_cases.supervisor_chain import build_supervisor_chain
-    from application.use_cases.supervisor_routing import run_supervisor_routing
+    from features.supervisor.api import build_supervisor_chain
+    from features.supervisor.api import run_supervisor_routing
     assert callable(build_supervisor_chain)
     assert callable(run_supervisor_routing)
 
 
 def test_application_message_helpers_imports():
-    from application.helpers.message_flow_helpers import (
+    from core.helpers.message_flow_helpers import (
         get_last_message_text,
         is_btc_price_query,
         extract_final_ai_text,
@@ -176,14 +265,14 @@ def test_application_message_helpers_imports():
 
 
 def test_application_trace_helpers_imports():
-    from application.helpers.trace_flow_helpers import get_or_create_request_id
+    from core.helpers.trace_flow_helpers import get_or_create_request_id
     assert callable(get_or_create_request_id)
 
 
 def test_audit_imports():
-    import application.helpers.audit_flow_helpers as audit_helpers
-    from domain.model_pricing import MODEL_PRICING as MODEL_PRICING_EXTERNAL
-    from application.helpers.text_truncation import truncate_head_tail, truncate_suffix
+    import core.helpers.audit_flow_helpers as audit_helpers
+    from core.domain.model_pricing import MODEL_PRICING as MODEL_PRICING_EXTERNAL
+    from core.helpers.text_truncation import truncate_head_tail, truncate_suffix
     assert callable(audit_helpers._emit_guard_audit)
     assert callable(audit_helpers._emit_node_outcome)
     assert isinstance(audit_helpers.MODEL_PRICING, dict)
@@ -200,12 +289,12 @@ def test_audit_imports():
 
 
 def test_model_pricing_imports():
-    from domain.model_pricing import MODEL_PRICING
+    from core.domain.model_pricing import MODEL_PRICING
     assert "gpt-4o-mini" in MODEL_PRICING
 
 
 def test_persistence_helpers_imports():
-    from application.helpers.persistence_flow_helpers import (
+    from core.helpers.persistence_flow_helpers import (
         _role_from_msg,
         _row_to_msg,
         _msg_to_jsonl_dict,
@@ -222,7 +311,7 @@ def test_persistence_helpers_imports():
 
 
 def test_scraping_helpers_imports():
-    from application.helpers.scraping_flow_helpers import (
+    from core.helpers.scraping_flow_helpers import (
         _cache_key,
         _get_cache,
         _set_cache,
@@ -241,7 +330,7 @@ def test_scraping_helpers_imports():
 
 
 def test_text_truncation_imports():
-    from application.helpers.text_truncation import truncate_head_tail, truncate_suffix
+    from core.helpers.text_truncation import truncate_head_tail, truncate_suffix
     assert truncate_head_tail("abc", max_chars=10, head_chars=5, tail_chars=3) == "abc"
     assert truncate_suffix("abc", max_chars=10) == "abc"
 
@@ -267,7 +356,7 @@ def test_security_imports():
     from application.policies.hitl_flow import (
         HITL_ENABLED, ask_confirmation, get_confirmation_handler,
     )
-    from application.helpers.security_flow_helpers import (
+    from core.helpers.security_flow_helpers import (
         _BLOCKED_PATTERNS, _RISK_SIGNALS,
         get_blocked_patterns, get_risk_signals, get_human_history,
     )
@@ -298,7 +387,7 @@ def test_agentdog_imports():
 
 
 def test_price_helpers_imports():
-    from application.helpers.price_flow_helpers import (
+    from features.price.application.price_flow_helpers import (
         _extract_structured_price, _extract_price_from_messages,
         _detect_coin_from_query, _format_price_response, _QUERY_COIN_MAP,
     )
@@ -310,11 +399,11 @@ def test_price_helpers_imports():
 # ==================== NODOS ====================
 
 def test_nodes_package_imports():
-    from nodes import (
-        make_math_node, make_analysis_node,
-        make_code_node, make_web_scraping_node,
-        make_generic_agent_node,
-    )
+    from core.helpers.generic_node_factory import make_generic_agent_node
+    from features.math.infrastructure.node import make_math_node
+    from features.analysis.infrastructure.node import make_analysis_node
+    from features.code.infrastructure.node import make_code_node
+    from features.web_scraping.infrastructure.node import make_web_scraping_node
     assert callable(make_math_node)
     assert callable(make_analysis_node)
     assert callable(make_code_node)
@@ -392,7 +481,7 @@ def test_tool_execution_imports():
 
 def test_tool_audit_imports():
     from application.services.tool_audit import ToolAuditService, ToolCallAuditEvent, tool_audit_service
-    from application.services.tool_audit_store import ToolAuditStore, tool_audit_store
+    from features.sessions.application.tool_audit_store import ToolAuditStore, tool_audit_store
     assert ToolAuditService is not None
     assert ToolCallAuditEvent is not None
     assert tool_audit_service is not None
@@ -401,7 +490,7 @@ def test_tool_audit_imports():
 
 
 def test_background_task_imports():
-    from application.services.background_tasks import BackgroundTaskRecord, BackgroundTaskService, BackgroundTaskState, BackgroundTaskStore, BackgroundTaskSummary, background_task_service, background_task_store
+    from features.sessions.application.background_tasks import BackgroundTaskRecord, BackgroundTaskService, BackgroundTaskState, BackgroundTaskStore, BackgroundTaskSummary, background_task_service, background_task_store
     assert BackgroundTaskRecord is not None
     assert BackgroundTaskService is not None
     assert BackgroundTaskState is not None
@@ -426,7 +515,7 @@ def test_tool_impact_imports():
 
 
 def test_context_budget_imports():
-    from application.services.context_budget import ContextBudgetItem, SessionContextBudget, SessionContextBudgetService, context_budget_service
+    from features.sessions.application.context_budget import ContextBudgetItem, SessionContextBudget, SessionContextBudgetService, context_budget_service
     assert ContextBudgetItem is not None
     assert SessionContextBudget is not None
     assert SessionContextBudgetService is not None
@@ -434,7 +523,7 @@ def test_context_budget_imports():
 
 
 def test_session_bookmark_imports():
-    from application.services.session_bookmarks import SessionBookmark, SessionBookmarkService, SessionBookmarkStore, session_bookmark_service, session_bookmark_store
+    from features.sessions.application.session_bookmarks import SessionBookmark, SessionBookmarkService, SessionBookmarkStore, session_bookmark_service, session_bookmark_store
     assert SessionBookmark is not None
     assert SessionBookmarkService is not None
     assert SessionBookmarkStore is not None
@@ -451,19 +540,19 @@ def test_runtime_session_closure_imports():
 
 
 def test_session_persistence_imports():
-    from application.services.session_persistence import SessionPersistence, persistence
+    from features.sessions.application.session_persistence import SessionPersistence, persistence
     assert SessionPersistence is not None
     assert persistence is not None
 
 
 def test_session_memory_imports():
-    from application.services.session_memory import SessionMemory, memory
+    from features.sessions.application.session_memory import SessionMemory, memory
     assert SessionMemory is not None
     assert memory is not None
 
 
 def test_memory_retrieval_imports():
-    from application.services.memory_retrieval import MemorySearchHit, MemoryRetrievalService, memory_retrieval_service
+    from features.sessions.application.memory_retrieval import MemorySearchHit, MemoryRetrievalService, memory_retrieval_service
     assert MemorySearchHit is not None
     assert MemoryRetrievalService is not None
     assert memory_retrieval_service is not None
@@ -477,7 +566,7 @@ def test_tool_approval_imports():
 
 
 def test_session_artifacts_imports():
-    from application.services.session_artifacts import SessionArtifact, SessionArtifactService, SessionArtifactStore, session_artifact_service, session_artifact_store
+    from features.sessions.application.session_artifacts import SessionArtifact, SessionArtifactService, SessionArtifactStore, session_artifact_service, session_artifact_store
     assert SessionArtifact is not None
     assert SessionArtifactService is not None
     assert SessionArtifactStore is not None
@@ -486,7 +575,7 @@ def test_session_artifacts_imports():
 
 
 def test_session_inspection_imports():
-    from application.services.session_inspection import format_background_task_state, format_background_task_summary, format_bookmark_detail, format_bookmark_list, format_command_detail, format_command_registry, format_context_budget, format_inspection_help, format_memory_search_results, format_prompt_snapshot, format_prompt_snapshot_list, format_replay_timeline, format_session_artifact, format_tool_approval_preview, format_tool_catalog, format_tool_impact_preview
+    from features.sessions.application.session_inspection import format_background_task_state, format_background_task_summary, format_bookmark_detail, format_bookmark_list, format_command_detail, format_command_registry, format_context_budget, format_inspection_help, format_memory_search_results, format_prompt_snapshot, format_prompt_snapshot_list, format_replay_timeline, format_session_artifact, format_tool_approval_preview, format_tool_catalog, format_tool_impact_preview
     assert callable(format_background_task_state)
     assert callable(format_background_task_summary)
     assert callable(format_bookmark_detail)
@@ -506,7 +595,7 @@ def test_session_inspection_imports():
 
 
 def test_prompt_versioning_imports():
-    from application.services.prompt_versioning import PromptSnapshot, PromptSnapshotStore, PromptVersionService, prompt_snapshot_store, prompt_version_service
+    from features.sessions.application.prompt_versioning import PromptSnapshot, PromptSnapshotStore, PromptVersionService, prompt_snapshot_store, prompt_version_service
     assert PromptSnapshot is not None
     assert PromptSnapshotStore is not None
     assert PromptVersionService is not None
@@ -515,7 +604,7 @@ def test_prompt_versioning_imports():
 
 
 def test_session_replay_imports():
-    from application.services.session_replay import ReplayTimelineItem, SessionReplay, SessionReplayService, format_session_replay, session_replay_service
+    from features.sessions.application.session_replay import ReplayTimelineItem, SessionReplay, SessionReplayService, format_session_replay, session_replay_service
     assert ReplayTimelineItem is not None
     assert SessionReplay is not None
     assert SessionReplayService is not None
@@ -526,7 +615,7 @@ def test_session_replay_imports():
 def test_prompt_assembly_imports():
     from application.services.prompt_assembly import AgentPromptAssembly, build_agent_prompt_assembly, build_agent_prompt_extra_context
     from application.services.prompt_loader import load_agent_prompt
-    from application.services.prompt_versioning import PromptSnapshot, PromptSnapshotStore, PromptVersionService, prompt_snapshot_store, prompt_version_service
+    from features.sessions.application.prompt_versioning import PromptSnapshot, PromptSnapshotStore, PromptVersionService, prompt_snapshot_store, prompt_version_service
     assert AgentPromptAssembly is not None
     assert callable(build_agent_prompt_assembly)
     assert callable(build_agent_prompt_extra_context)
@@ -573,8 +662,8 @@ def test_coordinator_mode_imports():
 
 def test_security_runtime_overrides(monkeypatch):
     from application.policies.security_flow import input_guard
-    from application.helpers.security_flow_helpers import get_blocked_patterns, get_risk_signals
-    from application.helpers.security_flow_helpers import get_human_history
+    from core.helpers.security_flow_helpers import get_blocked_patterns, get_risk_signals
+    from core.helpers.security_flow_helpers import get_human_history
     from langchain_core.messages import HumanMessage
 
     monkeypatch.setenv("SECURITY_BLOCKED_PATTERNS", "custom block phrase")
@@ -598,10 +687,10 @@ def test_security_runtime_overrides(monkeypatch):
 def test_nodes_factories_return_callables():
     """Cada factory debe retornar un callable, no ejecutar nada."""
     from unittest.mock import MagicMock
-    from nodes import (
-        make_math_node, make_analysis_node,
-        make_code_node, make_web_scraping_node,
-    )
+    from features.math.infrastructure.node import make_math_node
+    from features.analysis.infrastructure.node import make_analysis_node
+    from features.code.infrastructure.node import make_code_node
+    from features.web_scraping.infrastructure.node import make_web_scraping_node
     mock_agent = MagicMock()
     mock_llm_fn = MagicMock()
 
@@ -639,7 +728,7 @@ def test_route_agent_logic():
     from application.composition.graph import route_agent
     from langgraph.graph import END
     from langchain_core.messages import HumanMessage
-    from domain.models import AgentState
+    from core.domain.models import AgentState
 
     base = cast(AgentState, {
         "messages": [HumanMessage(content="test")],
@@ -664,7 +753,7 @@ def test_route_agent_logic():
 def test_inv1_messages_reducer_is_append_only():
     """INV-1: AgentState.messages reducer MUST be lambda x, y: x + y."""
     import inspect
-    from domain.models import AgentState
+    from core.domain.models import AgentState
     source = inspect.getsource(AgentState)
     assert "lambda x, y: x + y" in source, "Reducer append-only no encontrado en AgentState"
 
@@ -680,16 +769,16 @@ def test_inv10_eval_only_in_agents():
     """INV-10: eval() no debe aparecer en ningún módulo nuevo del refactoring."""
     import ast, pathlib
     new_modules = [
-        "domain/models.py", "application/policies/scrape_tracker.py",
+        "core/domain/models.py", "application/policies/scrape_tracker.py",
         "application/policies/agentdog.py",
-        "application/helpers/price_flow_helpers.py",
-        "application/helpers/security_flow_helpers.py",
-        "application/helpers/audit_flow_helpers.py",
-        "application/helpers/config_flow_helpers.py",
+        "features/price/application/price_flow_helpers.py",
+        "core/helpers/security_flow_helpers.py",
+        "core/helpers/audit_flow_helpers.py",
+        "core/helpers/config_flow_helpers.py",
         "application/policies/hitl_flow.py",
         "application/policies/security_flow.py",
-        "application/helpers/persistence_flow_helpers.py",
-        "application/helpers/scraping_flow_helpers.py",
+        "core/helpers/persistence_flow_helpers.py",
+        "core/helpers/scraping_flow_helpers.py",
         "application/composition/graph.py", "application/services/agents_factory.py",
     ]
     root = pathlib.Path(__file__).parent.parent

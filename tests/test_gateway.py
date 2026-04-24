@@ -16,7 +16,7 @@ class TestLaneQueue:
     @pytest.mark.asyncio
     async def test_send_handler_retorna_inmediatamente(self):
         """send() con un handler que retorna rápido → retorna el resultado."""
-        from application.services.session_gateway import LaneQueue
+        from features.sessions.application.session_gateway import LaneQueue
 
         async def handler(msg: str) -> str:
             return f"respuesta: {msg}"
@@ -30,7 +30,7 @@ class TestLaneQueue:
         """Dos send() simultáneos para la misma sesión:
         el primero se procesa, el segundo entra en modo collect (retorna "").
         """
-        from application.services.session_gateway import LaneQueue
+        from features.sessions.application.session_gateway import LaneQueue
 
         started_event = asyncio.Event()
         resume_event  = asyncio.Event()
@@ -60,7 +60,7 @@ class TestLaneQueue:
     @pytest.mark.asyncio
     async def test_send_sesiones_diferentes_no_interfieren(self):
         """Dos send() para sesiones distintas son independientes."""
-        from application.services.session_gateway import LaneQueue
+        from features.sessions.application.session_gateway import LaneQueue
 
         async def handler(msg: str) -> str:
             return f"ok:{msg}"
@@ -74,7 +74,7 @@ class TestLaneQueue:
     @pytest.mark.asyncio
     async def test_send_handler_con_excepcion_retorna_error_string(self):
         """Si el handler lanza una excepción, send() retorna 'Error: ...'."""
-        from application.services.session_gateway import LaneQueue
+        from features.sessions.application.session_gateway import LaneQueue
 
         async def failing_handler(msg: str) -> str:
             raise ValueError("handler falló")
@@ -86,7 +86,7 @@ class TestLaneQueue:
     @pytest.mark.asyncio
     async def test_close_invalida_runs_activos(self):
         """close() incrementa la generation, invalidando runs activos."""
-        from application.services.session_gateway import LaneQueue
+        from features.sessions.application.session_gateway import LaneQueue
 
         started_event = asyncio.Event()
         resume_event  = asyncio.Event()
@@ -114,7 +114,7 @@ class TestLaneQueue:
     @pytest.mark.asyncio
     async def test_lane_queue_concurrency_un_run_a_la_vez(self):
         """LaneQueue no inicia el siguiente mensaje hasta que termina el actual."""
-        from application.services.session_gateway import LaneQueue
+        from features.sessions.application.session_gateway import LaneQueue
 
         execution_order = []
 
@@ -145,7 +145,7 @@ class TestLaneQueue:
 
     @pytest.mark.asyncio
     async def test_shutdown_limpia_todos_los_lanes(self):
-        from application.services.session_gateway import LaneQueue
+        from features.sessions.application.session_gateway import LaneQueue
 
         async def handler(msg: str) -> str:
             return "ok"
@@ -179,14 +179,14 @@ def mock_gateway(monkeypatch):
     })
 
     with (
-        patch("application.services.session_gateway.create_supervisor_graph", return_value=mock_graph),
-        patch("application.services.session_gateway.persistence.load_messages",    return_value=[]),
-        patch("application.services.session_gateway.persistence.save_message"),
-        patch("application.services.session_gateway.persistence.save_session"),
-        patch("application.services.session_gateway.memory.load_memory_context",   return_value=None),
-        patch("application.services.session_gateway.memory.distill_memory",        AsyncMock(return_value=None)),
+        patch("features.sessions.application.session_gateway.create_supervisor_graph", return_value=mock_graph),
+        patch("features.sessions.application.session_gateway.persistence.load_messages",    return_value=[]),
+        patch("features.sessions.application.session_gateway.persistence.save_message"),
+        patch("features.sessions.application.session_gateway.persistence.save_session"),
+        patch("features.sessions.application.session_gateway.memory.load_memory_context",   return_value=None),
+        patch("features.sessions.application.session_gateway.memory.distill_memory",        AsyncMock(return_value=None)),
     ):
-        from application.services.session_gateway import AgentGateway
+        from features.sessions.application.session_gateway import AgentGateway
         gw = AgentGateway()
         yield gw, mock_graph
 
@@ -204,7 +204,7 @@ async def test_agentgateway_send_persiste_mensajes(mock_gateway):
     """send() llama a save_message dos veces: human + ai."""
     gw, _ = mock_gateway
 
-    with patch("application.services.session_gateway.persistence.save_message") as mock_save:
+    with patch("features.sessions.application.session_gateway.persistence.save_message") as mock_save:
         await gw.send("user-456", "mensaje de prueba", request_id="req-2")
         assert mock_save.call_count == 2
         calls = mock_save.call_args_list
@@ -252,7 +252,7 @@ async def test_agentgateway_close_session_llama_distill_memory(mock_gateway):
     """close_session() invoca distill_memory."""
     gw, _ = mock_gateway
 
-    with patch("application.services.session_gateway.memory.distill_memory", AsyncMock(return_value=None)) as mock_distill:
+    with patch("features.sessions.application.session_gateway.memory.distill_memory", AsyncMock(return_value=None)) as mock_distill:
         await gw.send("sess-close", "msg", request_id="req-close")
         result = await gw.close_session("sess-close")
         mock_distill.assert_called_once()
@@ -264,7 +264,7 @@ async def test_agentgateway_close_session_retorna_si_memoria_fue_escrita(mock_ga
     """close_session() debe exponer si la memoria fue persistida."""
     gw, _ = mock_gateway
 
-    with patch("application.services.session_gateway.memory.distill_memory", AsyncMock(return_value=True)):
+    with patch("features.sessions.application.session_gateway.memory.distill_memory", AsyncMock(return_value=True)):
         await gw.send("sess-close-ok", "msg", request_id="req-close-ok")
         result = await gw.close_session("sess-close-ok")
 
@@ -287,7 +287,7 @@ async def test_agentgateway_send_con_grafo_que_falla_persiste_ai_error(mock_gate
     gw, mock_graph = mock_gateway
     mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("grafo falló"))
 
-    with patch("application.services.session_gateway.persistence.save_message") as mock_save:
+    with patch("features.sessions.application.session_gateway.persistence.save_message") as mock_save:
         result = await gw.send("sess-fail-persist", "msg que falla", request_id="req-fail-persist")
 
     assert "Error: grafo falló" == result

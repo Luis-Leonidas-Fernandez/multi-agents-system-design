@@ -113,7 +113,7 @@ class ToolImpactService:
 
         if tool_name == "scrape_website_with_json_capture" and url:
             candidate_files.append(self._build_json_capture_path(url))
-            side_effects = "escribe bundles JSON en data_trading/"
+            side_effects = "escribe bundles JSON en data/web_scraping/data_trading/"
             notes.append("Puede persistir respuestas JSON y metadatos de captura")
         elif tool_name == "web_fetch":
             notes.append("Recupera contenido web y sintetiza respuesta sin tocar archivos locales")
@@ -337,7 +337,7 @@ class ToolImpactService:
     def _build_json_capture_path(self, url: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "_", url.lower()).strip("_")[:40] or "capture"
         sha = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
-        return f"data_trading/{slug}_{sha}_<unix_ts>.json"
+        return f"data/web_scraping/data_trading/{slug}_{sha}_<unix_ts>.json"
 
 
 tool_impact_service = ToolImpactService()
