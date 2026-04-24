@@ -40,7 +40,7 @@ LangGraph es un framework que permite construir agentes como **grafos de estado*
 
 ### Paso 1: Configuración del Proyecto
 
-**Archivo: `application/helpers/config_flow_helpers.py`**
+**Archivo: `core/helpers/config_flow_helpers.py`**
 
 **Propósito**: Centralizar la configuración del proyecto, especialmente la conexión al modelo LLM.
 
@@ -51,7 +51,7 @@ LangGraph es un framework que permite construir agentes como **grafos de estado*
 
 ```python
 """
-application/helpers/config_flow_helpers.py - Configuración centralizada del proyecto
+core/helpers/config_flow_helpers.py - Configuración centralizada del proyecto
 """
 import os
 from dotenv import load_dotenv
@@ -221,7 +221,7 @@ Sé preciso y muestra tu razonamiento paso a paso."""
 
 ### Paso 4: Definir el Estado Compartido
 
-**Archivo: `application/use_cases/supervisor_flow.py` (primera parte)**
+**Archivo: `features/supervisor/application/supervisor_routing.py` (primera parte)**
 
 **Propósito**: Definir qué información se comparte entre todos los agentes.
 
@@ -232,7 +232,7 @@ Sé preciso y muestra tu razonamiento paso a paso."""
 
 ```python
 """
-application/use_cases/supervisor_flow.py - Sistema supervisor multi-agentes
+features/supervisor/application/supervisor_routing.py - Sistema supervisor multi-agentes
 """
 from typing import TypedDict, Annotated, Literal
 from langgraph.graph import StateGraph, END
@@ -263,7 +263,7 @@ class AgentState(TypedDict):
 
 ### Paso 5: Crear Nodos (Funciones de Agentes)
 
-**Archivo: `application/use_cases/supervisor_flow.py` (segunda parte)**
+**Archivo: `features/supervisor/application/supervisor_routing.py` (segunda parte)**
 
 **Propósito**: Crear funciones que representan cada agente en el grafo.
 
@@ -322,7 +322,7 @@ def math_node(state: AgentState) -> AgentState:
 
 ### Paso 6: Crear el Supervisor
 
-**Archivo: `application/use_cases/supervisor_flow.py` (tercera parte)**
+**Archivo: `features/supervisor/application/supervisor_routing.py` (tercera parte)**
 
 **Propósito**: Crear el agente que decide qué agente especializado debe manejar cada tarea.
 
@@ -408,7 +408,7 @@ def supervisor_node(state: AgentState) -> AgentState:
 
 ### Paso 7: Crear la Función de Enrutamiento
 
-**Archivo: `application/use_cases/supervisor_flow.py` (cuarta parte)**
+**Archivo: `features/supervisor/application/supervisor_routing.py` (cuarta parte)**
 
 **Propósito**: Decidir a qué nodo ir basándose en el estado actual.
 
@@ -462,7 +462,7 @@ def route_agent(state: AgentState) -> Literal["math_agent", "analysis_agent", "c
 
 ### Paso 8: Construir el Grafo
 
-**Archivo: `application/use_cases/supervisor_flow.py` (quinta parte)**
+**Archivo: `features/supervisor/application/supervisor_routing.py` (quinta parte)**
 
 **Propósito**: Conectar todos los nodos para crear el sistema completo.
 
@@ -637,14 +637,14 @@ if __name__ == "__main__":
 
 Sigue este orden para construir el sistema:
 
-- [ ] **Paso 1**: Crear `application/helpers/config_flow_helpers.py` con función `get_llm()`
-- [ ] **Paso 2**: Crear herramientas en `tools/` (calculate, analyze_data, etc.)
+- [ ] **Paso 1**: Crear `core/helpers/config_flow_helpers.py` con función `get_llm()`
+- [ ] **Paso 2**: Crear herramientas/feat slices en `features/*/infrastructure/`
 - [ ] **Paso 3**: Crear agentes especializados en `application/services/agents_factory.py`
-- [ ] **Paso 4**: Definir `AgentState` en `domain/models.py`
-- [ ] **Paso 5**: Crear nodos para cada agente en `application/use_cases/supervisor_flow.py`
-- [ ] **Paso 6**: Crear nodo supervisor en `application/use_cases/supervisor_flow.py`
-- [ ] **Paso 7**: Crear función de enrutamiento en `application/use_cases/supervisor_flow.py`
-- [ ] **Paso 8**: Construir el grafo en `application/use_cases/supervisor_flow.py`
+- [ ] **Paso 4**: Definir `AgentState` en `core/domain/models.py`
+- [ ] **Paso 5**: Crear nodos para cada agente en `features/supervisor/application/` y `features/*/infrastructure/`
+- [ ] **Paso 6**: Crear nodo supervisor en `features/supervisor/application/supervisor_routing.py`
+- [ ] **Paso 7**: Crear función de enrutamiento en `features/supervisor/application/routing_decision.py`
+- [ ] **Paso 8**: Construir el grafo en `application/composition/graph.py`
 - [ ] **Paso 9**: Crear `main.py` para interactuar con el sistema
 
 ---

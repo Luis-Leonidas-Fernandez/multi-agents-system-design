@@ -37,13 +37,13 @@
 
 **Pasos**:
 1. Crear estructura de carpetas
-2. Crear `application/helpers/config_flow_helpers.py` - Explicar por qué empezar aquí
+2. Crear `core/helpers/config_flow_helpers.py` - Explicar por qué empezar aquí
 3. Configurar variables de entorno
 4. Crear función `get_llm()`
 
 **Código a escribir**:
 ```python
-# application/helpers/config_flow_helpers.py
+# core/helpers/config_flow_helpers.py
 import os
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -137,7 +137,7 @@ def create_math_agent():
 
 **Código a escribir**:
 ```python
-# application/use_cases/supervisor_flow.py (primera parte)
+# features/supervisor/application/supervisor_routing.py (primera parte)
 class AgentState(TypedDict):
     messages: Annotated[list, lambda x, y: x + y]
     next_agent: str
@@ -165,7 +165,7 @@ def math_node(state: AgentState) -> AgentState:
 
 **Código a escribir**:
 ```python
-# application/use_cases/supervisor_flow.py (segunda parte)
+# features/supervisor/application/supervisor_routing.py (segunda parte)
 def supervisor_node(state: AgentState) -> AgentState:
     # Analizar solicitud
     # Decidir qué agente usar
@@ -191,7 +191,7 @@ def supervisor_node(state: AgentState) -> AgentState:
 
 **Código a escribir**:
 ```python
-# application/use_cases/supervisor_flow.py (tercera parte)
+# features/supervisor/application/supervisor_routing.py (tercera parte)
 def create_supervisor_graph():
     workflow = StateGraph(AgentState)
     # Agregar nodos

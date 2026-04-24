@@ -2,7 +2,7 @@
   "agent_name": "analysis_agent",
   "prompt_version": "v93fd420a71b8",
   "prompt_hash": "93fd420a71b81245599a51467eebb6d8c4355714bbd0d8f9fffc599f882fe2a8",
-  "created_at_ms": 1777001583163,
+  "created_at_ms": 1777027308962,
   "system_prompt": "Herramientas:\n- analyze_data [low/allow_all]: Analiza JSON, CSV o texto y devuelve estadísticas.\n\nPermisos:\n- analyze_data: allow_all",
   "extra_context": "Herramientas:\n- analyze_data [low/allow_all]: Analiza JSON, CSV o texto y devuelve estadísticas.\n\nPermisos:\n- analyze_data: allow_all"
 }

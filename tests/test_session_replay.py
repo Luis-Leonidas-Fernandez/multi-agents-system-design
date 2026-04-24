@@ -32,7 +32,7 @@ def test_session_replay_service_combina_eventos_en_secciones(monkeypatch):
         ],
         background_tasks=[{"task_id": "task-1", "status": "completed", "attempt_number": 1, "title": "hacer algo"}],
         background_task_summary={"total": 1},
-        prompt_snapshots=[{"agent_name": "math_agent", "prompt_version": "v1", "prompt_hash": "abc", "snapshot_path": "agents/prompts/math_agent/PROMPT_SNAPSHOT.json"}],
+        prompt_snapshots=[{"agent_name": "math_agent", "prompt_version": "v1", "prompt_hash": "abc", "snapshot_path": "agents/snapshots/math_agent/PROMPT_SNAPSHOT.json"}],
         trace_ids=["trace-1"],
     )
 

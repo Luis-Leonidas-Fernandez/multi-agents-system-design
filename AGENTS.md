@@ -49,7 +49,7 @@
 
 ## LLM Provider / Config
 
-- `application/helpers/config_flow_helpers.py:get_llm()` must support all three providers: `openai`, `azure`, `ollama`. Removing a provider branch must be flagged.
+- `core/helpers/config_flow_helpers.py:get_llm()` must support all three providers: `openai`, `azure`, `ollama`. Removing a provider branch must be flagged.
 - `OPENAI_API_KEY` absence must raise a clear `ValueError`, not silently default to an empty string.
 - Temperature must come from `TEMPERATURE` env var, not hardcoded.
 

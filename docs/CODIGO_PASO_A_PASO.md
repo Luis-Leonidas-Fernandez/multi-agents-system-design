@@ -4,9 +4,9 @@ Esta guía te lleva paso a paso escribiendo el código desde cero. Sigue el orde
 
 ---
 
-## 📁 Paso 1: Crear `application/helpers/config_flow_helpers.py`
+## 📁 Paso 1: Crear `core/helpers/config_flow_helpers.py`
 
-Crea un nuevo archivo llamado `application/helpers/config_flow_helpers.py`:
+Crea un nuevo archivo llamado `core/helpers/config_flow_helpers.py`:
 
 ```python
 """
@@ -351,9 +351,9 @@ print(result["messages"][-1].content)
 
 ---
 
-## 📁 Paso 4: Crear `application/use_cases/supervisor_flow.py` - Parte 1 (Estado y Nodos)
+## 📁 Paso 4: Crear `features/supervisor/application/supervisor_routing.py` - Parte 1 (Estado y Nodos)
 
-Crea un archivo llamado `application/use_cases/supervisor_flow.py`:
+Crea un archivo llamado `features/supervisor/application/supervisor_routing.py`:
 
 ```python
 """
@@ -485,9 +485,9 @@ print(result["messages"][-1].content)
 
 ---
 
-## 📁 Paso 5: Crear `application/use_cases/supervisor_flow.py` - Parte 2 (Supervisor)
+## 📁 Paso 5: Crear `features/supervisor/application/supervisor_routing.py` - Parte 2 (Supervisor)
 
-Continúa en `application/use_cases/supervisor_flow.py`:
+Continúa en `features/supervisor/application/supervisor_routing.py`:
 
 ```python
 """
@@ -577,9 +577,9 @@ print(f"Supervisor decidió: {result['next_agent']}")
 
 ---
 
-## 📁 Paso 6: Crear `application/use_cases/supervisor_flow.py` - Parte 3 (Enrutamiento y Grafo)
+## 📁 Paso 6: Crear `features/supervisor/application/supervisor_routing.py` - Parte 3 (Enrutamiento y Grafo)
 
-Continúa en `application/use_cases/supervisor_flow.py`:
+Continúa en `features/supervisor/application/supervisor_routing.py`:
 
 ```python
 """

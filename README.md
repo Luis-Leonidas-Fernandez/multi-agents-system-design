@@ -13,15 +13,15 @@ Sistema multi-agentes implementado con LangGraph siguiendo el patrón supervisor
 │   ├── policies/          # Guardrails, HITL y seguridad
 │   └── composition/       # Composition root
 │       └── graph.py       # Grafo supervisor/coordinador y wiring
-├── core/                  # Contratos y utilidades compartidas (domain/helpers/persistence)
+├── core/                  # Contratos y utilidades compartidas (domain/helpers/persistence/ports)
 ├── features/              # Slices de negocio (web_scraping, supervisor, security, price, math, analysis, code)
-├── infra/                 # Infraestructura (persistence.py, scraping_infra.py, memory.py)
-├── core/ports/            # Contratos/puertos compartidos
-├── features/*/infrastructure/  # Nodos/adaptadores por feature
-├── tools/                 # Compatibilidad temporal para tools migradas
+├── data/                  # Runtime data (sessions, logs, captures)
+├── config/                # Configuración de integración/deployment
 ├── integrations/          # Integraciones externas (MCP, APIs auxiliares)
-├── agents/                # System prompts en Markdown por agente (hot-reload opcional)
-├── agents/prompts/        # Snapshots de prompts versionados por agente
+├── application/           # Shell técnico, policies, CLI y orquestación
+├── ui/                    # Interfaz local/TUI alternativa
+├── agents/prompts/        # Prompts en Markdown por agente
+├── agents/snapshots/      # Snapshots y histories de prompts versionados
 ├── features/analytics/    # Dashboards, scripts y queries de observabilidad
 ├── ui/                    # Frontend alternativo (claude_app.py)
 ├── data/sessions/         # Historial persistido de sesiones (SQLite)

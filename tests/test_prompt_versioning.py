@@ -62,8 +62,8 @@ def test_session_inspection_format_prompt_snapshot_incluye_paths():
             "created_at_ms": 1,
             "extra_context": "x",
             "system_prompt": "y",
-            "snapshot_path": "agents/prompts/math_agent/PROMPT_SNAPSHOT.json",
-            "history_path": "agents/prompts/math_agent/PROMPT_HISTORY.jsonl",
+            "snapshot_path": "agents/snapshots/math_agent/PROMPT_SNAPSHOT.json",
+            "history_path": "agents/snapshots/math_agent/PROMPT_HISTORY.jsonl",
         }
     )
 

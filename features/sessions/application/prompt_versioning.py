@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 
-_PROMPT_DIR = Path("agents") / "prompts"
+_PROMPT_DIR = Path("agents") / "snapshots"
 
 
 @dataclass(frozen=True)

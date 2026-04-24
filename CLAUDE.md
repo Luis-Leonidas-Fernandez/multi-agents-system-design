@@ -55,7 +55,7 @@ User → input_guard → supervisor_node → route_agent() → [math|analysis|co
 
 **Key files:**
 - [core/helpers/config_flow_helpers.py](core/helpers/config_flow_helpers.py): `get_llm()` — selects provider via `LLM_PROVIDER` (openai/azure/ollama).
-- [application/services/agents_factory.py](application/services/agents_factory.py): Four specialized `create_react_agent` agents; feature-owned tools live under `features/*/infrastructure/` with `tools/` kept only as a compatibility shim.
+- [application/services/agents_factory.py](application/services/agents_factory.py): Four specialized `create_react_agent` agents; feature-owned tools live under `features/*/infrastructure/` and external integrations under `integrations/`.
 - [application/composition/graph.py](application/composition/graph.py): `StateGraph`, middleware, HITL, AgentDoG guardrail, and `create_supervisor_graph()`.
 - [main.py](main.py): Async REPL with persistent session history in `data/sessions/`.
 - [tests/test_routing.py](tests/test_routing.py): Routing tests (no API key needed, uses mocks).

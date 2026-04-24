@@ -11,7 +11,7 @@ Este repo incluye un servidor MCP local para conectar Codex con Google Calendar.
 
 ## Archivo del servidor
 
-`/Users/luis/Desktop/PROYECTOS/06_multi_agents/tools/google_calendar_mcp.py`
+`/Users/luis/Desktop/PROYECTOS/06_multi_agents/integrations/google_calendar_mcp.py`
 
 ## Variables de entorno requeridas
 
@@ -43,7 +43,7 @@ Agregá este MCP server a `~/.codex/config.toml`:
 ```toml
 [mcp_servers.google_calendar]
 command = "/usr/bin/python3"
-args = ["/Users/luis/Desktop/PROYECTOS/06_multi_agents/tools/google_calendar_mcp.py"]
+args = ["/Users/luis/Desktop/PROYECTOS/06_multi_agents/integrations/google_calendar_mcp.py"]
 ```
 
 ## Nota importante
