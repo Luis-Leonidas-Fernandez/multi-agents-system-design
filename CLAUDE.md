@@ -14,6 +14,8 @@ cp .env.example .env          # then add OPENAI_API_KEY
 
 ```bash
 python main.py                          # interactive CLI (con historial persistente en data/sessions/)
+python main.py --frontend-bridge        # WebSocket bridge para el frontend React
+make dev                                # Vite + frontend bridge con restart automático del backend
 docker compose up --build               # containerized (mounts data/web_scraping/data_trading/ as volume)
 python application/composition/graph.py  # quick test run (test_graph en __main__)
 pytest tests/test_routing.py -v        # tests de routing (no requieren API key)

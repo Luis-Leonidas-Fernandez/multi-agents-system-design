@@ -19,11 +19,11 @@ Sistema multi-agentes implementado con LangGraph siguiendo el patrón supervisor
 ├── config/                # Configuración de integración/deployment
 ├── integrations/          # Integraciones externas (MCP, APIs auxiliares)
 ├── application/           # Shell técnico, policies, CLI y orquestación
-├── ui/                    # Interfaz local/TUI alternativa
+├── ui/                    # Interfaz local/TUI alternativa (legacy)
 ├── agents/prompts/        # Prompts en Markdown por agente
 ├── agents/snapshots/      # Snapshots y histories de prompts versionados
 ├── features/analytics/    # Dashboards, scripts y queries de observabilidad
-├── ui/                    # Frontend alternativo (claude_app.py)
+├── frontend/              # Dashboard web React/Vite
 ├── data/sessions/         # Historial persistido de sesiones (SQLite)
 ├── docs/                  # Documentación larga y material educativo
 ├── docs/flujo/            # Diagramas de flujo del sistema
@@ -43,6 +43,8 @@ cp .env.example .env          # agregar OPENAI_API_KEY
 
 ```bash
 python main.py                           # REPL interactivo con historial en data/sessions/
+python main.py --frontend-bridge         # WebSocket bridge para frontend en ws://localhost:8787
+make dev                                 # Vite + bridge con restart automático del backend
 docker compose up --build                # containerizado (monta data/web_scraping/data_trading/ como volumen)
 python application/composition/graph.py  # test rápido del grafo (__main__)
 pytest tests/ -v                         # suite completa (399 tests, no requieren API key)

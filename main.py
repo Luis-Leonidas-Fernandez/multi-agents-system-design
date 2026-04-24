@@ -1,4 +1,5 @@
 """Punto de entrada principal para el sistema multi-agentes (Async)."""
+import asyncio
 import os
 import sys
 
@@ -11,9 +12,18 @@ def _run_ui_bridge() -> None:
     run_ui_bridge()
 
 
+def _run_frontend_bridge() -> None:
+    from application.frontend_bridge.server import serve_frontend_bridge
+    asyncio.run(serve_frontend_bridge())
+
+
 def main() -> None:
     if "--ui-bridge" in sys.argv:
         _run_ui_bridge()
+        return
+
+    if "--frontend-bridge" in sys.argv:
+        _run_frontend_bridge()
         return
 
     bootstrap()
