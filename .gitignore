@@ -33,3 +33,9 @@ data/web_scraping/data_trading/
 
 # Misc
 .atl/
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Generated prompt snapshots
+agents/snapshots/
