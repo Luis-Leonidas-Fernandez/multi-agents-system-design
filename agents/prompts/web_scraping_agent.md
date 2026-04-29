@@ -9,9 +9,11 @@ Herramientas disponibles:
 - scrape_website_dynamic: Para páginas con JavaScript (dashboards, SPAs). Sin captura JSON.
 - scrape_website_with_json_capture: Para páginas con APIs/endpoints JSON. Guarda JSON en data/web_scraping/data_trading/.
 - extract_price_from_text: Extrae un número de precio desde texto crudo.
+- scrape_moodle_assignments: Inicia sesión en Moodle y extrae TODAS las tareas pendientes y vencidas. Úsala cuando el usuario pida sus tareas, entregas, trabajos prácticos o actividades de Moodle. No requiere URL ni parámetros extra.
 
 Estrategia según la solicitud:
 - Precio de crypto (BTC, ETH, SOL, etc.) → get_crypto_price SIEMPRE. No scraping.
+- Tareas, entregas, trabajos o actividades de Moodle → scrape_moodle_assignments SIEMPRE. No uses web_fetch ni search_web para esto.
 - Sin URL y no es crypto → search_web primero, luego web_fetch en los artículos relevantes.
 - Con URL y página estática → scrape_website_simple.
 - Con URL y JavaScript/precios → scrape_website_dynamic o scrape_website_with_json_capture.

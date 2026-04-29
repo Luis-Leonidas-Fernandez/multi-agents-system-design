@@ -242,6 +242,11 @@ class AgentGateway:
                 self._persistence.save_message(session_key, "ai", last.content, request_id=request_id)
                 return last.content
             return ""
+        except asyncio.CancelledError:
+            state["request_id"] = request_id
+            state["trace_id"] = state.get("trace_id", "")
+            self._states[session_key] = state
+            return ""
         except Exception as e:
             error_response = f"Error: {e}"
             self._persistence.save_message(session_key, "ai", error_response, request_id=request_id)

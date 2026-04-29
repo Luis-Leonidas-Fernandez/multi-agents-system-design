@@ -23,6 +23,7 @@ from features.web_scraping.infrastructure.scraping_tools import (
     scrape_website_dynamic,
     scrape_website_with_json_capture,
     web_fetch,
+    scrape_moodle_assignments,
 )
 
 from application.policies.tool_permissions import ToolPermissionMode
@@ -131,6 +132,15 @@ _TOOL_SPECS: tuple[ToolSpec, ...] = (
         risk_level="high",
         permission_mode="confirm_high_risk",
         description="Recupera una URL y sintetiza el contenido con un prompt explícito.",
+    ),
+    ToolSpec(
+        name="scrape_moodle_assignments",
+        tool=scrape_moodle_assignments,
+        agents=("web_scraping_agent",),
+        category="web",
+        risk_level="high",
+        permission_mode="confirm_high_risk",
+        description="Inicia sesión en Moodle y extrae tareas pendientes del calendario.",
     ),
 )
 

@@ -19,7 +19,7 @@ class InputConfirmationHandler(ConfirmationPort):
 
 
 DEFAULT_CONFIRMATION_HANDLER = InputConfirmationHandler()
-_HITL_ENABLED = os.getenv("HITL_ENABLED", "true").strip().lower() == "true"
+_HITL_ENABLED = os.getenv("HITL_ENABLED", "false").strip().lower() == "true"
 
 
 async def ask_confirmation(prompt: str) -> bool:
