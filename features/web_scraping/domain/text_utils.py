@@ -6,7 +6,7 @@ import re
 from typing import Optional
 from urllib.parse import urlparse
 
-from features.web_scraping.domain.models import SourceDict
+from features.web_scraping.domain.models import SourceDict, WebDigestContract, WebDigestSection
 
 
 _TITLE_STOPWORDS = {
@@ -44,6 +44,8 @@ _NO_INFO_RE = re.compile(
     re.DOTALL,
 )
 
+_CITE_THIS_RE = re.compile(r"<<<CITE_THIS:[^>]+>>>")
+
 
 def _extract_urls_from_text(text: str) -> list[str]:
     urls = re.findall(r"https?://[^\s)\]]+", text or "")
@@ -62,47 +64,204 @@ def _clean_source_url(url: str) -> str:
     return url.split("|")[0].rstrip(">").strip() if url else url
 
 
+def _clean_digest_text(text: str) -> str:
+    cleaned = _CITE_THIS_RE.sub("", text or "")
+    cleaned = re.sub(r"^\s*#+\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def _format_sources(sources: list[SourceDict]) -> str:
     if not sources:
         return ""
     lines = ["Sources:"]
-    seen_domains: set[str] = set()
-    for source in sources:
+    seen_urls: set[str] = set()
+    for source in _unique_sources(sources):
         raw_url = source.get("url") or ""
         url = _clean_source_url(raw_url)
         if not url:
             continue
-        domain = source.get("domain") or (urlparse(url).hostname or "").replace("www.", "")
-        if domain and domain in seen_domains:
+        if url in seen_urls:
             continue
-        if domain:
-            seen_domains.add(domain)
-        title = source.get("title") or url
-        if "|domain=" in title:
-            title = url
+        seen_urls.add(url)
+        title = _display_source_title(source)
         lines.append(f"- [{title}]({url})")
     return "\n".join(lines)
 
 
-def _build_source_backed_response(summary_lines: list[str], sources: list[SourceDict]) -> str:
+def _unique_sources(sources: list[SourceDict]) -> list[SourceDict]:
+    unique: list[SourceDict] = []
+    seen: set[str] = set()
+    for source in sources:
+        raw_url = source.get("url") or ""
+        url = _clean_source_url(raw_url)
+        key = url or _strip_accents((source.get("title") or "").lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(source)
+    return unique
+
+
+def _display_source_title(source: SourceDict) -> str:
+    raw_url = source.get("url") or ""
+    url = _clean_source_url(raw_url)
+    hostname = (urlparse(url).hostname or "").replace("www.", "").strip()
+    title = _clean_digest_text(source.get("title") or "")
+    if title:
+        title_host = (urlparse(title).hostname or "").replace("www.", "").strip()
+        if title_host and title_host == hostname:
+            return hostname or title
+        return title
+    if hostname:
+        return hostname
+    return url or "source"
+
+
+def _infer_section_label(text: str, source_title: str = "") -> str:
+    haystack = _strip_accents(f"{source_title} {text}".lower())
+    rules = [
+        ("policiales", ("policia", "policial", "robo", "delito", "crimen", "motochor", "asesin", "apunal", "tiroteo", "detenid", "arrest", "banda", "narco")),
+        ("operativos", ("operativo", "inciner", "droga", "cocaina", "narcot", "desarticul", "secuestr", "captura", "allan", "fiscal", "bandas")),
+        ("seguridad", ("gobierno", "casa rosada", "prensa", "seguridad nacional", "ministerio", "policia federal", "smn", "institucional", "transparencia", "espionaje")),
+        ("internacional", ("ee.uu", "estados unidos", "china", "geopolit", "internacional", "extranjero", "extradicion", "alianza")),
+        ("sociedad", ("escuela", "amenaza", "evacu", "juvenil", "viral", "tiroteo", "patinete", "menor", "adolescente", "educativ", "colegio")),
+    ]
+    for label, signals in rules:
+        if any(signal in haystack for signal in signals):
+            return label
+    return "Resumen"
+
+
+def _split_sentences(text: str) -> list[str]:
+    raw_parts = re.split(r"(?<=[.!?])\s+|\n+", (text or "").strip())
+    parts: list[str] = []
+    for part in raw_parts:
+        cleaned = re.sub(r"\s+", " ", part).strip()
+        if cleaned:
+            parts.append(cleaned)
+    return parts
+
+
+def _line_signature(text: str) -> str:
+    words = [
+        word
+        for word in re.findall(r"[\wáéíóúüñ]+", _strip_accents((text or "").lower()))
+        if len(word) > 3 and word not in _TITLE_STOPWORDS
+    ]
+    return " ".join(words[:10])
+
+
+def build_web_digest_contract(
+    summary_lines: list[str],
+    sources: list[SourceDict],
+    *,
+    intro: Optional[str] = None,
+    conclusion: Optional[str] = None,
+) -> WebDigestContract:
+    sources = _unique_sources(sources)
     body = []
     seen_lines: set[str] = set()
+    seen_signatures: set[str] = set()
     for line in summary_lines:
-        cleaned = line.strip()
+        cleaned = _clean_digest_text(line)
         if not cleaned:
             continue
         cleaned = re.sub(r"^[-•\u2022]\s+", "", cleaned)
         dedupe_key = re.sub(r"\s+", " ", cleaned).strip().lower()
-        if dedupe_key in seen_lines:
+        signature = _line_signature(cleaned)
+        if dedupe_key in seen_lines or (signature and signature in seen_signatures):
             continue
         seen_lines.add(dedupe_key)
+        if signature:
+            seen_signatures.add(signature)
         body.append(cleaned)
+
+    contract: WebDigestContract = {
+        "version": "web_digest_v1",
+        "intro": intro or "Te resumo lo más relevante y actualizado sobre seguridad en Argentina en los últimos días:",
+        "sections": [],
+        "conclusion": conclusion or "🧠 Conclusión: panorama mixto con actividad operativa, delito urbano y tensión institucional.",
+        "sources": sources,
+    }
+
+    if not body:
+        return contract
+
+    if sources:
+        usable_body = body[: max(len(sources) * 5, len(sources))]
+        base_size, remainder = divmod(len(usable_body), len(sources))
+        if base_size == 0:
+            base_size = 1
+        cursor = 0
+        sections: list[WebDigestSection] = []
+        for index, source in enumerate(sources):
+            chunk_size = base_size + (1 if index < remainder else 0)
+            chunk_size = min(5, max(1, chunk_size))
+            chunk = usable_body[cursor:cursor + chunk_size]
+            if not chunk:
+                continue
+            cursor += chunk_size
+            paragraph = " ".join(_split_sentences(" ".join(chunk))[:5]).strip()
+            raw_title = source.get("title") or ""
+            title = _display_source_title(source)
+            raw_url = source.get("url") or ""
+            url = _clean_source_url(raw_url)
+            section_label = _infer_section_label(paragraph, raw_title or title).lower()
+            sections.append({
+                "title": title or url or "source",
+                "topic": section_label,
+                "source": source,
+                "bullets": [paragraph] if paragraph else [],
+            })
+
+        contract["sections"] = sections
+        return contract
+
+    contract["sections"] = [{
+        "title": "Resumen",
+        "topic": "resumen",
+        "source": {},
+        "bullets": body[:10],
+    }]
+    return contract
+
+
+def format_web_digest_contract(contract: WebDigestContract) -> str:
+    intro = (contract.get("intro") or "").strip()
+    sections = contract.get("sections") or []
+    conclusion = (contract.get("conclusion") or "").strip()
+    sources = contract.get("sources") or []
+
+    parts: list[str] = []
+    if intro:
+        parts.append(intro)
+    for section in sections:
+        title = _clean_digest_text(section.get("title") or "Resumen") or "Resumen"
+        topic = _clean_digest_text(section.get("topic") or "resumen") or "resumen"
+        bullets = section.get("bullets") or []
+        source = section.get("source") or {}
+        raw_url = source.get("url") or ""
+        url = _clean_source_url(raw_url)
+        source_title = _display_source_title(source)
+        section_body = "\n".join(f"• {_clean_digest_text(bullet)}" for bullet in bullets if _clean_digest_text(bullet))
+        if not section_body:
+            continue
+        source_line = f"Fuente: [{source_title or url or 'source'}]({url})" if url else f"Fuente: {source_title or 'source'}"
+        parts.append(f"{title} — {topic}: {section_body}\n\n{source_line}")
+
+    if conclusion:
+        parts.append(conclusion)
+
     sources_block = _format_sources(sources)
     if sources_block:
-        if body:
-            body.append("")
-        body.append(sources_block)
-    return "\n".join(body).strip()
+        parts.append(sources_block)
+
+    return "\n\n".join(part for part in parts if part.strip()).strip()
+
+
+def _build_source_backed_response(summary_lines: list[str], sources: list[SourceDict]) -> str:
+    return format_web_digest_contract(build_web_digest_contract(summary_lines, sources))
 
 
 def _strip_accents(text: str) -> str:

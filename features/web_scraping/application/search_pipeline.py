@@ -6,6 +6,7 @@ import re
 from typing import Any, Optional
 
 from application.policies.web_search_context import QueryContext, RecentPolicy
+from application.policies.web_source_policy import get_source_domain_priority
 
 
 async def _fetch_and_score_entries(
@@ -31,10 +32,15 @@ async def _fetch_and_score_entries(
     fetched_results = await asyncio.gather(*(_fetch_candidate(candidate) for candidate in ranked_candidates), return_exceptions=False)
 
     eligible_entries: list[dict[str, Any]] = []
+    seen_story_signatures: set[str] = set()
     for candidate, result in fetched_results:
         if _flow._is_invalid_news_candidate(candidate, last_message):
             _flow._web_debug("generic_fetch.entry_rejected_invalid_structure", url=candidate.get("url", ""), title=candidate.get("title", ""))
             continue
+        if _flow._is_recent_web_information_query(last_message) and query_source_group:
+            if get_source_domain_priority(query_source_group, candidate.get("url", "")) > 2:
+                _flow._web_debug("generic_fetch.entry_rejected_foreign_domain", url=candidate.get("url", ""), query_source_group=query_source_group)
+                continue
         if isinstance(result, Exception):
             _flow._web_debug("generic_fetch.fetch_exception", url=candidate.get("url", ""), error=repr(result))
             snippet_lines = _flow._candidate_snippet_lines(candidate)
@@ -89,6 +95,13 @@ async def _fetch_and_score_entries(
         if _flow._is_recent_web_information_query(last_message) and len(sources) < policy.candidate_min_sources:
             _flow._web_debug("generic_fetch.entry_rejected_sources", url=candidate.get("url", ""), source_count=len(sources), min_sources=policy.candidate_min_sources)
             continue
+
+        story_signature = re.sub(r"\s+", " ", " ".join(summary_lines[:3])).strip().lower()
+        if story_signature and story_signature in seen_story_signatures:
+            _flow._web_debug("generic_fetch.entry_rejected_duplicate_story", url=candidate.get("url", ""), signature=story_signature[:120])
+            continue
+        if story_signature:
+            seen_story_signatures.add(story_signature)
 
         eligible_entries.append({"summary_lines": summary_lines[:10], "sources": sources, "score": score, "candidate": candidate})
 

@@ -190,18 +190,12 @@ class CountryRecentNewsStrategy:
                 section_hint = any("/news/" in candidate.url or "section" in candidate.source_kind for candidate in top)
                 needs_translation = group_lang not in (None, "es", "en") and not section_hint
                 if not needs_translation:
-                    blocks: list[str] = []
-                    for i, candidate in enumerate(top):
-                        if not candidate.snippet:
-                            continue
-                        snippet = candidate.snippet
-                        blocks.append(f"{candidate.title}: {snippet}" if candidate.title else snippet)
-                    summary = "\n\n".join(blocks)
-                    sources_block = _flow._format_sources(sources)
-                    if sources_block:
-                        summary = f"{summary}\n\n{sources_block}"
-                    return {"summary": summary, "words": summary.split(), "source_type": "search", "sources": sources, "pre_synthesized": True}
-                labeled_parts = [f"[{candidate.title}]: {candidate.snippet}" for candidate in top if candidate.snippet]
-                raw_for_synthesis = f"{header}\n\n" + "\n\n".join(labeled_parts)
-                return {"summary": raw_for_synthesis, "words": raw_for_synthesis.split(), "source_type": "search", "sources": sources, "pre_synthesized": False, "has_labeled_content": True}
+                    summary_lines = [candidate.snippet for candidate in top if candidate.snippet]
+                    digest_contract = _flow._build_web_digest_contract(summary_lines, sources)
+                    summary = _flow._format_web_digest_contract(digest_contract)
+                    return {"summary": summary, "words": summary.split(), "source_type": "search", "sources": sources, "pre_synthesized": True, "digest_contract": digest_contract}
+                summary_lines = [f"{candidate.title} — {candidate.snippet}" for candidate in top if candidate.snippet]
+                digest_contract = _flow._build_web_digest_contract(summary_lines, sources, intro=header.replace("**", ""))
+                summary = _flow._format_web_digest_contract(digest_contract)
+                return {"summary": summary, "words": summary.split(), "source_type": "search", "sources": sources, "pre_synthesized": True, "digest_contract": digest_contract}
         return None

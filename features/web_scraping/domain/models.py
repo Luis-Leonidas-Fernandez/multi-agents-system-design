@@ -21,6 +21,21 @@ class SourceDict(TypedDict, total=False):
     title: str
 
 
+class WebDigestSection(TypedDict, total=False):
+    title: str
+    topic: str
+    source: SourceDict
+    bullets: list[str]
+
+
+class WebDigestContract(TypedDict, total=False):
+    version: str
+    intro: str
+    sections: list[WebDigestSection]
+    conclusion: str
+    sources: list[SourceDict]
+
+
 class SourceKind(str, Enum):
     ARTICLE = "article_hit"
     SECTION = "section_hit"

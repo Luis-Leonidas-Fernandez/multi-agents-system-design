@@ -12,6 +12,7 @@ async def _run_generic_web_search_strategy_impl(
 ) -> Optional[dict[str, Any]]:
     from features.web_scraping.application import flow as _flow
     from features.web_scraping.domain.classifier import _is_specific_article_hit
+    from application.policies.web_source_policy import get_source_domain_priority
 
     ctx, policy = _flow._build_query_context(last_message)
     query_terms = ctx.query_terms
@@ -32,6 +33,11 @@ async def _run_generic_web_search_strategy_impl(
         diverse_candidates, search_text = await _flow._run_general_search_pipeline(last_message, ctx, loop, web_search_runtime_args)
 
     ranked_candidates = diverse_candidates[:4]
+    if query_source_group and query_horizon == "week":
+        ranked_candidates = [
+            c for c in ranked_candidates
+            if get_source_domain_priority(query_source_group, c.get("url", "")) <= 2
+        ]
     _flow._web_debug(
         "generic_fetch.ranked_candidates",
         query=last_message,
@@ -43,6 +49,11 @@ async def _run_generic_web_search_strategy_impl(
     if query_horizon == "week":
         direct_candidates = _flow._extract_generic_search_candidates(search_text)
         if len(direct_candidates) >= 2:
+            if query_source_group:
+                direct_candidates = [
+                    c for c in direct_candidates[:3]
+                    if get_source_domain_priority(query_source_group, c.get("url", "")) <= 2
+                ]
             week_direct_lines = []
             week_direct_sources: list[dict[str, str]] = []
             seen_urls: set[str] = set()
@@ -56,20 +67,23 @@ async def _run_generic_web_search_strategy_impl(
                     seen_urls.add(url)
                     week_direct_sources.append({"title": title or url, "url": url})
             if week_direct_lines:
-                summary = _flow._build_source_backed_response(week_direct_lines, week_direct_sources)
-                if week_direct_sources and "Sources:" not in summary:
-                    summary = summary + "\n\nSources:\n" + "\n".join(
-                        f"- [{source['title']}]({source['url']})" for source in week_direct_sources if source.get("url")
-                    )
+                digest_contract = _flow._build_web_digest_contract(week_direct_lines, week_direct_sources)
+                summary = _flow._format_web_digest_contract(digest_contract)
                 return {
                     "summary": summary,
                     "words": summary.split(),
                     "source_type": "search",
                     "sources": week_direct_sources,
                     "pre_synthesized": True,
+                    "digest_contract": digest_contract,
                 }
 
     if query_horizon == "week" and len(ranked_candidates) >= 2:
+        if query_source_group:
+            ranked_candidates = [
+                c for c in ranked_candidates
+                if get_source_domain_priority(query_source_group, c.get("url", "")) <= 2
+            ]
         week_direct_lines = []
         week_direct_sources: list[dict[str, str]] = []
         seen_urls: set[str] = set()
@@ -83,17 +97,15 @@ async def _run_generic_web_search_strategy_impl(
                 seen_urls.add(url)
                 week_direct_sources.append({"title": title or url, "url": url})
         if week_direct_lines:
-            summary = _flow._build_source_backed_response(week_direct_lines, week_direct_sources)
-            if week_direct_sources and "Sources:" not in summary:
-                summary = summary + "\n\nSources:\n" + "\n".join(
-                    f"- [{source['title']}]({source['url']})" for source in week_direct_sources if source.get("url")
-                )
+            digest_contract = _flow._build_web_digest_contract(week_direct_lines, week_direct_sources)
+            summary = _flow._format_web_digest_contract(digest_contract)
             return {
                 "summary": summary,
                 "words": summary.split(),
                 "source_type": "search",
                 "sources": week_direct_sources,
                 "pre_synthesized": True,
+                "digest_contract": digest_contract,
             }
 
     if query_horizon == "week":
@@ -177,34 +189,27 @@ async def _run_generic_web_search_strategy_impl(
                 if trimmed and not _flow._is_no_info_response(trimmed) and not is_truncated:
                     entry = f"{title}: {trimmed}"
                     paragraph_parts.append(entry)
-            summary = "\n\n".join(paragraph_parts)
-            if week_entry_sources and "Sources:" not in summary:
-                summary = summary + "\n\nSources:\n" + "\n".join(
-                    f"- [{source['title']}]({source['url']})" for source in week_entry_sources if source.get("url")
-                )
+            digest_contract = _flow._build_web_digest_contract(paragraph_parts, week_entry_sources)
+            summary = _flow._format_web_digest_contract(digest_contract)
             return {
                 "summary": summary,
                 "words": summary.split(),
                 "source_type": "search",
                 "sources": week_entry_sources,
                 "pre_synthesized": True,
+                "digest_contract": digest_contract,
             }
         if week_snippet_lines:
             snippet_sources = week_snippet_sources or week_entry_sources or [{"title": "search result", "url": ""}]
-            snippet_summary = _flow._build_source_backed_response(
-                week_snippet_lines[:8],
-                snippet_sources,
-            )
-            if snippet_sources and "Sources:" not in snippet_summary:
-                snippet_summary = snippet_summary + "\n\nSources:\n" + "\n".join(
-                    f"- [{source['title']}]({source['url']})" for source in snippet_sources if source.get("url")
-                )
+            digest_contract = _flow._build_web_digest_contract(week_snippet_lines[:8], snippet_sources)
+            snippet_summary = _flow._format_web_digest_contract(digest_contract)
             return {
                 "summary": snippet_summary,
                 "words": snippet_summary.split(),
                 "source_type": "search",
                 "sources": snippet_sources,
                 "pre_synthesized": True,
+                "digest_contract": digest_contract,
             }
 
     if not ranked_candidates:
@@ -220,7 +225,8 @@ async def _run_generic_web_search_strategy_impl(
         sources = _flow._extract_sources_from_text(search_text)
         if not sources:
             sources = [{"title": "search result", "url": ""}]
-        summary = _flow._build_source_backed_response(search_lines[:8], sources)
+        digest_contract = _flow._build_web_digest_contract(search_lines[:8], sources)
+        summary = _flow._format_web_digest_contract(digest_contract)
         _flow._web_debug(
             "generic_fetch.search_only_fallback",
             query=last_message,
@@ -233,6 +239,7 @@ async def _run_generic_web_search_strategy_impl(
             "source_type": "search",
             "sources": sources,
             "search_text": search_text,
+            "digest_contract": digest_contract,
         }
 
     eligible_entries = await _flow._fetch_and_score_entries(ranked_candidates, last_message, ctx, policy, search_text)
@@ -245,30 +252,55 @@ async def _run_generic_web_search_strategy_impl(
             and not _flow._is_invalid_news_candidate(cast(dict[str, str], entry["candidate"]), last_message)
         ]
         if recent_article_entries:
-            best_recent_entry = sorted(
+            ordered_recent_entries = sorted(
                 recent_article_entries,
                 key=lambda entry: (
                     _flow._candidate_source_priority(cast(dict[str, str], entry["candidate"]), query_source_group),
                     -cast(int, entry["score"]),
                 ),
-            )[0]
-            summary = _flow._build_source_backed_response(
-                cast(list[str], best_recent_entry["summary_lines"]),
-                cast(list[dict[str, str]], best_recent_entry["sources"]),
             )
-            _flow._web_debug(
-                "generic_fetch.week_single_recent_article",
-                url=cast(dict[str, str], best_recent_entry["candidate"]).get("url", ""),
-                score=cast(int, best_recent_entry["score"]),
-                source_count=len(cast(list[dict[str, str]], best_recent_entry["sources"])),
-            )
-            return {
-                "summary": summary,
-                "words": summary.split(),
-                "source_type": "webfetch",
-                "sources": cast(list[dict[str, str]], best_recent_entry["sources"]),
-                "score": cast(int, best_recent_entry["score"]),
-            }
+            combined_recent_lines: list[str] = []
+            combined_recent_sources: list[dict[str, str]] = []
+            seen_recent_lines: set[str] = set()
+            seen_recent_urls: set[str] = set()
+
+            for entry in ordered_recent_entries[:4]:
+                for line in cast(list[str], entry["summary_lines"]):
+                    normalized_line = re.sub(r"\s+", " ", line).strip().lower()
+                    if normalized_line and normalized_line not in seen_recent_lines:
+                        seen_recent_lines.add(normalized_line)
+                        combined_recent_lines.append(line)
+                for source in cast(list[dict[str, str]], entry["sources"]):
+                    url = str(source.get("url") or "").strip()
+                    if url and url not in seen_recent_urls:
+                        seen_recent_urls.add(url)
+                        combined_recent_sources.append(source)
+
+            if combined_recent_sources and len(combined_recent_sources) < 4:
+                for extra in _flow._extract_sources_from_text(search_text):
+                    extra_url = str(extra.get("url") or "").strip()
+                    if extra_url and extra_url not in seen_recent_urls and len(combined_recent_sources) < 4:
+                        combined_recent_sources.append(extra)
+                        seen_recent_urls.add(extra_url)
+
+            if combined_recent_lines and combined_recent_sources:
+                digest_contract = _flow._build_web_digest_contract(combined_recent_lines[:20], combined_recent_sources)
+                summary = _flow._format_web_digest_contract(digest_contract)
+                _flow._web_debug(
+                    "generic_fetch.week_recent_articles_combined",
+                    recent_entries=len(ordered_recent_entries),
+                    combined_lines_count=len(combined_recent_lines),
+                    combined_sources_count=len(combined_recent_sources),
+                    urls=[source.get("url", "") for source in combined_recent_sources],
+                )
+                return {
+                    "summary": summary,
+                    "words": summary.split(),
+                    "source_type": "webfetch",
+                    "sources": combined_recent_sources,
+                    "score": sum(cast(int, entry["score"]) for entry in ordered_recent_entries[:4]),
+                    "digest_contract": digest_contract,
+                }
 
     if query_horizon == "week" and eligible_entries:
         eligible_entries = [
@@ -314,7 +346,8 @@ async def _run_generic_web_search_strategy_impl(
                         if extra_url and extra_url not in seen_urls and len(final_sources) < 5:
                             final_sources.append(extra)
                             seen_urls.add(extra_url)
-                summary = _flow._build_source_backed_response(combined_lines[:20], final_sources)
+                digest_contract = _flow._build_web_digest_contract(combined_lines[:20], final_sources)
+                summary = _flow._format_web_digest_contract(digest_contract)
                 _flow._web_debug(
                     "generic_fetch.week_success",
                     selected_size=size,
@@ -329,6 +362,7 @@ async def _run_generic_web_search_strategy_impl(
                     "source_type": "webfetch",
                     "sources": final_sources,
                     "score": combined_score,
+                    "digest_contract": digest_contract,
                 }
 
     if query_horizon == "week" and len(eligible_entries) < recent_min_candidates:
@@ -347,7 +381,8 @@ async def _run_generic_web_search_strategy_impl(
             snippet_lines.append(f"{title} — {snippet}")
             snippet_sources.append({"title": title, "url": url})
         if snippet_lines:
-            summary = _flow._build_source_backed_response(snippet_lines, snippet_sources)
+            digest_contract = _flow._build_web_digest_contract(snippet_lines, snippet_sources)
+            summary = _flow._format_web_digest_contract(digest_contract)
             _flow._web_debug(
                 "generic_fetch.week_snippet_fallback",
                 snippet_count=len(snippet_lines),
@@ -360,6 +395,7 @@ async def _run_generic_web_search_strategy_impl(
                 "source_type": "search",
                 "sources": snippet_sources,
                 "pre_synthesized": True,
+                "digest_contract": digest_contract,
             }
 
     if query_horizon != "week" and eligible_entries:
@@ -376,7 +412,8 @@ async def _run_generic_web_search_strategy_impl(
                 -cast(int, entry["score"]),
             ),
         )[0]
-        summary = _flow._build_source_backed_response(cast(list[str], best_entry["summary_lines"]), cast(list[dict[str, str]], best_entry["sources"]))
+        digest_contract = _flow._build_web_digest_contract(cast(list[str], best_entry["summary_lines"]), cast(list[dict[str, str]], best_entry["sources"]))
+        summary = _flow._format_web_digest_contract(digest_contract)
         _flow._web_debug(
             "generic_fetch.non_week_success",
             url=cast(dict[str, str], best_entry["candidate"]).get("url", ""),
@@ -389,6 +426,7 @@ async def _run_generic_web_search_strategy_impl(
             "source_type": "webfetch",
             "sources": cast(list[dict[str, str]], best_entry["sources"]),
             "score": cast(int, best_entry["score"]),
+            "digest_contract": digest_contract,
         }
 
     search_lines = _flow._extract_generic_content_lines(search_text, query_terms)
@@ -439,7 +477,8 @@ async def _run_generic_web_search_strategy_impl(
             if len(search_lines) >= 6:
                 break
 
-    summary = _flow._build_source_backed_response(search_lines[:8], sources)
+        digest_contract = _flow._build_web_digest_contract(search_lines[:8], sources)
+        summary = _flow._format_web_digest_contract(digest_contract)
     _flow._web_debug(
         "generic_fetch.final_search_summary",
         search_lines_count=len(search_lines),
@@ -449,10 +488,11 @@ async def _run_generic_web_search_strategy_impl(
     return {
         "summary": summary,
         "words": summary.split(),
-        "source_type": "search",
-        "sources": sources,
-        "search_text": search_text,
-    }
+            "source_type": "search",
+            "sources": sources,
+            "search_text": search_text,
+            "digest_contract": digest_contract,
+        }
 
 
 class GenericWebSearchStrategy:

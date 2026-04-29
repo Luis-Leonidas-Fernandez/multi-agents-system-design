@@ -340,11 +340,10 @@ def apply_web_response_post_filter(
         return summary, sources
 
     filtered_sources = sources
-    if sources and len(sources) > len(kept_lines):
-        filtered_sources = list(sources[: len(kept_lines)])
+    if sources:
         source_lines = [
             f"- [{source.get('title') or source.get('url') or 'source'}]({source.get('url') or ''})"
-            for source in filtered_sources
+            for source in sources
             if (source.get("url") or "").strip()
         ]
 

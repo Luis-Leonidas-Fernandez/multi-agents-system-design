@@ -37,10 +37,9 @@ async def _run_generic_web_search_fetch(
                     seen_urls.add(url)
                     sources.append({"title": title or url, "url": url})
             if lines:
-                summary = _flow._build_source_backed_response(lines, sources)
-                if sources and "Sources:" not in summary:
-                    summary = summary + "\n\nSources:\n" + "\n".join(f"- [{s['title']}]({s['url']})" for s in sources if s.get("url"))
-                return {"summary": summary, "words": summary.split(), "source_type": "search", "sources": sources, "pre_synthesized": True}
+                digest_contract = _flow._build_web_digest_contract(lines, sources)
+                summary = _flow._format_web_digest_contract(digest_contract)
+                return {"summary": summary, "words": summary.split(), "source_type": "search", "sources": sources, "pre_synthesized": True, "digest_contract": digest_contract}
 
     if _flow.detect_query_source_group(last_message) == "japan" and _flow.detect_recent_query_horizon(last_message) == "week":
         generic_strategy = GenericWebSearchStrategy(search_runtime=search_runtime, fetch_runtime=fetch_runtime)

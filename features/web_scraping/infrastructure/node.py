@@ -1,13 +1,11 @@
 """Feature-owned node adapter for web scraping."""
 import re
-from typing import Callable, Awaitable, Any, cast
+from typing import Callable, Awaitable, Any
 
 from langchain_core.messages import AIMessage
 from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard
 from features.web_scraping.api import run_web_scraping_flow
-from core.ports.confirmation_port import ConfirmationPort
 from core.ports.llm_port import LLMFactory
-import application.policies.hitl_flow as hitl_flow
 from application.policies.scrape_tracker import get_runtime_policy
 from core.domain.models import AgentState
 
@@ -130,17 +128,13 @@ def make_web_scraping_node(
     """Retorna un adaptador fino que delega toda la lógica al caso de uso."""
 
     async def web_scraping_node(state: AgentState) -> dict[str, Any]:
-        class _PatchedConfirmationAdapter:
-            async def confirm(self, prompt: str) -> bool:
-                return await hitl_flow.ask_confirmation(prompt)
-
         result = await run_web_scraping_flow(
             state,
             agent,
             get_llm_fn,
-            hitl_enabled=hitl_flow.HITL_ENABLED,
-            confirmation_handler=cast(ConfirmationPort, _PatchedConfirmationAdapter()) if hitl_flow.HITL_ENABLED else None,
-            ask_confirmation_compat=hitl_flow.ask_confirmation if hitl_flow.HITL_ENABLED else None,
+            hitl_enabled=False,
+            confirmation_handler=None,
+            ask_confirmation_compat=None,
             get_runtime_policy=get_runtime_policy,
             evaluate_trajectory_safe_fn=evaluate_trajectory_safe,
             should_evaluate_guard_fn=_should_evaluate_guard,

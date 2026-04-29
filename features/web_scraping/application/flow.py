@@ -1459,6 +1459,18 @@ async def _synthesize_search_summary(
     return await _impl(raw_summary, query, get_llm_fn, sources, has_labeled_content)
 
 
+def _build_web_digest_contract(summary_lines: list[str], sources: list[dict[str, str]], *, intro: str | None = None, conclusion: str | None = None):
+    from features.web_scraping.domain.text_utils import build_web_digest_contract as _impl
+
+    return _impl(summary_lines, sources, intro=intro, conclusion=conclusion)
+
+
+def _format_web_digest_contract(contract):
+    from features.web_scraping.domain.text_utils import format_web_digest_contract as _impl
+
+    return _impl(contract)
+
+
 async def _guardrail_fast_result(
     summary: str,
     new_tracker: dict[str, Any],
@@ -1538,6 +1550,22 @@ async def run_web_scraping_flow(
             )
             return {"messages": [AIMessage(content="Operación cancelada por el usuario.")]}
 
+    _MOODLE_KEYWORDS = (
+        "moodle", "tarea", "tareas", "entrega", "entregas",
+        "trabajo práctico", "trabajos prácticos", "actividad", "actividades",
+        "pendiente", "pendientes", "vencida", "vencidas", "campus virtual",
+    )
+    if any(kw in last_message.lower() for kw in _MOODLE_KEYWORDS):
+        from features.web_scraping.infrastructure.scraping_tools import scrape_moodle_assignments
+        loop = asyncio.get_running_loop()
+        moodle_result = await loop.run_in_executor(
+            None, lambda: scrape_moodle_assignments.invoke({})
+        )
+        if not isinstance(moodle_result, str):
+            moodle_result = str(moodle_result)
+        _web_debug("run_web_scraping_flow.moodle_shortcut", result_preview=moodle_result[:200])
+        return {"messages": [AIMessage(content=moodle_result)]}
+
     ctx = _select_strategy_context(state, last_message, get_runtime_policy)
     tracker = ctx["tracker"]
     turn_count = ctx["turn_count"]
@@ -1608,7 +1636,10 @@ async def run_web_scraping_flow(
                 )
                 _disc_raw = cast(str, discovery["summary"])
                 _disc_sources = cast(list[dict[str, str]], discovery.get("sources") or [])
-                if discovery.get("pre_synthesized"):
+                _disc_contract = discovery.get("digest_contract")
+                if _disc_contract is not None:
+                    summary = _format_web_digest_contract(cast(dict[str, Any], _disc_contract))
+                elif discovery.get("pre_synthesized"):
                     summary = _disc_raw
                 else:
                     summary = await _synthesize_search_summary(
@@ -1720,7 +1751,10 @@ async def run_web_scraping_flow(
                 )
                 _disc_raw = cast(str, discovery["summary"])
                 _disc_sources = cast(list[dict[str, str]], discovery.get("sources") or [])
-                if discovery.get("pre_synthesized"):
+                _disc_contract = discovery.get("digest_contract")
+                if _disc_contract is not None:
+                    summary = _format_web_digest_contract(cast(dict[str, Any], _disc_contract))
+                elif discovery.get("pre_synthesized"):
                     summary = _disc_raw
                 else:
                     summary = await _synthesize_search_summary(
