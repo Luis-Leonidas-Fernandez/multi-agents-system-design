@@ -8,9 +8,9 @@ type Props = {
 
 export function SelectAgent({ agents, selectedAgentId, onSelect }: Props) {
   return (
-    <div>
-      <label>Agent</label>
-      <select value={selectedAgentId} onChange={(e) => onSelect(e.target.value)}>
+    <div className="agent-select">
+      <label className="eyebrow" htmlFor="agent-select">Agent</label>
+      <select id="agent-select" value={selectedAgentId} onChange={(e) => onSelect(e.target.value)}>
         {agents.map((agent) => (
           <option key={agent.id} value={agent.id}>
             {agent.name}

@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
+from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServerProtocol, serve
 
 from application.frontend_bridge.protocol import (
@@ -28,13 +29,15 @@ def _now() -> str:
 
 async def _initial_snapshot(session_id: str, runtime: AgentRuntime) -> DashboardSnapshot:
     artifact = runtime.build_session_artifact(session_id)
-    reasoning, conclusion, final_response = "Waiting for agent action...", "No conclusion yet.", "No response yet."
+    reasoning, conclusion, final_response = "", "", ""
+    last_user_message = ""
     if artifact.transcript:
         last_ai = next((item for item in reversed(artifact.transcript) if str(item.get("role", "")).lower() in {"ai", "assistant"}), None)
         if last_ai:
             reasoning, conclusion, final_response = parse_response_sections(str(last_ai.get("content", "")))
-            if not conclusion:
-                conclusion = "Response received from backend."
+        last_user = next((item for item in reversed(artifact.transcript) if str(item.get("role", "")).lower() in {"human", "user", "you"}), None)
+        if last_user:
+            last_user_message = str(last_user.get("content", "")).strip()
     agent = DashboardAgent(id="analysis", name="Analysis", status="running")
     context = runtime.build_context_budget(session_id)
     report = context.to_dict() if hasattr(context, "to_dict") else context.__dict__
@@ -54,6 +57,11 @@ async def _initial_snapshot(session_id: str, runtime: AgentRuntime) -> Dashboard
         reasoning=reasoning,
         conclusion=conclusion,
         finalResponse=final_response,
+        turnId="",
+        turnLatencyMs=0,
+        messageCount=len(artifact.transcript),
+        lastUserMessage=last_user_message,
+        lastAssistantResponse=final_response,
         events=events,
         logs=logs,
         tokens=tokens,
@@ -62,7 +70,10 @@ async def _initial_snapshot(session_id: str, runtime: AgentRuntime) -> Dashboard
 
 
 async def _send_message(ws: WebSocketServerProtocol, message_type: str, payload: object) -> None:
-    await ws.send(json.dumps({"type": message_type, "payload": to_jsonable(payload)}, ensure_ascii=False))
+    try:
+        await ws.send(json.dumps({"type": message_type, "payload": to_jsonable(payload)}, ensure_ascii=False))
+    except ConnectionClosed:
+        return
 
 
 async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime) -> None:
@@ -71,9 +82,76 @@ async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime)
     resolved_session_id = runtime.select_session_id(session_id or None)
     lifecycle = SessionLifecycle(runtime=runtime, session_id=resolved_session_id)
     session_id = lifecycle.session_id
+    current_turn_task: asyncio.Task | None = None
 
-    await _send_message(ws, "status", DashboardStatus(connected=True, mode="websocket"))
-    await _send_message(ws, "snapshot", await _initial_snapshot(session_id, runtime))
+    async def run_turn(action: DashboardAction) -> None:
+        nonlocal current_turn_task
+        try:
+            session = lifecycle.resolve(action.message)
+            if session.turn_context is None:
+                return
+            start_time = asyncio.get_running_loop().time()
+            turn = await runtime.execute_turn(session.turn_context)
+            latency_ms = max(0, int((asyncio.get_running_loop().time() - start_time) * 1000))
+            reasoning, conclusion, final_response = parse_response_sections(turn.response)
+            if not final_response:
+                final_response = turn.response
+            artifact = runtime.build_session_artifact(session_id)
+            last_user_message = ""
+            if artifact.transcript:
+                last_user = next((item for item in reversed(artifact.transcript) if str(item.get("role", "")).lower() in {"human", "user", "you"}), None)
+                if last_user:
+                    last_user_message = str(last_user.get("content", "")).strip()
+            agent_name = str(action.agentId or "analysis")
+            tokens = DashboardTokens(
+                prompt=max(0, len(action.message) // 4),
+                completion=max(0, len(final_response) // 4),
+                total=max(0, (len(action.message) + len(final_response)) // 4),
+            )
+            events = [
+                DashboardEvent(id=f"turn-{turn.request_id}", kind="success", title="Action processed", detail=agent_name, at=_now(), agentId=agent_name),
+            ]
+            logs = [
+                DashboardLog(id=f"log-{turn.request_id}", level="info", message=turn.response[:240], at=_now()),
+            ]
+            await _send_message(
+                ws,
+                "snapshot",
+                DashboardSnapshot(
+                    activeAgent=DashboardAgent(id=agent_name, name=agent_name.title(), status="running"),
+                    reasoning=reasoning or turn.response,
+                    conclusion=conclusion or "Backend turn completed.",
+                    finalResponse=final_response,
+                    turnId=turn.request_id,
+                    turnLatencyMs=latency_ms,
+                    messageCount=len(artifact.transcript),
+                    lastUserMessage=last_user_message or action.message,
+                    lastAssistantResponse=final_response,
+                    events=events,
+                    logs=logs,
+                    tokens=tokens,
+                    sessionId=session_id,
+                ),
+            )
+        except asyncio.CancelledError:
+            try:
+                await _send_message(ws, "log", DashboardLog(id="turn-aborted", level="info", message="Turn cancelled by user", at=_now()))
+            except ConnectionClosed:
+                return
+            raise
+        except Exception as exc:
+            try:
+                await _send_message(ws, "log", DashboardLog(id="turn-error", level="error", message=str(exc), at=_now()))
+            except ConnectionClosed:
+                return
+        finally:
+            current_turn_task = None
+
+    try:
+        await _send_message(ws, "status", DashboardStatus(connected=True, mode="websocket"))
+        await _send_message(ws, "snapshot", await _initial_snapshot(session_id, runtime))
+    except ConnectionClosed:
+        return
 
     try:
         async for raw in ws:
@@ -83,7 +161,19 @@ async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime)
                 await _send_message(ws, "log", DashboardLog(id="bad-json", level="warn", message="Invalid JSON payload", at=_now()))
                 continue
 
-            if message.get("type") != "action":
+            message_type = message.get("type")
+            if message_type == "abort":
+                if current_turn_task is None or current_turn_task.done():
+                    await _send_message(ws, "log", DashboardLog(id="no-turn", level="warn", message="No active turn to abort", at=_now()))
+                    continue
+                current_turn_task.cancel()
+                try:
+                    await current_turn_task
+                except asyncio.CancelledError:
+                    pass
+                continue
+
+            if message_type != "action":
                 await _send_message(ws, "log", DashboardLog(id="bad-type", level="warn", message=f"Unsupported message type: {message.get('type')}", at=_now()))
                 continue
 
@@ -98,44 +188,21 @@ async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime)
                 DashboardEvent(id=f"action-{session_id}", kind="action", title="Action sent", detail=action.message, at=_now(), agentId=action.agentId),
             )
 
-            try:
-                session = lifecycle.resolve(action.message)
-                if session.turn_context is None:
-                    continue
-                turn = await runtime.execute_turn(session.turn_context)
-                reasoning, conclusion, final_response = parse_response_sections(turn.response)
-                if not final_response:
-                    final_response = turn.response
-                agent_name = str(action.agentId or "analysis")
-                tokens = DashboardTokens(
-                    prompt=max(0, len(action.message) // 4),
-                    completion=max(0, len(final_response) // 4),
-                    total=max(0, (len(action.message) + len(final_response)) // 4),
-                )
-                events = [
-                    DashboardEvent(id=f"turn-{turn.request_id}", kind="success", title="Action processed", detail=agent_name, at=_now(), agentId=agent_name),
-                ]
-                logs = [
-                    DashboardLog(id=f"log-{turn.request_id}", level="info", message=turn.response[:240], at=_now()),
-                ]
-                await _send_message(
-                    ws,
-                    "snapshot",
-                    DashboardSnapshot(
-                        activeAgent=DashboardAgent(id=agent_name, name=agent_name.title(), status="running"),
-                        reasoning=reasoning or turn.response,
-                        conclusion=conclusion or "Backend turn completed.",
-                        finalResponse=final_response,
-                        events=events,
-                        logs=logs,
-                        tokens=tokens,
-                        sessionId=session_id,
-                    ),
-                )
-            except Exception as exc:
-                await _send_message(ws, "log", DashboardLog(id="turn-error", level="error", message=str(exc), at=_now()))
+            if current_turn_task is not None and not current_turn_task.done():
+                await _send_message(ws, "log", DashboardLog(id="busy-turn", level="warn", message="A turn is already running", at=_now()))
+                continue
+
+            current_turn_task = asyncio.create_task(run_turn(action))
+    except ConnectionClosed:
+        return
     finally:
         try:
+            if current_turn_task is not None and not current_turn_task.done():
+                current_turn_task.cancel()
+                try:
+                    await current_turn_task
+                except asyncio.CancelledError:
+                    pass
             await lifecycle.close()
         finally:
             await runtime.shutdown()

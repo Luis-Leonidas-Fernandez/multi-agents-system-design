@@ -54,6 +54,24 @@ def _start_process(command: list[str], name: str) -> subprocess.Popen:
     return subprocess.Popen(command, cwd=ROOT, env=env)
 
 
+def _ensure_backend_dependencies() -> None:
+    try:
+        import websockets  # noqa: F401
+        return
+    except Exception:
+        print("[dev] instalando dependencias Python faltantes...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=ROOT, check=True)
+
+
+def _ensure_frontend_dependencies() -> None:
+    node_modules = ROOT / "frontend" / "node_modules"
+    vite_bin = node_modules / ".bin" / "vite"
+    if vite_bin.exists():
+        return
+    print("[dev] instalando dependencias frontend faltantes...")
+    subprocess.run(["npm", "install"], cwd=ROOT / "frontend", check=True)
+
+
 def _stop_process(process: subprocess.Popen, name: str) -> None:
     if process.poll() is not None:
         return
@@ -81,6 +99,9 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
+
+    _ensure_backend_dependencies()
+    _ensure_frontend_dependencies()
 
     frontend = _start_process(FRONTEND_CMD, "frontend")
     backend = _start_process(BACKEND_CMD, "backend")

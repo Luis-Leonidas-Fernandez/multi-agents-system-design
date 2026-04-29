@@ -8,6 +8,11 @@ export type DashboardSnapshot = {
   reasoning: string
   conclusion: string
   finalResponse: string
+  turnId: string
+  turnLatencyMs: number
+  messageCount: number
+  lastUserMessage: string
+  lastAssistantResponse: string
   events: DashboardEvent[]
   logs: LogEntry[]
   tokens: TokenMetric
@@ -17,6 +22,10 @@ export type DashboardSnapshot = {
 export type DashboardAction = {
   agentId: string
   message: string
+}
+
+export type DashboardAbort = {
+  reason?: string
 }
 
 export type DashboardRealtimeMessage =

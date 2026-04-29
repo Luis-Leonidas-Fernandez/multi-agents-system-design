@@ -12,12 +12,18 @@ const INITIAL_AGENT_ID = 'analysis'
 export function useDashboardStream(agents: Agent[]) {
   const client = useMemo(() => createDashboardRealtimeClient(WS_URL || undefined), [])
   const [selectedAgentId, setSelectedAgentId] = useState(INITIAL_AGENT_ID)
-  const [reasoning, setReasoning] = useState('Waiting for agent action...')
-  const [conclusion, setConclusion] = useState('No conclusion yet.')
-  const [finalResponse, setFinalResponse] = useState('No response yet.')
+  const [reasoning, setReasoning] = useState('')
+  const [conclusion, setConclusion] = useState('')
+  const [finalResponse, setFinalResponse] = useState('')
   const [events, setEvents] = useState<DashboardEvent[]>([])
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [tokens, setTokens] = useState<TokenMetric>({ prompt: 0, completion: 0, total: 0 })
+  const [sessionId, setSessionId] = useState('')
+  const [turnId, setTurnId] = useState('')
+  const [turnLatencyMs, setTurnLatencyMs] = useState(0)
+  const [messageCount, setMessageCount] = useState(0)
+  const [lastUserMessage, setLastUserMessage] = useState('')
+  const [lastAssistantResponse, setLastAssistantResponse] = useState('')
   const [connected, setConnected] = useState(false)
   const [mode, setMode] = useState<'mock' | 'websocket'>('mock')
 
@@ -30,9 +36,15 @@ export function useDashboardStream(agents: Agent[]) {
     const unsubscribe = client.subscribe((message: DashboardRealtimeMessage) => {
       if (message.type === 'snapshot') {
         setSelectedAgentId(message.payload.activeAgent.id)
+        setSessionId(message.payload.sessionId)
         setReasoning(message.payload.reasoning)
         setConclusion(message.payload.conclusion)
         setFinalResponse(message.payload.finalResponse)
+        setTurnId(message.payload.turnId)
+        setTurnLatencyMs(message.payload.turnLatencyMs)
+        setMessageCount(message.payload.messageCount)
+        setLastUserMessage(message.payload.lastUserMessage)
+        setLastAssistantResponse(message.payload.lastAssistantResponse)
         setEvents((current) => [...message.payload.events, ...current].slice(0, 50))
         setLogs((current) => [...message.payload.logs, ...current].slice(0, 50))
         setTokens(message.payload.tokens)
@@ -65,11 +77,18 @@ export function useDashboardStream(agents: Agent[]) {
     events,
     logs,
     tokens,
+    sessionId,
+    turnId,
+    turnLatencyMs,
+    messageCount,
+    lastUserMessage,
+    lastAssistantResponse,
     connected,
     mode,
     selectedAgent,
     selectedAgentId,
     setSelectedAgentId,
     sendAction: client.sendAction,
+    abortAction: client.abortAction,
   }
 }

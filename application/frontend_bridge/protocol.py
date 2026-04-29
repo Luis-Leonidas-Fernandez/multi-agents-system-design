@@ -1,6 +1,8 @@
 """Contracto JSON para la web frontend en tiempo real."""
 from __future__ import annotations
 
+import re
+from urllib.parse import urlparse
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
@@ -45,6 +47,11 @@ class DashboardSnapshot:
     reasoning: str
     conclusion: str
     finalResponse: str
+    turnId: str
+    turnLatencyMs: int
+    messageCount: int
+    lastUserMessage: str
+    lastAssistantResponse: str
     events: list[DashboardEvent]
     logs: list[DashboardLog]
     tokens: DashboardTokens
@@ -96,4 +103,18 @@ def parse_response_sections(text: str) -> tuple[str, str, str]:
             if current:
                 parts[current] = (parts[current] + "\n" + raw_line).strip()
         return parts["reasoning"], parts["conclusion"], parts["final response"]
-    return (cleaned, "", cleaned)
+
+    source_titles: list[str] = []
+    seen: set[str] = set()
+    for title, url in re.findall(r"\[([^\]]+)\]\((https?://[^)]+)\)", cleaned):
+        label = f"{title.strip()} ({urlparse(url).hostname or url})".strip()
+        if label and label not in seen:
+            seen.add(label)
+            source_titles.append(label)
+
+    body = re.split(r"\n\s*Sources\s*:\s*\n", cleaned, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if source_titles:
+        reasoning = "Leyendo estas fuentes y extrayendo lo relevante:\n" + "\n".join(f"- {title}" for title in source_titles[:8])
+        return reasoning, "", body or cleaned
+
+    return ("", "", cleaned)
