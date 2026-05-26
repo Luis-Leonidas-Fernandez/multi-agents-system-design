@@ -12,6 +12,8 @@ from websockets.server import WebSocketServerProtocol, serve
 from application.frontend_bridge.protocol import (
     DashboardAction,
     DashboardAgent,
+    DashboardArtifact,
+    DashboardArtifactAction,
     DashboardEvent,
     DashboardLog,
     DashboardSnapshot,
@@ -20,25 +22,55 @@ from application.frontend_bridge.protocol import (
     parse_response_sections,
     to_jsonable,
 )
+from application.services.request_runtime import use_request_runtime
 from application.services.runtime import AgentRuntime, SessionLifecycle
+from features.web_scraping.application.moodle_artifacts import (
+    approve_moodle_artifact,
+    delete_moodle_artifact,
+    list_session_moodle_artifacts,
+)
+from integrations.google_calendar_tools import create_calendar_events_from_validated_tasks_payload
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _initial_snapshot(session_id: str, runtime: AgentRuntime) -> DashboardSnapshot:
+def _build_artifacts(session_id: str) -> list[DashboardArtifact]:
+    artifacts: list[DashboardArtifact] = []
+    for item in list_session_moodle_artifacts(session_id):
+        artifacts.append(DashboardArtifact(**item.to_dict()))
+    print(
+        f"[ARTIFACT_DEBUG][backend] session_id={session_id} artifacts_count={len(artifacts)} paths={[artifact.jsonPath for artifact in artifacts]}",
+        flush=True,
+    )
+    return artifacts
+
+
+async def _build_snapshot(
+    session_id: str,
+    runtime: AgentRuntime,
+    *,
+    agent: DashboardAgent,
+    reasoning: str = "",
+    conclusion: str = "",
+    final_response: str = "",
+    turn_id: str = "",
+    turn_latency_ms: int = 0,
+    events: list[DashboardEvent] | None = None,
+    logs: list[DashboardLog] | None = None,
+    fallback_last_user_message: str = "",
+) -> DashboardSnapshot:
     artifact = runtime.build_session_artifact(session_id)
-    reasoning, conclusion, final_response = "", "", ""
-    last_user_message = ""
+    last_user_message = fallback_last_user_message
     if artifact.transcript:
-        last_ai = next((item for item in reversed(artifact.transcript) if str(item.get("role", "")).lower() in {"ai", "assistant"}), None)
-        if last_ai:
-            reasoning, conclusion, final_response = parse_response_sections(str(last_ai.get("content", "")))
+        if not final_response:
+            last_ai = next((item for item in reversed(artifact.transcript) if str(item.get("role", "")).lower() in {"ai", "assistant"}), None)
+            if last_ai:
+                reasoning, conclusion, final_response = parse_response_sections(str(last_ai.get("content", "")))
         last_user = next((item for item in reversed(artifact.transcript) if str(item.get("role", "")).lower() in {"human", "user", "you"}), None)
         if last_user:
             last_user_message = str(last_user.get("content", "")).strip()
-    agent = DashboardAgent(id="analysis", name="Analysis", status="running")
     context = runtime.build_context_budget(session_id)
     report = context.to_dict() if hasattr(context, "to_dict") else context.__dict__
     tokens = DashboardTokens(
@@ -46,27 +78,33 @@ async def _initial_snapshot(session_id: str, runtime: AgentRuntime) -> Dashboard
         completion=int(report.get("estimated_remaining_chars", 0) // 4),
         total=int(report.get("estimated_tokens", report.get("estimated_context_chars", 0) // 4)),
     )
+    return DashboardSnapshot(
+        activeAgent=agent,
+        reasoning=reasoning,
+        conclusion=conclusion,
+        finalResponse=final_response,
+        turnId=turn_id,
+        turnLatencyMs=turn_latency_ms,
+        messageCount=len(artifact.transcript),
+        lastUserMessage=last_user_message,
+        lastAssistantResponse=final_response,
+        events=events or [],
+        logs=logs or [],
+        tokens=tokens,
+        sessionId=session_id,
+        artifacts=_build_artifacts(session_id),
+    )
+
+
+async def _initial_snapshot(session_id: str, runtime: AgentRuntime) -> DashboardSnapshot:
+    agent = DashboardAgent(id="analysis", name="Analysis", status="running")
     events = [
         DashboardEvent(id="boot", kind="info", title="Session ready", detail=session_id, at=_now(), agentId=agent.id),
     ]
     logs = [
         DashboardLog(id="boot-log", level="info", message=f"Connected to session {session_id}", at=_now()),
     ]
-    return DashboardSnapshot(
-        activeAgent=agent,
-        reasoning=reasoning,
-        conclusion=conclusion,
-        finalResponse=final_response,
-        turnId="",
-        turnLatencyMs=0,
-        messageCount=len(artifact.transcript),
-        lastUserMessage=last_user_message,
-        lastAssistantResponse=final_response,
-        events=events,
-        logs=logs,
-        tokens=tokens,
-        sessionId=session_id,
-    )
+    return await _build_snapshot(session_id, runtime, agent=agent, events=events, logs=logs)
 
 
 async def _send_message(ws: WebSocketServerProtocol, message_type: str, payload: object) -> None:
@@ -84,10 +122,41 @@ async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime)
     session_id = lifecycle.session_id
     current_turn_task: asyncio.Task | None = None
 
+    async def send_refresh_snapshot(
+        *,
+        agent_name: str = "analysis",
+        reasoning: str = "",
+        conclusion: str = "",
+        final_response: str = "",
+        turn_id: str = "",
+        turn_latency_ms: int = 0,
+        events: list[DashboardEvent] | None = None,
+        logs: list[DashboardLog] | None = None,
+        fallback_last_user_message: str = "",
+    ) -> None:
+        snapshot = await _build_snapshot(
+            session_id,
+            runtime,
+            agent=DashboardAgent(id=agent_name, name=agent_name.title(), status="running"),
+            reasoning=reasoning,
+            conclusion=conclusion,
+            final_response=final_response,
+            turn_id=turn_id,
+            turn_latency_ms=turn_latency_ms,
+            events=events,
+            logs=logs,
+            fallback_last_user_message=fallback_last_user_message,
+        )
+        print(
+            f"[ARTIFACT_DEBUG][backend] send_refresh_snapshot session_id={session_id} artifacts_count={len(snapshot.artifacts)} final_response_chars={len(snapshot.finalResponse or '')}",
+            flush=True,
+        )
+        await _send_message(ws, "snapshot", snapshot)
+
     async def run_turn(action: DashboardAction) -> None:
         nonlocal current_turn_task
         try:
-            session = lifecycle.resolve(action.message)
+            session = lifecycle.resolve(action.message, enabled_mcps=tuple(action.enabledMcps))
             if session.turn_context is None:
                 return
             start_time = asyncio.get_running_loop().time()
@@ -96,42 +165,23 @@ async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime)
             reasoning, conclusion, final_response = parse_response_sections(turn.response)
             if not final_response:
                 final_response = turn.response
-            artifact = runtime.build_session_artifact(session_id)
-            last_user_message = ""
-            if artifact.transcript:
-                last_user = next((item for item in reversed(artifact.transcript) if str(item.get("role", "")).lower() in {"human", "user", "you"}), None)
-                if last_user:
-                    last_user_message = str(last_user.get("content", "")).strip()
             agent_name = str(action.agentId or "analysis")
-            tokens = DashboardTokens(
-                prompt=max(0, len(action.message) // 4),
-                completion=max(0, len(final_response) // 4),
-                total=max(0, (len(action.message) + len(final_response)) // 4),
-            )
             events = [
                 DashboardEvent(id=f"turn-{turn.request_id}", kind="success", title="Action processed", detail=agent_name, at=_now(), agentId=agent_name),
             ]
             logs = [
                 DashboardLog(id=f"log-{turn.request_id}", level="info", message=turn.response[:240], at=_now()),
             ]
-            await _send_message(
-                ws,
-                "snapshot",
-                DashboardSnapshot(
-                    activeAgent=DashboardAgent(id=agent_name, name=agent_name.title(), status="running"),
-                    reasoning=reasoning or turn.response,
-                    conclusion=conclusion or "Backend turn completed.",
-                    finalResponse=final_response,
-                    turnId=turn.request_id,
-                    turnLatencyMs=latency_ms,
-                    messageCount=len(artifact.transcript),
-                    lastUserMessage=last_user_message or action.message,
-                    lastAssistantResponse=final_response,
-                    events=events,
-                    logs=logs,
-                    tokens=tokens,
-                    sessionId=session_id,
-                ),
+            await send_refresh_snapshot(
+                agent_name=agent_name,
+                reasoning=reasoning or turn.response,
+                conclusion=conclusion or "Backend turn completed.",
+                final_response=final_response,
+                turn_id=turn.request_id,
+                turn_latency_ms=latency_ms,
+                events=events,
+                logs=logs,
+                fallback_last_user_message=action.message,
             )
         except asyncio.CancelledError:
             try:
@@ -147,9 +197,52 @@ async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime)
         finally:
             current_turn_task = None
 
+    async def run_artifact_action(action: DashboardArtifactAction) -> None:
+        logs: list[DashboardLog] = []
+        events: list[DashboardEvent] = []
+        final_response = ""
+        try:
+            if action.kind == "approve":
+                approve_moodle_artifact(action.artifactPath, approved=True)
+                events.append(DashboardEvent(id=f"artifact-approve-{session_id}", kind="success", title="Artifact aprobado", detail=action.artifactPath, at=_now(), agentId="analysis"))
+                logs.append(DashboardLog(id=f"artifact-approve-log-{session_id}", level="info", message=f"Artifact aprobado: {action.artifactPath}", at=_now()))
+                final_response = "JSON aprobado. Quedó listo en el chat para crear eventos."
+            elif action.kind == "delete":
+                delete_moodle_artifact(action.artifactPath)
+                events.append(DashboardEvent(id=f"artifact-delete-{session_id}", kind="warning", title="Artifact eliminado", detail=action.artifactPath, at=_now(), agentId="analysis"))
+                logs.append(DashboardLog(id=f"artifact-delete-log-{session_id}", level="info", message=f"Artifact eliminado: {action.artifactPath}", at=_now()))
+                final_response = "Artifact eliminado del chat."
+            elif action.kind == "create_events":
+                with use_request_runtime(session_id=session_id, request_id="artifact-action", enabled_mcps=tuple(action.enabledMcps)):
+                    payload = create_calendar_events_from_validated_tasks_payload(action.artifactPath)
+                if isinstance(payload, str):
+                    raise RuntimeError(payload)
+                created_count = int(payload.get("created_count") or 0)
+                events.append(DashboardEvent(id=f"artifact-sync-{session_id}", kind="success", title="Eventos creados", detail=str(created_count), at=_now(), agentId="analysis"))
+                logs.append(DashboardLog(id=f"artifact-sync-log-{session_id}", level="info", message=f"Se crearon {created_count} eventos desde {action.artifactPath}", at=_now()))
+                final_response = json.dumps(payload, ensure_ascii=False, indent=2)
+            else:
+                raise RuntimeError(f"Acción de artifact no soportada: {action.kind}")
+
+            await send_refresh_snapshot(
+                agent_name="analysis",
+                reasoning="Artifact workflow",
+                conclusion="Acción de artifact ejecutada.",
+                final_response=final_response,
+                events=events,
+                logs=logs,
+            )
+        except Exception as exc:
+            await _send_message(ws, "log", DashboardLog(id="artifact-error", level="error", message=str(exc), at=_now()))
+
     try:
         await _send_message(ws, "status", DashboardStatus(connected=True, mode="websocket"))
-        await _send_message(ws, "snapshot", await _initial_snapshot(session_id, runtime))
+        initial_snapshot = await _initial_snapshot(session_id, runtime)
+        print(
+            f"[ARTIFACT_DEBUG][backend] initial_snapshot session_id={session_id} artifacts_count={len(initial_snapshot.artifacts)}",
+            flush=True,
+        )
+        await _send_message(ws, "snapshot", initial_snapshot)
     except ConnectionClosed:
         return
 
@@ -173,12 +266,30 @@ async def _handle_connection(ws: WebSocketServerProtocol, runtime: AgentRuntime)
                     pass
                 continue
 
+            if message_type == "artifact_action":
+                payload = message.get("payload") or {}
+                action = DashboardArtifactAction(
+                    kind=str(payload.get("kind", "approve")),  # type: ignore[arg-type]
+                    artifactPath=str(payload.get("artifactPath", "")).strip(),
+                    enabledMcps=[str(item).strip() for item in (payload.get("enabledMcps") or []) if str(item).strip()],
+                )
+                if not action.artifactPath:
+                    await _send_message(ws, "log", DashboardLog(id="artifact-missing-path", level="warn", message="Artifact path missing", at=_now()))
+                    continue
+                await run_artifact_action(action)
+                continue
+
             if message_type != "action":
                 await _send_message(ws, "log", DashboardLog(id="bad-type", level="warn", message=f"Unsupported message type: {message.get('type')}", at=_now()))
                 continue
 
             payload = message.get("payload") or {}
-            action = DashboardAction(agentId=str(payload.get("agentId", "analysis")), message=str(payload.get("message", "")).strip())
+            enabled_mcps = payload.get("enabledMcps") or []
+            action = DashboardAction(
+                agentId=str(payload.get("agentId", "analysis")),
+                message=str(payload.get("message", "")).strip(),
+                enabledMcps=[str(item).strip() for item in enabled_mcps if str(item).strip()],
+            )
             if not action.message:
                 continue
 

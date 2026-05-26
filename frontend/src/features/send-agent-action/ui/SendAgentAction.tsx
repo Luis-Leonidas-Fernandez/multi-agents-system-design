@@ -5,10 +5,20 @@ type Props = {
   onChange: (value: string) => void
   onSend: () => void
   onAbort: () => void
+  googleCalendarEnabled: boolean
+  onToggleGoogleCalendar: () => void
   status: 'idle' | 'thinking' | 'responding' | 'error'
 }
 
-export function SendAgentAction({ value, onChange, onSend, onAbort, status }: Props) {
+export function SendAgentAction({
+  value,
+  onChange,
+  onSend,
+  onAbort,
+  googleCalendarEnabled,
+  onToggleGoogleCalendar,
+  status,
+}: Props) {
   const isLocked = status === 'thinking' || status === 'responding'
   const buttonContent = isLocked ? '⏹' : 'Send'
   const buttonLabel = isLocked ? 'Abortar' : 'Send'
@@ -22,6 +32,15 @@ export function SendAgentAction({ value, onChange, onSend, onAbort, status }: Pr
 
   return (
     <div className="composer composer-stateful">
+      <button
+        type="button"
+        className={`mcp-toggle ${googleCalendarEnabled ? 'mcp-toggle-enabled' : ''}`}
+        onClick={onToggleGoogleCalendar}
+        aria-pressed={googleCalendarEnabled}
+        title={googleCalendarEnabled ? 'Google Calendar MCP activado' : 'Google Calendar MCP desactivado'}
+      >
+        Calendar
+      </button>
       <label className="sr-only" htmlFor="agent-message">Composer</label>
       <input
         id="agent-message"

@@ -1,17 +1,38 @@
 import { useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useEffect } from 'react'
+import type { DashboardArtifact } from '@/shared/types/realtime'
 
 type Props = {
   reasoning: string
   conclusion: string
   finalResponse: string
+  artifacts: DashboardArtifact[]
+  googleCalendarEnabled: boolean
+  onApproveArtifact: (artifactPath: string) => void
+  onDeleteArtifact: (artifactPath: string) => void
+  onCreateEventsFromArtifact: (artifactPath: string) => void
   isThinking: boolean
   status: 'idle' | 'thinking' | 'responding' | 'error'
 }
 
-export function AgentWorkflow({ reasoning, conclusion, finalResponse, isThinking, status }: Props) {
-  const hasContent = Boolean(reasoning || conclusion || finalResponse)
+function fileNameFromPath(path: string) {
+  return path.split('/').filter(Boolean).pop() || path
+}
+
+export function AgentWorkflow({
+  reasoning,
+  conclusion,
+  finalResponse,
+  artifacts,
+  googleCalendarEnabled,
+  onApproveArtifact,
+  onDeleteArtifact,
+  onCreateEventsFromArtifact,
+  isThinking,
+  status,
+}: Props) {
+  const hasContent = Boolean(reasoning || conclusion || finalResponse || artifacts.length > 0)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({})
   const [copyStatus, setCopyStatus] = useState('')
@@ -98,7 +119,14 @@ export function AgentWorkflow({ reasoning, conclusion, finalResponse, isThinking
     window.requestAnimationFrame(() => {
       element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
     })
-  }, [hasContent, reasoning, conclusion, finalResponse, showThinkingInline])
+  }, [hasContent, reasoning, conclusion, finalResponse, showThinkingInline, artifacts])
+
+  useEffect(() => {
+    console.log('[ARTIFACT_DEBUG][frontend] AgentWorkflow render', {
+      artifactsCount: artifacts.length,
+      artifactPaths: artifacts.map((artifact) => artifact.jsonPath),
+    })
+  }, [artifacts])
 
   return (
     <section className="panel workflow-panel chat-panel">
@@ -122,6 +150,98 @@ export function AgentWorkflow({ reasoning, conclusion, finalResponse, isThinking
                     </div>
                   </div>
                   <p className={isExpanded ? 'chat-bubble-body' : 'chat-bubble-body is-collapsed'}>{entry.text}</p>
+                </article>
+              )
+            })}
+
+            {artifacts.map((artifact, index) => {
+              const rawPreview = expandedIds[`artifact-preview-${artifact.jsonPath}`]
+              const selectedPreview = rawPreview === 'json' ? 'json' : 'markdown'
+              const previewLabel = selectedPreview === 'json' ? 'JSON' : 'Markdown'
+              const previewContent = selectedPreview === 'json' ? artifact.jsonContent : artifact.markdownContent
+              return (
+                <article key={artifact.jsonPath} className="chat-bubble chat-bubble-assistant transcript-card artifact-card">
+                  <div className="chat-bubble-head artifact-head">
+                    <div>
+                      <span className="chat-meta">Archivos generados #{artifacts.length - index}</span>
+                      <div className="artifact-badges">
+                        <span className={`artifact-badge ${artifact.structureValid ? 'artifact-badge-valid' : 'artifact-badge-invalid'}`}>
+                          {artifact.structureValid ? 'Estructura válida' : 'Estructura inválida'}
+                        </span>
+                        {artifact.approved ? <span className="artifact-badge artifact-badge-approved">Aprobado</span> : null}
+                        {artifact.syncCreatedCount > 0 ? <span className="artifact-badge artifact-badge-synced">Eventos creados: {artifact.syncCreatedCount}</span> : null}
+                      </div>
+                    </div>
+                    <div className="chat-bubble-actions artifact-actions">
+                      {!artifact.approved && artifact.structureValid ? (
+                        <button type="button" className="bubble-action bubble-action-primary" onClick={() => onApproveArtifact(artifact.jsonPath)}>
+                          Aprobar
+                        </button>
+                      ) : null}
+                      {!artifact.structureValid ? (
+                        <button type="button" className="bubble-action bubble-action-danger" onClick={() => onDeleteArtifact(artifact.jsonPath)} title="Eliminar JSON inválido">
+                          🗑
+                        </button>
+                      ) : null}
+                      {artifact.approved ? (
+                        <button
+                          type="button"
+                          className="bubble-action bubble-action-primary"
+                          onClick={() => onCreateEventsFromArtifact(artifact.jsonPath)}
+                          disabled={!googleCalendarEnabled}
+                          title={googleCalendarEnabled ? 'Crear eventos con este JSON' : 'Activá Calendar para crear eventos'}
+                        >
+                          Crear eventos
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="artifact-summary-grid">
+                    <span>Válidas: <strong>{artifact.validCount}</strong></span>
+                    <span>Inválidas: <strong>{artifact.invalidCount}</strong></span>
+                    <span>Issues: <strong>{artifact.issueCount}</strong></span>
+                  </div>
+
+                  <div className="artifact-files">
+                    <button
+                      type="button"
+                      className={`artifact-file ${selectedPreview === 'json' ? 'artifact-file-active' : ''}`}
+                      onClick={() => setExpandedIds((current) => ({ ...current, [`artifact-preview-${artifact.jsonPath}`]: 'json' }))}
+                    >
+                      <span className="artifact-file-icon">{'{ }'}</span>
+                      <span className="artifact-file-copy">
+                        <strong>{fileNameFromPath(artifact.jsonPath)}</strong>
+                        <small>JSON · abrir preview</small>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`artifact-file ${selectedPreview === 'markdown' ? 'artifact-file-active' : ''}`}
+                      onClick={() => setExpandedIds((current) => ({ ...current, [`artifact-preview-${artifact.jsonPath}`]: 'markdown' }))}
+                    >
+                      <span className="artifact-file-icon">MD</span>
+                      <span className="artifact-file-copy">
+                        <strong>{fileNameFromPath(artifact.markdownPath)}</strong>
+                        <small>Markdown · abrir preview</small>
+                      </span>
+                    </button>
+                  </div>
+
+                  {artifact.issues.length ? (
+                    <ul className="artifact-issues">
+                      {artifact.issues.map((issue, issueIndex) => (
+                        <li key={`${artifact.jsonPath}-issue-${issueIndex}`}>
+                          <strong>{issue.severity || 'issue'}</strong> · {issue.assignment_title || 'sin título'} · {issue.message || ''}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+
+                  <div className="artifact-preview-head">
+                    <span className="artifact-preview-label">Preview {previewLabel}</span>
+                  </div>
+                  <pre className="artifact-viewer artifact-preview">{previewContent}</pre>
                 </article>
               )
             })}

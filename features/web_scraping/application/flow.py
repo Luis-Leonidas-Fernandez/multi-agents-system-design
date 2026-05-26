@@ -140,6 +140,40 @@ def _web_debug(label: str, **data: Any) -> None:
     print(f"[WEB_DEBUG] {label}{(' ' + payload) if payload else ''}", flush=True)
 
 
+_MOODLE_KEYWORDS = (
+    "moodle", "tarea", "tareas", "entrega", "entregas",
+    "trabajo práctico", "trabajos prácticos", "actividad", "actividades",
+    "pendiente", "pendientes", "vencida", "vencidas", "campus virtual",
+)
+_NOTION_SYNC_KEYWORDS = (
+    "notion",
+    "sincroniza",
+    "sincronizá",
+    "sincronizar",
+    "registrá",
+    "registra",
+    "registrar",
+    "guardá",
+    "guarda",
+    "guardar",
+    "actualizá",
+    "actualiza",
+    "actualizar",
+)
+
+
+def _is_moodle_query(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(keyword in lowered for keyword in _MOODLE_KEYWORDS)
+
+
+def _is_notion_sync_request(message: str) -> bool:
+    lowered = (message or "").lower()
+    if "notion" not in lowered:
+        return False
+    return any(keyword in lowered for keyword in _NOTION_SYNC_KEYWORDS)
+
+
 
 def _finalize_web_user_summary(
     summary: str,
@@ -1550,20 +1584,55 @@ async def run_web_scraping_flow(
             )
             return {"messages": [AIMessage(content="Operación cancelada por el usuario.")]}
 
-    _MOODLE_KEYWORDS = (
-        "moodle", "tarea", "tareas", "entrega", "entregas",
-        "trabajo práctico", "trabajos prácticos", "actividad", "actividades",
-        "pendiente", "pendientes", "vencida", "vencidas", "campus virtual",
-    )
-    if any(kw in last_message.lower() for kw in _MOODLE_KEYWORDS):
-        from features.web_scraping.infrastructure.scraping_tools import scrape_moodle_assignments
-        loop = asyncio.get_running_loop()
-        moodle_result = await loop.run_in_executor(
-            None, lambda: scrape_moodle_assignments.invoke({})
+    if _is_notion_sync_request(last_message):
+        print(
+            f"[WEB_FLOW] branch=notion_sync_shortcut request_id={rid} query={last_message[:160]!r}",
+            flush=True,
         )
-        if not isinstance(moodle_result, str):
-            moodle_result = str(moodle_result)
-        _web_debug("run_web_scraping_flow.moodle_shortcut", result_preview=moodle_result[:200])
+        from integrations.notion_tasks_sync import sync_validated_moodle_artifact_to_notion_payload
+
+        try:
+            notion_payload = await asyncio.to_thread(
+                sync_validated_moodle_artifact_to_notion_payload,
+                "",
+            )
+        except Exception as exc:
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"No pude sincronizar a Notion el artifact Moodle aprobado: {exc}"
+                    )
+                ]
+            }
+        notion_result = (
+            "Sincronización a Notion completada.\n\n"
+            f"- Creadas: {int(notion_payload.get('created_count') or 0)}\n"
+            f"- Actualizadas: {int(notion_payload.get('updated_count') or 0)}\n"
+            f"- Sin cambios: {int(notion_payload.get('skipped_count') or 0)}\n"
+            f"- Errores: {int(notion_payload.get('error_count') or 0)}"
+        )
+        _web_debug("run_web_scraping_flow.notion_sync_shortcut", result_preview=notion_result[:200])
+        return {"messages": [AIMessage(content=notion_result)]}
+
+    if _is_moodle_query(last_message):
+        print(
+            f"[WEB_FLOW] branch=moodle_review_shortcut request_id={rid} query={last_message[:160]!r}",
+            flush=True,
+        )
+        from integrations.google_calendar_tools import prepare_moodle_assignments_payload
+
+        moodle_payload = await asyncio.to_thread(
+            prepare_moodle_assignments_payload,
+            "",
+        )
+        moodle_result = str(moodle_payload.get("chat_response") or "").strip()
+        if not moodle_result:
+            moodle_result = (
+                "Se generó el artifact de Moodle, pero no pude construir la vista humana. "
+                f"JSON: {moodle_payload.get('json_path', '')}\n"
+                f"Markdown: {moodle_payload.get('markdown_path', '')}"
+            )
+        _web_debug("run_web_scraping_flow.moodle_review_shortcut", result_preview=moodle_result[:200])
         return {"messages": [AIMessage(content=moodle_result)]}
 
     ctx = _select_strategy_context(state, last_message, get_runtime_policy)
@@ -1791,6 +1860,10 @@ async def run_web_scraping_flow(
             _web_debug("run_web_scraping_flow.discovery_miss", category=category, branch="generic_web_info")
 
         from features.web_scraping.application.agent_strategy import _run_web_scraping_agent_strategy as _impl
+        print(
+            f"[WEB_FLOW] branch=agent_strategy request_id={rid} category={category} query={last_message[:160]!r}",
+            flush=True,
+        )
 
         return await _impl(
             state=state,

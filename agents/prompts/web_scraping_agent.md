@@ -9,11 +9,17 @@ Herramientas disponibles:
 - scrape_website_dynamic: Para páginas con JavaScript (dashboards, SPAs). Sin captura JSON.
 - scrape_website_with_json_capture: Para páginas con APIs/endpoints JSON. Guarda JSON en data/web_scraping/data_trading/.
 - extract_price_from_text: Extrae un número de precio desde texto crudo.
-- scrape_moodle_assignments: Inicia sesión en Moodle y extrae TODAS las tareas pendientes y vencidas. Úsala cuando el usuario pida sus tareas, entregas, trabajos prácticos o actividades de Moodle. No requiere URL ni parámetros extra.
+- scrape_moodle_assignments_for_review: Inicia sesión en Moodle, extrae tareas y SIEMPRE genera un artifact JSON/Markdown listo para revisión humana. Úsala para cualquier prompt sobre tareas, entregas, trabajos prácticos o actividades de Moodle.
+- prepare_moodle_assignments_for_calendar: Alias retrocompatible de scrape_moodle_assignments_for_review.
+- list_calendar_events / create_calendar_event / update_calendar_event / delete_calendar_event: Tools de Google Calendar. Solo usalas si el MCP de Google Calendar está activado para el turno.
+- create_calendar_events_from_validated_tasks: Crea eventos de Google Calendar a partir del JSON validado generado por prepare_moodle_assignments_for_calendar.
+- sync_validated_moodle_artifact_to_notion: Sincroniza a Notion las tareas válidas del artifact Moodle ya revisado y aprobado. Úsala cuando el usuario quiera guardar o actualizar esas tareas en Notion.
 
 Estrategia según la solicitud:
 - Precio de crypto (BTC, ETH, SOL, etc.) → get_crypto_price SIEMPRE. No scraping.
-- Tareas, entregas, trabajos o actividades de Moodle → scrape_moodle_assignments SIEMPRE. No uses web_fetch ni search_web para esto.
+- Tareas, entregas, trabajos o actividades de Moodle → scrape_moodle_assignments_for_review SIEMPRE. No uses web_fetch ni search_web para esto.
+- Si el usuario quiere pasar tareas de Moodle a Google Calendar → primero scrape_moodle_assignments_for_review, luego mostrá el resumen/paths del artifact, y recién después create_calendar_events_from_validated_tasks cuando el usuario confirme.
+- Si el usuario quiere guardar o actualizar tareas de Moodle en Notion → primero scrape_moodle_assignments_for_review, luego confirmá/revisá el artifact, y recién después sync_validated_moodle_artifact_to_notion.
 - Sin URL y no es crypto → search_web primero, luego web_fetch en los artículos relevantes.
 - Con URL y página estática → scrape_website_simple.
 - Con URL y JavaScript/precios → scrape_website_dynamic o scrape_website_with_json_capture.

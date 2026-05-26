@@ -243,52 +243,181 @@ async def fetch_web_page(**kwargs) -> str:
     return await web_fetch.coroutine(**kwargs)  # pyright: ignore[reportAttributeAccessIssue]
 
 
-@tool
-def scrape_moodle_assignments(
-    base_url: Annotated[str, Field(description="URL base del Moodle, ej: https://virtual.instituto.edu/mld-1. Si se omite, usa MOODLE_URL del .env")] = "",
-) -> str:
-    """Inicia sesión en Moodle con Playwright y extrae tareas pendientes (incluyendo vencidas). Requiere MOODLE_USERNAME y MOODLE_PASSWORD en variables de entorno."""
+def _resolve_moodle_settings(base_url: str = "") -> tuple[str, str, str]:
     import os
-    from bs4 import BeautifulSoup
 
     moodle_url = (base_url or os.getenv("MOODLE_URL", "")).rstrip("/")
     moodle_user = os.getenv("MOODLE_USERNAME", "")
     moodle_pass = os.getenv("MOODLE_PASSWORD", "")
 
     if not moodle_url:
-        return "Error: falta la URL de Moodle. Configurá MOODLE_URL en .env o pasá base_url."
+        raise ValueError("falta la URL de Moodle. Configurá MOODLE_URL en .env o pasá base_url.")
     if not moodle_user or not moodle_pass:
-        return "Error: falta MOODLE_USERNAME o MOODLE_PASSWORD en variables de entorno."
+        raise ValueError("falta MOODLE_USERNAME o MOODLE_PASSWORD en variables de entorno.")
+    return moodle_url, moodle_user, moodle_pass
 
+
+def _session_invalid(page) -> tuple[bool, str]:
+    current_url = str(page.url or "")
+    text = page.locator("body").inner_text(timeout=5000)[:2000]
+    lowered = text.lower()
+    signals = (
+        "usted no se ha identificado",
+        "su sesión ha excedido el tiempo límite",
+        "su sesión ha excedido el tiempo limite",
+        "nombre de usuario",
+        "contraseña",
+        "acceder",
+        "iniciar sesión en el sitio",
+    )
+    if "/login/" in current_url:
+        return True, f"redirected_to_login url={current_url}"
+    if any(signal in lowered for signal in signals):
+        return True, f"login_screen_detected url={current_url}"
+    return False, ""
+
+
+def _authenticate_moodle_session(base_url: str = "") -> tuple[str, object, object]:
+    moodle_url, moodle_user, moodle_pass = _resolve_moodle_settings(base_url)
     browser = scraping_infra._get_browser()
     context = browser.new_context()
+    page = context.new_page()
+
+    page.goto(f"{moodle_url}/login/index.php", wait_until="domcontentloaded", timeout=30000)
+    page.fill("#username", moodle_user)
+    page.fill("#password", moodle_pass)
+    page.click("#loginbtn")
+    page.wait_for_load_state("domcontentloaded", timeout=20000)
+
+    try:
+        btn = page.locator("input[type='submit']").first
+        if btn.is_visible(timeout=2000):
+            btn.click()
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+    except Exception:
+        pass
+
+    invalid_session, reason = _session_invalid(page)
+    if invalid_session:
+        print(f"[MOODLE_DEBUG] login_invalid reason={reason}", flush=True)
+        context.close()
+        raise RuntimeError("login fallido — verificá MOODLE_USERNAME y MOODLE_PASSWORD.")
+    return moodle_url, context, page
+
+
+def _extract_submission_status_from_text(page_text: str) -> str:
+    lowered = (page_text or "").lower()
+    submitted_tokens = (
+        "entrega realizada",
+        "estado de la entrega entregado",
+        "estado de la entrega enviado para calificar",
+        "enviado para calificar",
+        "submission status submitted for grading",
+        "submitted for grading",
+        "calificado",
+        "graded",
+    )
+    pending_tokens = (
+        "estado de la entrega no entregado",
+        "no entregado",
+        "nothing has been submitted",
+        "no se ha realizado ningún envío",
+        "no se ha realizado ningun envio",
+        "pendiente",
+        "por entregar",
+    )
+    overdue_tokens = (
+        "vencida",
+        "vencido",
+        "atrasada",
+        "overdue",
+    )
+    print(
+        "[MOODLE_DEBUG] detail_status_probe "
+        f"submitted_tokens_found={[token for token in submitted_tokens if token in lowered]} "
+        f"pending_tokens_found={[token for token in pending_tokens if token in lowered]} "
+        f"overdue_tokens_found={[token for token in overdue_tokens if token in lowered]}",
+        flush=True,
+    )
+    if any(token in lowered for token in submitted_tokens):
+        return "entregado"
+    if any(token in lowered for token in pending_tokens):
+        return "no entregado"
+    if any(token in lowered for token in overdue_tokens):
+        return "vencida"
+    return ""
+
+
+def fetch_moodle_submission_statuses(
+    assignments: list[dict[str, str]],
+    base_url: str = "",
+) -> dict[str, str]:
+    """Consulta el detalle de cada tarea Moodle para enriquecer el estado real de entrega."""
+    if not assignments:
+        return {}
+    moodle_url, context, page = _authenticate_moodle_session(base_url)
+    statuses: dict[str, str] = {}
+    try:
+        for assignment in assignments:
+            href = str(assignment.get("url") or "").strip()
+            if not href:
+                continue
+            target_url = href if href.startswith("http") else f"{moodle_url}/{href.lstrip('/')}"
+            try:
+                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                invalid_session, reason = _session_invalid(page)
+                if invalid_session:
+                    print(f"[MOODLE_DEBUG] detail_invalid reason={reason} url={target_url}", flush=True)
+                    raise RuntimeError(
+                        "sesión expirada o redirigida al login al abrir el detalle de una tarea de Moodle."
+                    )
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                detail_text = page.locator("body").inner_text(timeout=5000)
+                print(
+                    f"[MOODLE_DEBUG] detail_status_scan url={target_url} text_preview={detail_text[:400]!r}",
+                    flush=True,
+                )
+                status = _extract_submission_status_from_text(detail_text)
+                if status:
+                    statuses[target_url] = status
+                    print(
+                        f"[MOODLE_DEBUG] detail_status_detected url={target_url} status={status!r}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[MOODLE_DEBUG] detail_status_not_detected url={target_url}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(f"[MOODLE_DEBUG] detail_status_error url={target_url} error={exc}", flush=True)
+                continue
+    finally:
+        context.close()
+    return statuses
+
+
+def extract_moodle_assignments(
+    base_url: str = "",
+) -> list[dict[str, str]]:
+    """Retorna tareas Moodle estructuradas desde el dashboard/calendario."""
+    from bs4 import BeautifulSoup
+
+    moodle_url, context, page = _authenticate_moodle_session(base_url)
     html_dashboard = ""
     html_calendar = ""
     try:
-        page = context.new_page()
-
-        # --- Login ---
-        page.goto(f"{moodle_url}/login/index.php", wait_until="domcontentloaded", timeout=30000)
-        page.fill("#username", moodle_user)
-        page.fill("#password", moodle_pass)
-        page.click("#loginbtn")
-        # Esperar a que el DOM de la siguiente página esté listo
-        page.wait_for_load_state("domcontentloaded", timeout=20000)
-
-        # Moodle puede mostrar "sesión en uso" con un botón de continuar
-        try:
-            btn = page.locator("input[type='submit']").first
-            if btn.is_visible(timeout=2000):
-                btn.click()
-                page.wait_for_load_state("domcontentloaded", timeout=10000)
-        except Exception:
-            pass
-
-        if "/login/" in page.url:
-            return "Error: login fallido — verificá MOODLE_USERNAME y MOODLE_PASSWORD."
-
         # --- Dashboard (contenido AJAX) ---
         page.goto(f"{moodle_url}/my/", wait_until="domcontentloaded", timeout=30000)
+        invalid_session, reason = _session_invalid(page)
+        if invalid_session:
+            print(f"[MOODLE_DEBUG] dashboard_invalid reason={reason}", flush=True)
+            raise RuntimeError(
+                "sesión expirada o redirigida al login al abrir el dashboard de Moodle."
+            )
         # Esperar a que las llamadas AJAX del dashboard terminen antes de leer el DOM
         try:
             page.wait_for_load_state("networkidle", timeout=12000)
@@ -318,10 +447,16 @@ def scrape_moodle_assignments(
             wait_until="domcontentloaded",
             timeout=30000,
         )
+        invalid_session, reason = _session_invalid(page)
+        if invalid_session:
+            print(f"[MOODLE_DEBUG] calendar_invalid reason={reason}", flush=True)
+            raise RuntimeError(
+                "sesión expirada o redirigida al login al abrir el calendario de Moodle."
+            )
         page.wait_for_timeout(1500)
         html_calendar = page.content()
     except Exception as e:
-        return f"Error durante el scraping de Moodle: {str(e)}"
+        raise RuntimeError(f"Error durante el scraping de Moodle: {str(e)}") from e
     finally:
         context.close()
 
@@ -398,12 +533,25 @@ def scrape_moodle_assignments(
     if not assignments:
         dash_snippet = soup.get_text(separator=" ", strip=True)[:400]
         cal_snippet = soup_cal.get_text(separator=" ", strip=True)[:400]
-        return (
+        raise RuntimeError(
             "No se encontraron tareas en el dashboard ni en el calendario.\n"
             "HTML volcado en /tmp/moodle_debug_dashboard.html y /tmp/moodle_debug_calendar.html para diagnóstico.\n\n"
             f"[Dashboard snippet]\n{dash_snippet}\n\n"
             f"[Calendario snippet]\n{cal_snippet}"
         )
+
+    return assignments
+
+
+@tool
+def scrape_moodle_assignments(
+    base_url: Annotated[str, Field(description="URL base del Moodle, ej: https://virtual.instituto.edu/mld-1. Si se omite, usa MOODLE_URL del .env")] = "",
+) -> str:
+    """Inicia sesión en Moodle con Playwright y extrae tareas pendientes (incluyendo vencidas). Requiere MOODLE_USERNAME y MOODLE_PASSWORD en variables de entorno."""
+    try:
+        assignments = extract_moodle_assignments(base_url)
+    except Exception as exc:
+        return f"Error durante el scraping de Moodle: {exc}"
 
     total = len(assignments)
     lines = [f"TAREAS EN MOODLE  ({total} pendiente{'s' if total != 1 else ''})", "─" * 44, ""]
@@ -427,5 +575,7 @@ __all__ = [
     "scrape_website_with_json_capture",
     "web_fetch",
     "fetch_web_page",
+    "extract_moodle_assignments",
+    "fetch_moodle_submission_statuses",
     "scrape_moodle_assignments",
 ]

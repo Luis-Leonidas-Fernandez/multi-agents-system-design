@@ -128,9 +128,10 @@ def make_web_scraping_node(
     """Retorna un adaptador fino que delega toda la lógica al caso de uso."""
 
     async def web_scraping_node(state: AgentState) -> dict[str, Any]:
+        resolved_agent = agent if hasattr(agent, "ainvoke") else agent()
         result = await run_web_scraping_flow(
             state,
-            agent,
+            resolved_agent,
             get_llm_fn,
             hitl_enabled=False,
             confirmation_handler=None,

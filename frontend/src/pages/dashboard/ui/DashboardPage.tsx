@@ -103,10 +103,31 @@ function FolderGearIcon() {
 }
 
 export function DashboardPage() {
-  const { selectedAgent, reasoning, conclusion, finalResponse, events, logs, tokens, sessionId, turnId, turnLatencyMs, messageCount, lastUserMessage, lastAssistantResponse, connected, mode, sendAction, abortAction } = useDashboardStream(AGENTS)
+  const {
+    selectedAgent,
+    reasoning,
+    conclusion,
+    finalResponse,
+    events,
+    logs,
+    tokens,
+    sessionId,
+    turnId,
+    turnLatencyMs,
+    messageCount,
+    lastUserMessage,
+    lastAssistantResponse,
+    artifacts,
+    connected,
+    mode,
+    sendAction,
+    sendArtifactAction,
+    abortAction,
+  } = useDashboardStream(AGENTS)
   const [isThinking, setIsThinking] = useState(false)
   const [phase, setPhase] = useState<'idle' | 'thinking' | 'responding' | 'error'>('idle')
-  const { message, setMessage, send } = useSendAgentAction((text) => sendAction({ agentId: selectedAgent.id, message: text }))
+  const [googleCalendarEnabled, setGoogleCalendarEnabled] = useState(false)
+  const { message, setMessage } = useSendAgentAction((text) => sendAction({ agentId: selectedAgent.id, message: text }))
 
   const feedLogs = useMemo(() => logs.slice(0, 20), [logs])
 
@@ -197,7 +218,18 @@ export function DashboardPage() {
           </div>
 
           <div className="chat-stage">
-            <AgentWorkflow reasoning={reasoning} conclusion={conclusion} finalResponse={finalResponse} isThinking={isThinking} status={phase} />
+            <AgentWorkflow
+              reasoning={reasoning}
+              conclusion={conclusion}
+              finalResponse={finalResponse}
+              artifacts={artifacts}
+              googleCalendarEnabled={googleCalendarEnabled}
+              onApproveArtifact={(artifactPath) => sendArtifactAction({ kind: 'approve', artifactPath })}
+              onDeleteArtifact={(artifactPath) => sendArtifactAction({ kind: 'delete', artifactPath })}
+              onCreateEventsFromArtifact={(artifactPath) => sendArtifactAction({ kind: 'create_events', artifactPath, enabledMcps: googleCalendarEnabled ? ['google_calendar'] : [] })}
+              isThinking={isThinking}
+              status={phase}
+            />
           </div>
 
           <div className="workspace-composer-shell">
@@ -205,11 +237,18 @@ export function DashboardPage() {
               value={message}
               onChange={setMessage}
               status={phase}
+              googleCalendarEnabled={googleCalendarEnabled}
+              onToggleGoogleCalendar={() => setGoogleCalendarEnabled((current) => !current)}
               onSend={() => {
                 if (!message.trim()) return
                 setIsThinking(true)
                 setPhase('thinking')
-                send()
+                sendAction({
+                  agentId: selectedAgent.id,
+                  message: message.trim(),
+                  enabledMcps: googleCalendarEnabled ? ['google_calendar'] : [],
+                })
+                setMessage('')
               }}
               onAbort={abort}
             />

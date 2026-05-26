@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from urllib.parse import urlparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 PROTOCOL_VERSION = "1.0"
@@ -42,6 +42,21 @@ class DashboardTokens:
 
 
 @dataclass(frozen=True)
+class DashboardArtifact:
+    jsonPath: str
+    markdownPath: str
+    structureValid: bool
+    approved: bool
+    validCount: int
+    invalidCount: int
+    issueCount: int
+    issues: list[dict[str, str]] = field(default_factory=list)
+    jsonContent: str = ""
+    markdownContent: str = ""
+    syncCreatedCount: int = 0
+
+
+@dataclass(frozen=True)
 class DashboardSnapshot:
     activeAgent: DashboardAgent
     reasoning: str
@@ -56,6 +71,7 @@ class DashboardSnapshot:
     logs: list[DashboardLog]
     tokens: DashboardTokens
     sessionId: str
+    artifacts: list[DashboardArtifact] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -68,6 +84,14 @@ class DashboardStatus:
 class DashboardAction:
     agentId: str
     message: str
+    enabledMcps: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DashboardArtifactAction:
+    kind: Literal["approve", "delete", "create_events"]
+    artifactPath: str
+    enabledMcps: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -91,7 +115,6 @@ def parse_response_sections(text: str) -> tuple[str, str, str]:
     lower = cleaned.lower()
     markers = ["reasoning", "conclusion", "final response"]
     if all(marker in lower for marker in markers):
-        # naive, but enough for dashboards until the backend emits structured payloads
         parts = {"reasoning": "", "conclusion": "", "final response": ""}
         current = None
         for raw_line in cleaned.splitlines():

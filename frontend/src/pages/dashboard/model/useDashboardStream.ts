@@ -5,7 +5,7 @@ import type { LogEntry } from '@/entities/log/model/types'
 import type { TokenMetric } from '@/entities/token-metric/model/types'
 import { createDashboardRealtimeClient } from '@/shared/api/realtime'
 import { WS_URL } from '@/shared/config/env'
-import type { DashboardRealtimeMessage } from '@/shared/types/realtime'
+import type { DashboardArtifact, DashboardRealtimeMessage } from '@/shared/types/realtime'
 
 const INITIAL_AGENT_ID = 'analysis'
 
@@ -24,6 +24,7 @@ export function useDashboardStream(agents: Agent[]) {
   const [messageCount, setMessageCount] = useState(0)
   const [lastUserMessage, setLastUserMessage] = useState('')
   const [lastAssistantResponse, setLastAssistantResponse] = useState('')
+  const [artifacts, setArtifacts] = useState<DashboardArtifact[]>([])
   const [connected, setConnected] = useState(false)
   const [mode, setMode] = useState<'mock' | 'websocket'>('mock')
 
@@ -35,6 +36,11 @@ export function useDashboardStream(agents: Agent[]) {
   useEffect(() => {
     const unsubscribe = client.subscribe((message: DashboardRealtimeMessage) => {
       if (message.type === 'snapshot') {
+        console.log('[ARTIFACT_DEBUG][frontend] snapshot received', {
+          sessionId: message.payload.sessionId,
+          artifactsCount: message.payload.artifacts?.length ?? 0,
+          artifactPaths: (message.payload.artifacts ?? []).map((artifact) => artifact.jsonPath),
+        })
         setSelectedAgentId(message.payload.activeAgent.id)
         setSessionId(message.payload.sessionId)
         setReasoning(message.payload.reasoning)
@@ -45,6 +51,7 @@ export function useDashboardStream(agents: Agent[]) {
         setMessageCount(message.payload.messageCount)
         setLastUserMessage(message.payload.lastUserMessage)
         setLastAssistantResponse(message.payload.lastAssistantResponse)
+        setArtifacts(message.payload.artifacts ?? [])
         setEvents((current) => [...message.payload.events, ...current].slice(0, 50))
         setLogs((current) => [...message.payload.logs, ...current].slice(0, 50))
         setTokens(message.payload.tokens)
@@ -83,12 +90,14 @@ export function useDashboardStream(agents: Agent[]) {
     messageCount,
     lastUserMessage,
     lastAssistantResponse,
+    artifacts,
     connected,
     mode,
     selectedAgent,
     selectedAgentId,
     setSelectedAgentId,
     sendAction: client.sendAction,
+    sendArtifactAction: client.sendArtifactAction,
     abortAction: client.abortAction,
   }
 }

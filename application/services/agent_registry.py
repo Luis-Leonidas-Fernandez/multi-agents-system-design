@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from core.domain.agent_roles import AGENT_NAMES  # noqa: F401  — re-exported for callers
+from application.services.request_runtime import get_request_tool_signature
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ _AGENT_SPECS = {
     ),
     "web_scraping_agent": AgentSpec(
         name="web_scraping_agent",
-        routing_description="extraer informacion de URLs, scraping, obtener datos de paginas web",
+        routing_description="extraer informacion de URLs, scraping, obtener datos de paginas web, calendario, agenda, eventos de Google Calendar",
         risk_level="high",
         tags=("web_scraping", "agent", "high_risk"),
         temperature=0.0,
@@ -99,29 +100,36 @@ def _get_agent_factory(name: str):
 
 
 @lru_cache(maxsize=None)
+def _get_cached_agent(name: str, tool_signature: tuple[str, ...]):
+    return _get_agent_factory(name)()
+
+
 def get_agent(name: str):
     """Instancia un agente solo la primera vez que se solicita."""
-    return _get_agent_factory(name)()
+    signature = get_request_tool_signature() if name == "web_scraping_agent" else ()
+    return _get_cached_agent(name, signature)
 
 
 @lru_cache(maxsize=None)
 def get_node(name: str):
     """Construye el nodo LangGraph del agente con lazy init y cache."""
-    agent = get_agent(name)
-
     if name == "math_agent":
+        agent = get_agent(name)
         from features.math.infrastructure.node import make_math_node
         return make_math_node(agent)
     if name == "analysis_agent":
+        agent = get_agent(name)
         from features.analysis.infrastructure.node import make_analysis_node
         return make_analysis_node(agent)
     if name == "code_agent":
+        agent = get_agent(name)
         from features.code.infrastructure.node import make_code_node
         return make_code_node(agent)
     if name == "web_scraping_agent":
         from core.helpers.config_flow_helpers import get_llm
+        from application.services.agents_factory import create_web_scraping_agent
         from features.web_scraping.infrastructure.node import make_web_scraping_node
-        return make_web_scraping_node(agent, get_llm)
+        return make_web_scraping_node(create_web_scraping_agent, get_llm)
 
     get_agent_spec(name)
     raise AssertionError("unreachable")

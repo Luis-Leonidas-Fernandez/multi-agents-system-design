@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import uuid
 from typing import Optional
 
+from application.services.request_runtime import use_request_runtime
 from features.sessions.application.session_gateway import AgentGateway
 from features.sessions.application.background_tasks import BackgroundTaskService, BackgroundTaskState, BackgroundTaskSummary, background_task_service
 from features.sessions.application.coordinator_workers import coordinator_runtime_service
@@ -87,8 +88,8 @@ class SessionLifecycle:
     def view(self) -> RuntimeSessionView:
         return self.runtime.build_session_view(self.session_id)
 
-    def resolve(self, message: str | None = None) -> RuntimeSessionResolution:
-        return self.runtime.resolve_session(self.session_id, message)
+    def resolve(self, message: str | None = None, enabled_mcps: tuple[str, ...] | None = None) -> RuntimeSessionResolution:
+        return self.runtime.resolve_session(self.session_id, message, enabled_mcps=enabled_mcps)
 
     async def close(self) -> RuntimeSessionClosure:
         return await self.runtime.close_session(self.session_id)
@@ -160,6 +161,7 @@ class RuntimeTurnContext:
     trace: TraceContext
     message: str
     snapshot: RuntimeSessionSnapshot
+    enabled_mcps: tuple[str, ...] = ()
 
 
 class AgentRuntime:
@@ -205,7 +207,7 @@ class AgentRuntime:
             is_existing_session=session_id in self._persistence.list_sessions(),
         )
 
-    def resolve_session(self, session_id: str, message: str | None = None) -> RuntimeSessionResolution:
+    def resolve_session(self, session_id: str, message: str | None = None, enabled_mcps: tuple[str, ...] | None = None) -> RuntimeSessionResolution:
         """Resuelve la sesión y, opcionalmente, arma el contexto del turno."""
         overview = self.snapshot_session(session_id)
         turn_context = None
@@ -217,6 +219,7 @@ class AgentRuntime:
                 trace=trace,
                 message=message,
                 snapshot=overview,
+                enabled_mcps=tuple(enabled_mcps or ()),
             )
         return RuntimeSessionResolution(
             session_id=session_id,
@@ -235,7 +238,12 @@ class AgentRuntime:
         )
 
     async def execute_turn(self, turn: RuntimeTurnContext) -> RuntimeTurnResult:
-        response = await self._gateway.send(turn.session_id, turn.message, request_id=turn.request_id, trace_id=turn.trace.trace_id)
+        with use_request_runtime(
+            session_id=turn.session_id,
+            request_id=turn.request_id,
+            enabled_mcps=turn.enabled_mcps,
+        ):
+            response = await self._gateway.send(turn.session_id, turn.message, request_id=turn.request_id, trace_id=turn.trace.trace_id)
         message_count, has_memory = self._gateway.load_session_info(turn.session_id)
         return RuntimeTurnResult(
             session_id=turn.session_id,

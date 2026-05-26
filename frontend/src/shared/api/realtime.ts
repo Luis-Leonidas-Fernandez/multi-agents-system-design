@@ -1,4 +1,4 @@
-import type { DashboardAbort, DashboardAction, DashboardRealtimeMessage } from '@/shared/types/realtime'
+import type { DashboardAbort, DashboardAction, DashboardArtifactAction, DashboardRealtimeMessage } from '@/shared/types/realtime'
 
 export type RealtimeHandler = (message: DashboardRealtimeMessage) => void
 
@@ -6,6 +6,7 @@ export type DashboardRealtimeClient = {
   connect: () => void
   disconnect: () => void
   sendAction: (action: DashboardAction) => void
+  sendArtifactAction: (action: DashboardArtifactAction) => void
   abortAction: (abort?: DashboardAbort) => void
   subscribe: (handler: RealtimeHandler) => () => void
 }
@@ -49,6 +50,8 @@ function buildMockSnapshot(message: string): DashboardRealtimeMessage {
         { id: crypto.randomUUID(), level: 'info', message: 'Mock websocket accepted action', at: now },
       ],
       tokens: { prompt: 12, completion: 18, total: 30 },
+      sessionId: 'mock-session',
+      artifacts: [],
     },
   }
 }
@@ -179,6 +182,22 @@ export function createDashboardRealtimeClient(_url?: string): DashboardRealtimeC
     emit(buildMockSnapshot(action.message))
   }
 
+  const sendArtifactAction = (action: DashboardArtifactAction) => {
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'artifact_action', payload: action }))
+      return
+    }
+    emit({
+      type: 'log',
+      payload: {
+        id: crypto.randomUUID(),
+        level: 'info',
+        message: `Mock artifact action: ${action.kind} ${action.artifactPath}`,
+        at: new Date().toISOString(),
+      },
+    })
+  }
+
   const abortAction = (abort?: DashboardAbort) => {
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'abort', payload: abort ?? {} }))
@@ -192,5 +211,5 @@ export function createDashboardRealtimeClient(_url?: string): DashboardRealtimeC
     return () => listeners.delete(handler)
   }
 
-  return { connect, disconnect, sendAction, abortAction, subscribe }
+  return { connect, disconnect, sendAction, sendArtifactAction, abortAction, subscribe }
 }
