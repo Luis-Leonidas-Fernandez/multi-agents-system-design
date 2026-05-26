@@ -13,8 +13,17 @@ per-file-ignores =
     application/services/cli_dispatch.py: CFQ001
     # tool executor with complex branching
     application/services/tool_execution.py: CFQ001
-    # Playwright async with nested callbacks
-    infra/scraping_infra.py: CFQ001
+    # WebSocket bridge orchestration still pending split into smaller handlers
+    application/frontend_bridge/server.py: CFQ001
+    # Web scraping orchestration files still carry legacy long-flow debt
+    features/web_scraping/application/agent_strategy.py: CFQ001
+    features/web_scraping/application/country_press_helpers.py: CFQ001
+    features/web_scraping/application/country_strategy.py: CFQ001
+    features/web_scraping/application/flow.py: CFQ001
+    features/web_scraping/application/generic_strategy.py: CFQ001
+    # Playwright async and Moodle scraping still contain nested callback/orchestration debt
+    features/web_scraping/infrastructure/scraping_infra.py: CFQ001
+    features/web_scraping/infrastructure/scraping_tools.py: CFQ001
 exclude =
     __pycache__,
     .git,

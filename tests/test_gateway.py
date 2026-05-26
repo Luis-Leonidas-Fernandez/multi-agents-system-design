@@ -239,7 +239,7 @@ async def test_agentgateway_dos_sends_secuenciales_invocan_grafo_dos_veces(mock_
     gw, mock_graph = mock_gateway
 
     r1 = await gw.send("sess-sec", "primer mensaje", request_id="req-a")
-    r2 = await gw.send("sess-sec", "segundo mensaje", request_id="req-b")
+    await gw.send("sess-sec", "segundo mensaje", request_id="req-b")
 
     # El primer send siempre retorna la respuesta del grafo
     assert r1 == "Respuesta del agente"

@@ -1,9 +1,18 @@
 """Estrategia de noticias locales recientes por país."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from features.web_scraping.infrastructure.runtime import WebFetchRuntime, WebSearchRuntime
+
+if TYPE_CHECKING:
+    from core.ports.country_news_ports import (
+        ICountryProfileRepository,
+        ICountryResolver,
+        IDynamicPressSourceDiscovery,
+        IPressSourceDiscovery,
+        ISectionPathResolver,
+    )
 
 
 class CountryRecentNewsStrategy:
