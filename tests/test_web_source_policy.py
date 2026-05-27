@@ -1,5 +1,6 @@
 """Tests de política y ranking de fuentes web por país."""
 
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -311,6 +312,8 @@ async def test_country_press_search_candidates_queries_each_diary() -> None:
     from features.web_scraping.api import _run_country_press_search_candidates
 
     call_payloads: list[dict[str, object]] = []
+    recent = date.today() - timedelta(days=3)
+    recent_path = f"{recent.year:04d}/{recent.month:02d}/{recent.day:02d}"
 
     async def fake_discover(*args, **kwargs):
         return (["ansa.it", "repubblica.it"], ["ANSA", "La Repubblica"])
@@ -323,15 +326,15 @@ async def test_country_press_search_candidates_queries_each_diary() -> None:
         if domain == "ansa.it":
             return (
                 "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana ANSA\"\n\n"
-                "1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)\n"
+                f"1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/{recent_path}/seguridad.html)\n"
                 "   ANSA reporta novedades de seguridad en Italia\n\n"
-                "Sources:\n- [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)"
+                f"Sources:\n- [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/{recent_path}/seguridad.html)"
             )
         return (
             "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana La Repubblica\"\n\n"
-            "1. [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)\n"
+            f"1. [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/{recent_path}/seguridad.html)\n"
             "   Repubblica reporta novedades de seguridad en Italia\n\n"
-            "Sources:\n- [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)"
+            f"Sources:\n- [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/{recent_path}/seguridad.html)"
         )
 
     with (
