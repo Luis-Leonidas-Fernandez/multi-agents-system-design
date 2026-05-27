@@ -35,7 +35,6 @@ python features/analytics/infrastructure/country_news_analytics.py [audit.jsonl]
 | `AZURE_OPENAI_API_KEY` | no | — | Solo si `LLM_PROVIDER=azure` |
 | `AZURE_OPENAI_DEPLOYMENT` | no | `gpt-4o-mini` | Solo si `LLM_PROVIDER=azure` |
 | `OLLAMA_MODEL` | no | `llama3` | Solo si `LLM_PROVIDER=ollama` |
-| `HITL_ENABLED` | no | `true` | Confirmación humana antes de `code_node`/`web_scraping_node` |
 | `LANGCHAIN_TRACING_V2` | no | — | `true` para activar LangSmith |
 | `LANGCHAIN_API_KEY` | no | — | API key de LangSmith |
 | `LANGCHAIN_PROJECT` | no | `multi-agents` | Nombre del proyecto en LangSmith |
@@ -58,7 +57,7 @@ User → input_guard → supervisor_node → route_agent() → [math|analysis|co
 **Key files:**
 - [core/helpers/config_flow_helpers.py](core/helpers/config_flow_helpers.py): `get_llm()` — selects provider via `LLM_PROVIDER` (openai/azure/ollama).
 - [application/services/agents_factory.py](application/services/agents_factory.py): Four specialized `create_react_agent` agents; feature-owned tools live under `features/*/infrastructure/` and external integrations under `integrations/`.
-- [application/composition/graph.py](application/composition/graph.py): `StateGraph`, middleware, HITL, AgentDoG guardrail, and `create_supervisor_graph()`.
+- [application/composition/graph.py](application/composition/graph.py): `StateGraph`, middleware, AgentDoG guardrail, and `create_supervisor_graph()`.
 - [main.py](main.py): Async REPL with persistent session history in `data/sessions/`.
 - [tests/test_routing.py](tests/test_routing.py): Routing tests (no API key needed, uses mocks).
 
@@ -69,10 +68,9 @@ User → input_guard → supervisor_node → route_agent() → [math|analysis|co
 **Execution layers in order:**
 1. **`input_guard`** — pre-execution middleware, blocks prompt injection patterns before any LLM call
 2. **`supervisor_node`** — routes via `llm.with_structured_output(RoutingDecision)`; BTC price shortcut bypasses the LLM
-3. **HITL** — `code_node` and `web_scraping_node` prompt the user for confirmation (`HITL_ENABLED=true`)
-4. **Agent execution** — `create_react_agent` runs tools in a ReAct loop
-5. **AgentDoG** — post-execution trajectory check; blocks unsafe results before they reach state
-6. **Context quarantine** (web scraping only) — sub-agent absorbs raw HTML; only a ≤200-word summary reaches shared state
+3. **Agent execution** — `create_react_agent` runs tools in a ReAct loop
+4. **AgentDoG** — post-execution trajectory check; blocks unsafe results before they reach state
+5. **Context quarantine** (web scraping only) — sub-agent absorbs raw HTML; only a ≤200-word summary reaches shared state
 
 **Agent tools:**
 - `math_agent` → `calculate` (safe `eval` with math namespace)
@@ -104,9 +102,9 @@ Queries incluidas: debugging (score < 0), ranking por `(category, strategy)`, vi
 **`application/services/memory_retrieval.py`**: búsqueda y ranking de `MEMORY.md` por sesión con comando `/memory`.
 **`main.py`**: `/memory [buscar texto]` busca memorias destiladas entre sesiones.
 
-**`application/services/tool_approval.py`**: vista previa de aprobación de tools con riesgo, permisos y prompt HITL.
+**`application/services/tool_approval.py`**: vista previa de aprobación de tools con riesgo y permisos.
 **`main.py`**: `/tools` y `/tool <name> [json_args|key=value ...]` muestran catálogo y previsualización de aprobación.
-**`application/services/tool_execution.py`**: el prompt HITL incluye descripción, args y motivo de la política antes de confirmar.
+**`application/services/tool_execution.py`**: aplica permisos de tools y ejecuta confirmaciones cuando el flujo de aprobación lo requiere.
 
 **`main.py`**: CLI interactiva con comandos de inspección (`/help`, `/inspect`, `/tasks`, `/task <id>`, `/artifact`) para ver estado delegado y artifacts de la sesión actual.
 **`main.py`**: `/context [agente]`, `/bookmarks`, `/bookmark [nombre]` y `/checkpoint <id>` exponen presupuesto de contexto y checkpoints de sesión.
@@ -115,7 +113,7 @@ Queries incluidas: debugging (score < 0), ranking por `(category, strategy)`, vi
 **`application/services/context_budget.py`**: reporta qué entra al contexto, qué viene resumido y qué queda afuera de la vista del turno.
 **`application/services/session_bookmarks.py`**: persiste bookmarks/checkpoints por sesión con referencia a artifact, replay y budget.
 **`application/services/tool_impact.py`**: estima archivos afectados, diff aproximado y side effects para tools de código/web.
-**`main.py`**: `/impact <name> [json_args|key=value ...]` muestra el impacto estimado; `/tool` y el prompt HITL lo incluyen también.
+**`main.py`**: `/impact <name> [json_args|key=value ...]` muestra el impacto estimado; `/tool` también lo incluye.
 **`application/services/tool_impact.py`**: cuando puede, cruza la tarea con archivos reales del repo y sube la confianza a `repo-aware`.
 **`application/services/tool_impact.py`**: también cruza símbolos/imports reales (classes/defs/imports) para afinar la evidencia del preview.
 

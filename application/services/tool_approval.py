@@ -1,4 +1,4 @@
-"""Vista previa de aprobación para tools con foco en HITL.
+"""Vista previa de aprobación para tools con foco en confirmación.
 
 Este servicio convierte el contrato de permisos/riesgo de una tool en una
 previsualización humana legible para CLI y prompts de confirmación.

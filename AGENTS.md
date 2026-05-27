@@ -16,11 +16,10 @@
 - `create_react_agent` from `langgraph.prebuilt` is the correct factory for all specialized agents. LangGraph emits a deprecation warning pointing to `langchain.agents.create_agent`, but that function has a different signature and does not return a `CompiledStateGraph`. Do not migrate until there is a drop-in replacement with equivalent behavior and passing end-to-end tests.
 - Agent system prompts must be loaded via `load_agent_prompt()` from `agents/{name}.md`. Hardcoded prompts inside agent factory functions must be flagged.
 
-## HITL (Human-in-the-Loop)
+## High-risk execution
 
-- `code_node` and `web_scraping_node` must always check `HITL_ENABLED` before execution. Removing or short-circuiting this check must be rejected.
-- HITL confirmation must happen before the agent runs, not after.
-- **Exception — Node UI bridge**: `application/ui_bridge/runner.py` sets `HITL_ENABLED=false` via `os.environ.setdefault` because stdin is occupied by the JSON protocol and `input()` is incompatible. This is intentional and architecturally documented. Future work: replace with a `hitl_request` bridge event that awaits user confirmation via stdin.
+- `code_node` and `web_scraping_node` are still considered high-risk for AgentDoG evaluation and audit visibility.
+- Human confirmation is no longer part of the runtime path for these nodes; future review should focus on guardrails and policy enforcement instead.
 
 ## AgentDoG Guardrail
 

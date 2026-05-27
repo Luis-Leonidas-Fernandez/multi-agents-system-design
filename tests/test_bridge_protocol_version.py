@@ -68,7 +68,6 @@ def test_hello_capabilities_feature_defaults():
     assert features["tool_calls"] is True
     assert features["audit_traces"] is True
     assert features["streaming"] is False
-    assert features["hitl"] is False
     assert features["cost_tracking"] is False
 
 

@@ -4,7 +4,6 @@ Factory genérica para nodos de agentes especializados.
 Reduce la duplicación entre math/analysis/code manteniendo:
 - trazas y metadata por nodo
 - guardrail AgentDoG post-ejecución
-- HITL pre-ejecución opcional
 """
 
 import time
@@ -14,7 +13,6 @@ from typing import Any, Awaitable, Callable, Optional, Sequence
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables.config import RunnableConfig
 
-from core.ports.confirmation_port import ConfirmationPort
 from core.helpers.audit_flow_helpers import (
     _emit_node_outcome,
     _extract_followup,
@@ -31,10 +29,6 @@ def make_generic_agent_node(
     node_name: str,
     agent_name: str,
     tags: Sequence[str],
-    hitl_prompt_label: Optional[str] = None,
-    confirmation_handler: Optional[ConfirmationPort] = None,
-    cancel_message: str = "Operación cancelada por el usuario.",
-    rejected_reason: str = "hitl_rejected",
     blocked_reason: Optional[str] = None,
     should_evaluate_guard_fn: Optional[Callable[[str], bool]] = None,
     evaluate_trajectory_safe_fn: Optional[Callable[[Any, str], Awaitable[tuple[bool, dict[str, Any]]]]] = None,
@@ -46,20 +40,6 @@ def make_generic_agent_node(
         last_message = messages[-1].content if messages else ""
         rid = state.get("request_id", str(uuid.uuid4()))
         t0 = time.time()
-
-        if hitl_prompt_label and confirmation_handler is not None:
-            preview = last_message[:120] + ("..." if len(last_message) > 120 else "")
-            confirmed = await confirmation_handler.confirm(
-                f"\n[HITL] {hitl_prompt_label} va a procesar: \"{preview}\"\n¿Confirmar? [s/n]: "
-            )
-            if not confirmed:
-                _emit_node_outcome(
-                    rid, node_name, "blocked", phase="pre_guard",
-                    agent=agent_name,
-                    duration_ms=int((time.time() - t0) * 1000),
-                    reason=rejected_reason,
-                )
-                return {"messages": [AIMessage(content=cancel_message)]}
 
         try:
             result = await agent.ainvoke(

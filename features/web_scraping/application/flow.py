@@ -1,6 +1,6 @@
 """Caso de uso para el flujo de web scraping.
 
-Coordina HITL, estrategia, guardrails, retry y postcondiciones.
+Coordina estrategia, guardrails, retry y postcondiciones.
 El nodo LangGraph queda como adaptador fino.
 """
 import asyncio
@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 from urllib.parse import urlparse
-from typing import Any, Optional, Callable, Awaitable, Mapping, cast
+from typing import Any, Optional, Callable, Mapping, cast
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables.config import RunnableConfig
@@ -24,7 +24,6 @@ from core.helpers.audit_flow_helpers import (
     _node_meta,
     _get_model_name,
 )
-from core.ports.confirmation_port import ConfirmationPort
 from core.helpers.message_flow_helpers import extract_final_ai_text, get_last_message_text, is_web_information_query
 from core.helpers.trace_flow_helpers import get_or_create_request_id
 from application.services.prompt_loader import load_agent_prompt
@@ -1537,9 +1536,6 @@ async def run_web_scraping_flow(
     agent,
     get_llm_fn: Callable,
     *,
-    hitl_enabled: bool,
-    confirmation_handler: Optional[ConfirmationPort] = None,
-    ask_confirmation_compat: Optional[Callable[[str], Awaitable[bool]]] = None,
     get_runtime_policy: Callable[[], dict],
     evaluate_trajectory_safe_fn=evaluate_trajectory_safe,
     should_evaluate_guard_fn=_should_evaluate_guard,
@@ -1555,34 +1551,6 @@ async def run_web_scraping_flow(
         rid = str(uuid.uuid4())
 
     explicit_urls = _extract_urls_from_text(last_message)
-    if hitl_enabled:
-        url_info = f" → URLs: {', '.join(explicit_urls)}" if explicit_urls else ""
-        preview = last_message[:120] + ("..." if len(last_message) > 120 else "")
-
-        if confirmation_handler is not None:
-            confirmed = await confirmation_handler.confirm(
-                f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
-            )
-        elif ask_confirmation_compat is not None:
-            confirmed = await ask_confirmation_compat(
-                f"\n[HITL] web_scraping_agent va a procesar: \"{preview}\"{url_info}\n¿Confirmar? [s/n]: "
-            )
-        else:
-            _emit_node_outcome(
-                rid, "web_scraping_node", "blocked", phase="pre_guard",
-                agent="web_scraping_agent",
-                duration_ms=int((time.time() - t0) * 1000),
-                reason="hitl_missing_confirmation_handler",
-            )
-            return {"messages": [AIMessage(content="Operación cancelada: falta un handler de confirmación.")]}
-        if not confirmed:
-            _emit_node_outcome(
-                rid, "web_scraping_node", "blocked", phase="pre_guard",
-                agent="web_scraping_agent",
-                duration_ms=int((time.time() - t0) * 1000),
-                reason="hitl_rejected",
-            )
-            return {"messages": [AIMessage(content="Operación cancelada por el usuario.")]}
 
     if _is_notion_sync_request(last_message):
         print(

@@ -32,8 +32,6 @@ TURN_TIMEOUT_SECONDS = float(os.getenv("TURN_TIMEOUT_SECONDS", "180"))
 
 
 def run_ui_bridge() -> None:
-    # HITL usa input() interactivo — incompatible con bridge (stdin es JSON del Node UI).
-    os.environ.setdefault("HITL_ENABLED", "false")
     validate_env()
 
     emitter = BridgeEmitter()

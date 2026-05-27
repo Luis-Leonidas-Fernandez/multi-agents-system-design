@@ -14,8 +14,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from typing import cast
 from langchain_core.messages import HumanMessage, AIMessage
 
-# Desactivar HITL y guardrail en tests
-os.environ.setdefault("HITL_ENABLED", "false")
+# Desactivar guardrail en tests
 os.environ.setdefault("AGENTDOG_GUARD_URL", "")
 
 

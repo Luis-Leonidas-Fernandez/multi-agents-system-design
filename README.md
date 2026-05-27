@@ -10,7 +10,7 @@ Sistema multi-agentes implementado con LangGraph siguiendo el patrón supervisor
 ├── requirements.txt
 ├── application/           # Capa de composición, policies y servicios de sesión
 │   ├── services/          # Registries, factories, gateway y servicios de sesión
-│   ├── policies/          # Guardrails, HITL y seguridad
+│   ├── policies/          # Guardrails y seguridad
 │   └── composition/       # Composition root
 │       └── graph.py       # Grafo supervisor/coordinador y wiring
 ├── core/                  # Contratos y utilidades compartidas (domain/helpers/persistence/ports)
@@ -64,7 +64,6 @@ python features/analytics/infrastructure/country_news_analytics.py [audit.jsonl]
 | `AZURE_OPENAI_API_KEY` | no | — | Solo si `LLM_PROVIDER=azure` |
 | `AZURE_OPENAI_DEPLOYMENT` | no | `gpt-4o-mini` | Solo si `LLM_PROVIDER=azure` |
 | `OLLAMA_MODEL` | no | `llama3` | Solo si `LLM_PROVIDER=ollama` |
-| `HITL_ENABLED` | no | `true` | Confirmación humana antes de `code_node`/`web_scraping_node` |
 | `COORDINATOR_MODE` | no | `false` | `true` activa el modo coordinador con workers paralelos |
 | `AGENT_HOT_RELOAD` | no | `false` | `true` recarga system prompts de `agents/` sin reiniciar |
 | `USE_SQLITE` | no | `true` | `true` = SQLite / `false` = JSONL legacy |
@@ -94,10 +93,9 @@ User → input_guard → supervisor / coordinator → route_agent() → [agente 
 
 1. **`input_guard`** — bloquea patrones de prompt injection antes de cualquier llamada al LLM
 2. **`supervisor_node`** — rutea via `llm.with_structured_output(RoutingDecision)`; el precio BTC tiene un shortcut que bypasea el LLM
-3. **HITL** — `code_node` y `web_scraping_node` piden confirmación al usuario (`HITL_ENABLED=true`)
-4. **Agent execution** — `create_react_agent` corre tools en un loop ReAct
-5. **AgentDoG** — chequeo post-ejecución de la trayectoria; bloquea resultados inseguros antes de que lleguen al estado compartido
-6. **Context quarantine** (solo web scraping) — el sub-agente absorbe el HTML crudo; solo un resumen ≤200 palabras llega al estado compartido
+3. **Agent execution** — `create_react_agent` corre tools en un loop ReAct
+4. **AgentDoG** — chequeo post-ejecución de la trayectoria; bloquea resultados inseguros antes de que lleguen al estado compartido
+5. **Context quarantine** (solo web scraping) — el sub-agente absorbe el HTML crudo; solo un resumen ≤200 palabras llega al estado compartido
 
 ### Agentes y tools
 
@@ -145,7 +143,7 @@ User → input_guard → supervisor / coordinator → route_agent() → [agente 
 | `/retryable` | Lista tasks reintentables |
 | `/artifact` | Artifact completo de la sesión |
 | `/tools` | Catálogo de tools con riesgo y modo de permiso |
-| `/tool <name> [args]` | Preview HITL de una tool antes de ejecutarla |
+| `/tool <name> [args]` | Preview de una tool antes de ejecutarla |
 | `/impact <name> [args]` | Impacto estimado (archivos afectados, diff, side effects) |
 | `/context [agente]` | Presupuesto de contexto del turno actual |
 | `/bookmarks` | Lista checkpoints de sesión |

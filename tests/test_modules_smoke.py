@@ -35,10 +35,8 @@ def test_domain_models_imports():
 
 def test_ports_imports():
     from core.ports import ConfirmationPort, LLMFactory
-    from application.policies.hitl_flow import InputConfirmationHandler
     assert ConfirmationPort is not None
     assert LLMFactory is not None
-    assert issubclass(InputConfirmationHandler, ConfirmationPort)
 
 
 def test_config_helpers_imports():
@@ -229,13 +227,6 @@ def test_application_security_use_case_imports():
     assert callable(input_guard)
 
 
-def test_application_hitl_use_case_imports():
-    from application.policies.hitl_flow import HITL_ENABLED, ask_confirmation, get_confirmation_handler
-    assert isinstance(HITL_ENABLED, bool)
-    assert callable(ask_confirmation)
-    assert callable(get_confirmation_handler)
-
-
 def test_application_guard_use_case_imports():
     from features.security.api import decide_after_guard
     assert callable(decide_after_guard)
@@ -353,25 +344,16 @@ def test_scrape_tracker_imports():
 
 def test_security_imports():
     from application.policies.security_flow import input_guard
-    from application.policies.hitl_flow import (
-        HITL_ENABLED, ask_confirmation, get_confirmation_handler,
-    )
     from core.helpers.security_flow_helpers import (
         _BLOCKED_PATTERNS, _RISK_SIGNALS,
         get_blocked_patterns, get_risk_signals, get_human_history,
     )
-    from application.policies.hitl_flow import ConfirmationHandler, InputConfirmationHandler
     assert callable(input_guard)
     assert len(_BLOCKED_PATTERNS) >= 6
     assert len(_RISK_SIGNALS) >= 6
-    assert isinstance(HITL_ENABLED, bool)
-    assert callable(ask_confirmation)
     assert callable(get_blocked_patterns)
     assert callable(get_risk_signals)
-    assert callable(get_confirmation_handler)
     assert callable(get_human_history)
-    assert ConfirmationHandler is not None
-    assert InputConfirmationHandler is not None
 
 
 def test_agentdog_imports():
@@ -409,12 +391,6 @@ def test_nodes_package_imports():
     assert callable(make_code_node)
     assert callable(make_web_scraping_node)
     assert callable(make_generic_agent_node)
-
-
-def test_hitl_imports():
-    from application.policies.hitl_flow import ConfirmationHandler, InputConfirmationHandler, DEFAULT_CONFIRMATION_HANDLER
-    assert ConfirmationHandler is not None
-    assert isinstance(DEFAULT_CONFIRMATION_HANDLER, InputConfirmationHandler)
 
 
 def test_agent_registry_imports():
@@ -775,7 +751,6 @@ def test_inv10_eval_only_in_agents():
         "core/helpers/security_flow_helpers.py",
         "core/helpers/audit_flow_helpers.py",
         "core/helpers/config_flow_helpers.py",
-        "application/policies/hitl_flow.py",
         "application/policies/security_flow.py",
         "core/helpers/persistence_flow_helpers.py",
         "core/helpers/scraping_flow_helpers.py",

@@ -14,7 +14,6 @@ flowchart TD
   D --> R[features.supervisor.application.supervisor_routing]
   R --> SC[features.supervisor.application.supervisor_shortcuts]
   SC -->|BTC detectado| WN[features.web_scraping.infrastructure.node]
-  WN --> HITL[application.policies.hitl_flow]
   WN --> WF[features.web_scraping.application.flow]
   WF --> AG[application.policies.agentdog]
   WF --> ST[application.policies.scrape_tracker]
@@ -77,7 +76,7 @@ sequenceDiagram
 - **Decisión de flujo**: `features.security.application.guard_decision`, `features.supervisor.application.routing_decision`, `features.supervisor.application.supervisor_shortcuts`
 - **Supervisor**: `features.supervisor.application.supervisor_chain`, `features.supervisor.application.supervisor_routing`
 - **Scraping**: `features.web_scraping.infrastructure.node`, `features.web_scraping.application.flow`
-- **Guardrails**: `application.policies.agentdog`, `application.policies.scrape_tracker`, `application.policies.hitl_flow`
+- **Guardrails**: `application.policies.agentdog`, `application.policies.scrape_tracker`
 - **Helpers compartidos**: `core.helpers.*`
 - **Herramientas**: `features/*/infrastructure/*`
 

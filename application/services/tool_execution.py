@@ -97,7 +97,7 @@ async def execute_registered_tool(
     if decision.requires_confirmation:
         confirmed = False
         if confirm_fn is not None:
-            confirmed = await confirm_fn(preview.confirmation_prompt or f"[HITL] {context.agent_name} quiere usar {context.tool_name}. ¿Confirmar? [s/n]: ")
+            confirmed = await confirm_fn(preview.confirmation_prompt or f"[CONFIRM] {context.agent_name} quiere usar {context.tool_name}. ¿Confirmar? [s/n]: ")
         if not confirmed:
             duration_ms = int((time.monotonic() - started_at) * 1000)
             tool_audit_service.completed(

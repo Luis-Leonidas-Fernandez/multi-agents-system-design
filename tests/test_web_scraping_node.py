@@ -1,7 +1,7 @@
 """
 Tests unitarios para features/web_scraping/infrastructure/node.py.
 
-Usa mocks para aislar: agente, LLM, HITL, AgentDoG, y las funciones
+Usa mocks para aislar: agente, LLM, AgentDoG, y las funciones
 de scrape_tracker. Sin Playwright real ni API calls.
 """
 import os
@@ -11,8 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from langchain_core.messages import AIMessage, HumanMessage
 from core.domain.models import AgentState
 
-# Desactivar HITL y guard por defecto en todos los tests de este módulo
-os.environ.setdefault("HITL_ENABLED", "false")
+# Desactivar guard por defecto en todos los tests de este módulo
 os.environ.setdefault("AGENTDOG_GUARD_URL", "")
 os.environ.setdefault("AGENTDOG_POLICY",    "fail_open")
 os.environ.setdefault("AGENTDOG_EVAL_MODE", "high_risk_only")
@@ -44,17 +43,16 @@ def _make_state(message: str = "Scrapea https://example.com") -> AgentState:
     })
 
 
-# ==================== HITL disabled → agente se invoca ====================
+# ==================== agente se invoca ====================
 
 @pytest.mark.asyncio
-async def test_hitl_disabled_agente_se_invoca():
+async def test_agente_se_invoca():
     mock_agent = AsyncMock()
     mock_agent.ainvoke = AsyncMock(return_value=_make_agent_result("Información de la página " * 15))
 
     mock_llm_fn = MagicMock(return_value=MagicMock())
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
               AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node.get_runtime_policy", return_value={}),
@@ -84,7 +82,6 @@ async def test_web_agent_connection_failure_uses_search_fallback():
     }
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
               AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
@@ -100,60 +97,6 @@ async def test_web_agent_connection_failure_uses_search_fallback():
     mock_llm_fn.assert_not_called()
 
 
-# ==================== HITL enabled + confirmado → agente se invoca ====================
-
-@pytest.mark.asyncio
-async def test_hitl_enabled_usuario_confirma_agente_se_invoca():
-    """Con HITL habilitado y confirmación, el agente debe ser invocado al menos una vez."""
-    # Usar una respuesta con suficientes palabras para evitar el auto-retry (≥50 palabras)
-    long_response = "Contenido extraído correctamente de la página web solicitada " * 5
-    mock_agent = AsyncMock()
-    mock_agent.ainvoke = AsyncMock(return_value=_make_agent_result(long_response))
-
-    mock_llm_fn = MagicMock(return_value=MagicMock())
-
-    with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", True),
-        patch("application.policies.hitl_flow.ask_confirmation", AsyncMock(return_value=True)),
-        patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
-              AsyncMock(return_value=(True, {"label": "safe"}))),
-        patch("features.web_scraping.infrastructure.node.get_runtime_policy", return_value={}),
-    ):
-        from features.web_scraping.infrastructure.node import make_web_scraping_node
-        node = make_web_scraping_node(mock_agent, mock_llm_fn)
-        result = await node(_make_state())
-
-    assert mock_agent.ainvoke.call_count >= 1, "El agente debe invocarse al menos una vez"
-    assert "messages" in result
-
-
-# ==================== HITL enabled + rechazado → retorna cancelación ====================
-
-@pytest.mark.asyncio
-async def test_hitl_enabled_usuario_rechaza_no_invoca_agente():
-    mock_agent = AsyncMock()
-    mock_agent.ainvoke = AsyncMock(return_value=_make_agent_result("nunca debería llegar"))
-
-    mock_llm_fn = MagicMock()
-
-    with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", True),
-        patch("application.policies.hitl_flow.ask_confirmation", AsyncMock(return_value=False)),
-        patch("features.web_scraping.infrastructure.node.get_runtime_policy", return_value={}),
-    ):
-        from features.web_scraping.infrastructure.node import make_web_scraping_node
-        node = make_web_scraping_node(mock_agent, mock_llm_fn)
-        result = await node(_make_state())
-
-    # El agente NO debe invocarse
-    mock_agent.ainvoke.assert_not_called()
-
-    # Debe retornar mensaje de cancelación
-    assert "messages" in result
-    msg_content = result["messages"][0].content
-    assert "cancelada" in msg_content.lower() or "cancelled" in msg_content.lower() or "usuario" in msg_content.lower()
-
-
 # ==================== AgentDoG bloquea → mensaje de bloqueo ====================
 
 @pytest.mark.asyncio
@@ -164,7 +107,6 @@ async def test_agentdog_bloquea_retorna_mensaje_de_bloqueo():
     mock_llm_fn = MagicMock()
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
               AsyncMock(return_value=(False, {"label": "unsafe", "reason": "policy_block"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
@@ -203,7 +145,6 @@ async def test_agentdog_aprueba_retorna_resultado_del_agente():
     mock_llm_fn = MagicMock()
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
               AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
@@ -247,7 +188,6 @@ async def test_context_quarantine_raw_messages_no_en_state_retornado():
     mock_llm_fn = MagicMock()
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
               AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
@@ -279,7 +219,6 @@ async def test_resultado_exitoso_actualiza_scrape_tracker():
     mock_llm_fn = MagicMock()
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
               AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
@@ -309,7 +248,6 @@ async def test_auto_retry_se_activa_con_contenido_insuficiente():
     mock_llm_fn = MagicMock()
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe",
               AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
@@ -349,7 +287,6 @@ async def test_news_y_sports_usan_search_web_directo():
     mock_llm_fn = MagicMock(return_value=MagicMock())
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
         patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=[
@@ -382,7 +319,6 @@ async def test_news_economicas_china_no_hardcodea_espn():
     mock_llm_fn = MagicMock(return_value=MagicMock())
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
         patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=[
@@ -414,7 +350,6 @@ async def test_news_recientes_de_japon_devuelven_respuesta_y_sources():
 
     with (
         patch.dict("os.environ", {"TAVILY_API_KEY": "test-key"}),
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.run_web_scraping_flow", AsyncMock(return_value={
             "messages": [AIMessage(content="Japón refuerza medidas de seguridad hoy\n\nTokio anuncia un nuevo operativo\n\nSources:\n- [Japan News](https://www.japannews.yomiuri.co.jp/security/today)")],
         })),
@@ -455,7 +390,6 @@ async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
 
     with (
         patch.dict("os.environ", {"TAVILY_API_KEY": "test-key"}),
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.run_web_scraping_flow", AsyncMock(return_value={
             "messages": [AIMessage(content="Japón celebrará en abril la primera reunión para revisar su estrategia de seguridad nacional\n\nEl Gobierno japonés convocará a expertos para revisar tres documentos clave.\n\nSources:\n- [NHK](https://www3.nhk.or.jp/nhkworld/es/news/20260404_05/)")],
         })),
@@ -617,7 +551,6 @@ async def test_url_directo_usa_web_fetch_explicitamente():
     mock_llm_fn = MagicMock(return_value=MagicMock())
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
         patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", AsyncMock(return_value="URL: https://example.com\n\nResumen corto\n\nSources:\n- [example.com](https://example.com)")),
@@ -654,7 +587,6 @@ async def test_sports_query_filtra_fuentes_no_argentinas():
     mock_llm_fn = MagicMock(return_value=MagicMock())
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
         patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=[
@@ -688,7 +620,6 @@ async def test_sports_query_aplica_contexto_geografico_al_fetch():
     fetch_mock = AsyncMock(return_value="URL: https://www.sofascore.com/es/futbol/ecuador/2026-04-06\n\nResultados del futbol ecuatoriano del dia de hoy\nBarcelona SC 2 - 1 Emelec\nDeportivo Cuenca 0 - 0 Aucas\n\nSources:\n- [sofascore](https://www.sofascore.com/es/futbol/ecuador/2026-04-06)")
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
         patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=[
@@ -719,7 +650,6 @@ async def test_sports_query_rechaza_lineas_extranjeras_en_respuesta():
     mock_llm_fn = MagicMock(return_value=_llm)
 
     with (
-        patch("application.policies.hitl_flow.HITL_ENABLED", False),
         patch("features.web_scraping.infrastructure.node.evaluate_trajectory_safe", AsyncMock(return_value=(True, {"label": "safe"}))),
         patch("features.web_scraping.infrastructure.node._should_evaluate_guard", return_value=True),
         patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=[

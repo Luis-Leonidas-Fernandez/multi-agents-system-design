@@ -66,7 +66,6 @@ class BridgeCapabilityFeatures:
     streaming: bool = False
     tool_calls: bool = True
     audit_traces: bool = True
-    hitl: bool = False
     cost_tracking: bool = False
 
 

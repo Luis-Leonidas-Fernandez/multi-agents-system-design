@@ -5,7 +5,7 @@ Este proyecto está evolucionando hacia una **arquitectura hexagonal pragmática
 - **Dominio**: modelos y reglas puras.
 - **Aplicación**: casos de uso que coordinan flujos.
 - **Puertos**: contratos abstractos para dependencias externas.
-- **Adaptadores**: implementación concreta de LLM, HITL, scraping y grafo.
+- **Adaptadores**: implementación concreta de LLM, scraping y grafo.
 - **Orquestación**: LangGraph como borde de composición.
 
 ## Capas actuales
@@ -33,7 +33,7 @@ Casos de uso concretos del sistema, agrupados por slice.
 - `features/supervisor/application/supervisor_chain.py` — construye el chain estructurado
 - `features/supervisor/application/supervisor_shortcuts.py` — atajos como el fast-path BTC
 - `features/supervisor/application/supervisor_routing.py` — ejecuta el routing del supervisor
-- `features/web_scraping/application/flow.py` — coordina scraping, retry, resumen, guardrails y HITL
+- `features/web_scraping/application/flow.py` — coordina scraping, retry, resumen y guardrails
 
 ### `application/services/`
 - `agents_factory.py` — construye los agentes ReAct especializados
@@ -46,7 +46,6 @@ Casos de uso concretos del sistema, agrupados por slice.
 
 ### `application/policies/`
 - `security_flow.py` — middleware de seguridad de entrada
-- `hitl_flow.py` — confirmación humana
 - `tool_permissions.py` — políticas de permiso para ejecución de tools
 
 ### `core/helpers/`
@@ -77,7 +76,7 @@ Responsabilidades:
 3. `supervisor_node` delega en `features/supervisor/application/supervisor_routing.py`, que usa `supervisor_chain.py` y `supervisor_shortcuts.py`.
 4. `route_agent` delega en `features/supervisor/application/routing_decision.py` y traduce `__end__` a `END`.
 5. El nodo especializado ejecuta su caso de uso.
-6. `features/web_scraping/application/flow.py` y `core/helpers/generic_node_factory.py` aplican guardrails, HITL, retry y postcondiciones.
+6. `features/web_scraping/application/flow.py` y `core/helpers/generic_node_factory.py` aplican guardrails, retry y postcondiciones.
 
 ## Estado de migración
 
@@ -94,7 +93,6 @@ La migración no está completa todavía, pero ya existen fronteras claras:
 - `core/helpers/scraping_flow_helpers.py` para validación, cache y parseo de scraping.
 - `core/helpers/config_flow_helpers.py` para validación de env y fábrica de LLM.
 - `application/policies/security_flow.py` para el middleware de seguridad de entrada.
-- `application/policies/hitl_flow.py` para HITL y confirmación humana.
 - `features/*/infrastructure/` y `application/composition/graph.py` como adaptadores/orquestación.
 - `application/services/prompt_loader.py` para cargar/cached prompts por agente.
 - `application/services/prompt_assembly.py` para componer prompt base + tools + permisos.

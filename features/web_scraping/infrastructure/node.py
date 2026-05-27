@@ -4,7 +4,6 @@ from typing import Callable, Awaitable, Any
 
 from langchain_core.messages import AIMessage
 from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard
-import application.policies.hitl_flow as hitl_flow
 from features.web_scraping.api import run_web_scraping_flow
 from core.ports.llm_port import LLMFactory
 from application.policies.scrape_tracker import get_runtime_policy
@@ -134,9 +133,6 @@ def make_web_scraping_node(
             state,
             resolved_agent,
             get_llm_fn,
-            hitl_enabled=hitl_flow.HITL_ENABLED,
-            confirmation_handler=hitl_flow.get_confirmation_handler() if hitl_flow.HITL_ENABLED else None,
-            ask_confirmation_compat=hitl_flow.ask_confirmation if hitl_flow.HITL_ENABLED else None,
             get_runtime_policy=get_runtime_policy,
             evaluate_trajectory_safe_fn=evaluate_trajectory_safe,
             should_evaluate_guard_fn=_should_evaluate_guard,
