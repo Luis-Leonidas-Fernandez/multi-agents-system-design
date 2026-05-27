@@ -259,7 +259,24 @@ def _is_tangential_vertical_candidate(candidate: dict[str, str], query: str) -> 
     )
 
 
+def _query_targets_sports_results(query: str) -> bool:
+    normalized = _strip_accents((query or "").lower())
+    sports_signals = (
+        "futbol", "football", "soccer", "nba", "nfl", "mlb", "tenis",
+        "resultado", "resultados", "partido", "partidos", "marcador",
+        "fixture", "tabla", "posiciones",
+    )
+    return any(signal in normalized for signal in sports_signals)
+
+
 def _is_invalid_news_candidate(candidate: dict[str, str], query: str) -> bool:
+    if _query_targets_sports_results(query):
+        blob = " ".join(
+            str(candidate.get(field) or "")
+            for field in ("url", "title", "snippet")
+        ).lower()
+        if any(signal in blob for signal in ("resultados", "resultado", "partidos", "partido", "marcador", "score", "scores", "fixture")):
+            return _is_tangential_vertical_candidate(candidate, query)
     return _is_hub_like_candidate(candidate) or _is_tangential_vertical_candidate(candidate, query)
 
 

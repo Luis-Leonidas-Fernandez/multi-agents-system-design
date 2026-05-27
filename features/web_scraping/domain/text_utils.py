@@ -179,9 +179,9 @@ def build_web_digest_contract(
 
     contract: WebDigestContract = {
         "version": "web_digest_v1",
-        "intro": intro or "Te resumo lo más relevante y actualizado sobre seguridad en Argentina en los últimos días:",
+        "intro": intro or "",
         "sections": [],
-        "conclusion": conclusion or "🧠 Conclusión: panorama mixto con actividad operativa, delito urbano y tensión institucional.",
+        "conclusion": conclusion or "",
         "sources": sources,
     }
 

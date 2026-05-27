@@ -9,6 +9,22 @@ from application.policies.web_search_context import QueryContext, RecentPolicy
 from application.policies.web_source_policy import get_source_domain_priority
 
 
+def _looks_like_sports_results_query(query: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (query or "").lower())
+    return any(
+        signal in normalized
+        for signal in (
+            "futbol", "football", "soccer", "nba", "nfl", "mlb", "tenis",
+            "resultado", "resultados", "partido", "partidos", "marcador",
+            "fixture", "tabla de posiciones",
+        )
+    )
+
+
+def _contains_score_line(lines: list[str]) -> bool:
+    return any(re.search(r"\b\d+\s*-\s*\d+\b", line) for line in lines)
+
+
 async def _fetch_and_score_entries(
     ranked_candidates: list[dict[str, str]],
     last_message: str,
@@ -81,7 +97,12 @@ async def _fetch_and_score_entries(
 
         fallback_lines = [line.strip() for line in result.splitlines() if line.strip() and not line.strip().lower().startswith(("url:", "sources:", "http")) and "http" not in line.lower()]
         summary_lines = body_lines or _flow._extract_generic_content_lines(search_text, query_terms) or fallback_lines[:5]
-        if len(summary_lines) < 3 and fallback_lines:
+        should_preserve_compact_sports_summary = (
+            _looks_like_sports_results_query(last_message)
+            and bool(body_lines)
+            and _contains_score_line(body_lines)
+        )
+        if len(summary_lines) < 3 and fallback_lines and not should_preserve_compact_sports_summary:
             seen_lines = set(summary_lines)
             for line in fallback_lines:
                 if line not in seen_lines:

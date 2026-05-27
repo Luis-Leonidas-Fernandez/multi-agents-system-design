@@ -6,6 +6,18 @@ import re
 from typing import Any, Optional, cast
 
 
+def _looks_like_sports_results_query(query: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (query or "").lower())
+    return any(
+        signal in normalized
+        for signal in (
+            "futbol", "football", "soccer", "nba", "nfl", "mlb", "tenis",
+            "resultado", "resultados", "partido", "partidos", "marcador",
+            "fixture", "tabla de posiciones",
+        )
+    )
+
+
 async def _run_generic_web_search_strategy_impl(
     last_message: str,
     web_search_runtime_args: Optional[dict[str, Any]] = None,
@@ -213,6 +225,48 @@ async def _run_generic_web_search_strategy_impl(
             }
 
     if not ranked_candidates:
+        if _looks_like_sports_results_query(last_message):
+            fallback_candidates = _flow._extract_generic_search_candidates(search_text)
+            if query_source_group:
+                fallback_candidates = [
+                    candidate for candidate in fallback_candidates
+                    if get_source_domain_priority(query_source_group, candidate.get("url", "")) <= 2
+                ]
+            fetch_prompt = _flow._build_generic_fetch_prompt(last_message)
+            for candidate in fallback_candidates[:3]:
+                url = candidate.get("url", "")
+                if not url:
+                    continue
+                try:
+                    fetched = await _flow._fetch_web_page_follow_redirect(url, fetch_prompt, use_dynamic=False)
+                except Exception:
+                    continue
+                if not isinstance(fetched, str):
+                    fetched = str(fetched)
+                if fetched.startswith("Error") or fetched.startswith("URL rechazada") or _flow._is_no_info_response(fetched):
+                    continue
+                lines = _flow._extract_generic_content_lines(fetched, query_terms)
+                if not lines:
+                    continue
+                sources = _flow._extract_sources_from_text(fetched)
+                if not sources:
+                    sources = [{"title": candidate.get("title") or url, "url": url}]
+                digest_contract = _flow._build_web_digest_contract(lines[:8], sources)
+                summary = _flow._format_web_digest_contract(digest_contract)
+                _flow._web_debug(
+                    "generic_fetch.sports_search_fallback_fetch",
+                    query=last_message,
+                    url=url,
+                    lines_count=len(lines),
+                    source_count=len(sources),
+                )
+                return {
+                    "summary": summary,
+                    "words": summary.split(),
+                    "source_type": "webfetch",
+                    "sources": sources,
+                    "digest_contract": digest_contract,
+                }
         search_lines = _flow._extract_generic_content_lines(search_text, query_terms)
         if not search_lines:
             _flow._web_debug(
@@ -468,6 +522,47 @@ async def _run_generic_web_search_strategy_impl(
     if not sources:
         top = ranked_candidates[0]
         sources = [{"title": top.get("title") or top["url"], "url": top["url"]}]
+
+    if _looks_like_sports_results_query(last_message):
+        fetch_prompt = _flow._build_generic_fetch_prompt(last_message)
+        fetch_candidates = list(ranked_candidates[:3]) or [
+            {"title": source.get("title") or source.get("url") or "", "url": source.get("url") or ""}
+            for source in sources
+        ]
+        for candidate in fetch_candidates:
+            url = candidate.get("url", "")
+            if not url:
+                continue
+            try:
+                fetched = await _flow._fetch_web_page_follow_redirect(url, fetch_prompt, use_dynamic=False)
+            except Exception:
+                continue
+            if not isinstance(fetched, str):
+                fetched = str(fetched)
+            if fetched.startswith("Error") or fetched.startswith("URL rechazada") or _flow._is_no_info_response(fetched):
+                continue
+            lines = _flow._extract_generic_content_lines(fetched, query_terms)
+            if not lines:
+                continue
+            fetched_sources = _flow._extract_sources_from_text(fetched)
+            if not fetched_sources:
+                fetched_sources = [{"title": candidate.get("title") or url, "url": url}]
+            digest_contract = _flow._build_web_digest_contract(lines[:8], fetched_sources)
+            summary = _flow._format_web_digest_contract(digest_contract)
+            _flow._web_debug(
+                "generic_fetch.sports_final_fallback_fetch",
+                query=last_message,
+                url=url,
+                lines_count=len(lines),
+                source_count=len(fetched_sources),
+            )
+            return {
+                "summary": summary,
+                "words": summary.split(),
+                "source_type": "webfetch",
+                "sources": fetched_sources,
+                "digest_contract": digest_contract,
+            }
 
     if len(search_lines) < 3:
         search_fallback_lines = [line.strip() for line in search_text.splitlines() if line.strip() and not line.strip().lower().startswith(("url:", "sources:", "http")) and "http" not in line.lower()]

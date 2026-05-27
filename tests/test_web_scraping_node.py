@@ -17,6 +17,19 @@ os.environ.setdefault("AGENTDOG_POLICY",    "fail_open")
 os.environ.setdefault("AGENTDOG_EVAL_MODE", "high_risk_only")
 
 
+@pytest.fixture(autouse=True)
+def _reset_web_scraping_caches():
+    from features.web_scraping.application import flow as _flow
+
+    _flow._COUNTRY_PRESS_CACHE.clear()
+    _flow._COUNTRY_PRESS_SOURCE_CACHE.clear()
+    _flow._COUNTRY_PRESS_DISCOVERY_STRATEGY_CACHE.clear()
+    yield
+    _flow._COUNTRY_PRESS_CACHE.clear()
+    _flow._COUNTRY_PRESS_SOURCE_CACHE.clear()
+    _flow._COUNTRY_PRESS_DISCOVERY_STRATEGY_CACHE.clear()
+
+
 # ==================== HELPERS ====================
 
 def _make_agent_result(response_text: str) -> dict:
@@ -409,32 +422,53 @@ async def test_news_recientes_de_japon_ignora_fuente_sin_info_y_busca_otra():
 
 @pytest.mark.asyncio
 async def test_weekly_country_query_uses_snippet_when_daily_fetch_fails():
+    from datetime import date, timedelta
     from features.web_scraping.application.fetch_dispatch import _run_generic_web_search_fetch
 
-    async def _discover(*args, **kwargs):
-        return (["ansa.it", "repubblica.it"], ["ANSA", "La Repubblica"])
+    recent = date.today() - timedelta(days=3)
+    recent_path = f"{recent.year:04d}/{recent.month:02d}/{recent.day:02d}"
+    ansa_url = f"https://www.ansa.it/italia/notizie/{recent_path}/seguridad.html"
+    repubblica_url = f"https://www.repubblica.it/cronaca/{recent_path}/seguridad.html"
+
+    async def _discover(query, source_group, source_terms, runtime_args=None):
+        from features.web_scraping.application import flow as _flow
+
+        domains = ["ansa.it", "repubblica.it"]
+        names = ["ANSA", "La Repubblica"]
+        _flow._country_press_cache_set(source_group, source_terms, domains, names)
+        _flow._country_press_strategy_cache_set(source_group, source_terms, "lookup")
+        _flow._country_press_source_cache_set(
+            source_group,
+            source_terms,
+            [
+                {"title": "ANSA", "url": "https://www.ansa.it/"},
+                {"title": "La Repubblica", "url": "https://www.repubblica.it/"},
+            ],
+        )
+        return domains, names
 
     async def _fetch_by_url(url, **kwargs):
         if "ansa.it" in url:
             raise RuntimeError("dns failed")
         return (
-            "URL: https://www.repubblica.it/cronaca/2026/04/10/seguridad.html\n\n"
+            f"URL: {repubblica_url}\n\n"
             "Repubblica confirma medidas de seguridad en Italia esta semana\n"
             "El ministerio anunció controles adicionales\n\n"
-            "Sources:\n- [Repubblica](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)"
+            f"Sources:\n- [Repubblica]({repubblica_url})"
         )
 
     with (
+        patch("features.web_scraping.application.country_strategy.CountryRecentNewsStrategy.execute", new=AsyncMock(return_value=None)),
         patch("features.web_scraping.application.flow._discover_country_press_sources", new=AsyncMock(side_effect=_discover)),
         patch("features.web_scraping.infrastructure.search_tools.search_web.func", side_effect=[
-            "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
-            "1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)\n"
+            f"Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
+            f"1. [ANSA seguridad Italia]({ansa_url})\n"
             "   ANSA reporta novedades de seguridad en Italia\n\n"
-            "Sources:\n- [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)",
-            "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:repubblica.it La Repubblica noticias\"\n\n"
-            "1. [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)\n"
+            f"Sources:\n- [ANSA seguridad Italia]({ansa_url})",
+            f"Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:repubblica.it La Repubblica noticias\"\n\n"
+            f"1. [Repubblica seguridad Italia]({repubblica_url})\n"
             "   Repubblica confirma medidas de seguridad en Italia esta semana\n\n"
-            "Sources:\n- [Repubblica seguridad Italia](https://www.repubblica.it/cronaca/2026/04/10/seguridad.html)",
+            f"Sources:\n- [Repubblica seguridad Italia]({repubblica_url})",
         ]),
         patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", side_effect=_fetch_by_url),
     ):
@@ -449,21 +483,38 @@ async def test_weekly_country_query_uses_snippet_when_daily_fetch_fails():
 
 @pytest.mark.asyncio
 async def test_weekly_country_query_uses_single_snippet_before_generic_fallback():
+    from datetime import date, timedelta
     from features.web_scraping.application.fetch_dispatch import _run_generic_web_search_fetch
 
-    async def _discover(*args, **kwargs):
-        return (["ansa.it"], ["ANSA"])
+    recent = date.today() - timedelta(days=3)
+    recent_path = f"{recent.year:04d}/{recent.month:02d}/{recent.day:02d}"
+    ansa_url = f"https://www.ansa.it/italia/notizie/{recent_path}/seguridad.html"
+
+    async def _discover(query, source_group, source_terms, runtime_args=None):
+        from features.web_scraping.application import flow as _flow
+
+        domains = ["ansa.it"]
+        names = ["ANSA"]
+        _flow._country_press_cache_set(source_group, source_terms, domains, names)
+        _flow._country_press_strategy_cache_set(source_group, source_terms, "lookup")
+        _flow._country_press_source_cache_set(
+            source_group,
+            source_terms,
+            [{"title": "ANSA", "url": "https://www.ansa.it/"}],
+        )
+        return domains, names
 
     async def _fetch_by_url(url, **kwargs):
         raise RuntimeError("dns failed")
 
     with (
+        patch("features.web_scraping.application.country_strategy.CountryRecentNewsStrategy.execute", new=AsyncMock(return_value=None)),
         patch("features.web_scraping.application.flow._discover_country_press_sources", new=AsyncMock(side_effect=_discover)),
         patch("features.web_scraping.infrastructure.search_tools.search_web.func", return_value=(
-            "Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
-            "1. [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)\n"
+            f"Web search results for query: \"dame las ultimas noticias sobre seguridad en italia de esta semana site:ansa.it ANSA noticias\"\n\n"
+            f"1. [ANSA seguridad Italia]({ansa_url})\n"
             "   ANSA reporta novedades de seguridad en Italia\n\n"
-            "Sources:\n- [ANSA seguridad Italia](https://www.ansa.it/italia/notizie/2026/04/10/seguridad.html)"
+            f"Sources:\n- [ANSA seguridad Italia]({ansa_url})"
         )),
         patch("features.web_scraping.infrastructure.scraping_tools.fetch_web_page", side_effect=_fetch_by_url),
     ):

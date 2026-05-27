@@ -175,8 +175,10 @@ def test_web_scraping_application_barrel_imports():
 def test_price_feature_barrel_imports():
     from features.price.api import get_crypto_price, extract_price_from_text, CRYPTO_KEYWORDS
 
-    assert callable(get_crypto_price)
-    assert callable(extract_price_from_text)
+    assert get_crypto_price is not None
+    assert extract_price_from_text is not None
+    assert hasattr(get_crypto_price, "invoke")
+    assert hasattr(extract_price_from_text, "invoke")
     assert "bitcoin" in CRYPTO_KEYWORDS
 
 

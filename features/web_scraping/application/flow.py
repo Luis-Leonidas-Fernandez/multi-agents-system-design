@@ -758,6 +758,10 @@ def _extract_generic_content_lines(text: str, query_terms: list[str]) -> list[st
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     result: list[str] = []
     score_lines_seen = 0
+    sports_results_query = any(
+        term in {"futbol", "football", "soccer", "resultado", "resultados", "partido", "partidos", "marcador"}
+        for term in (query_terms or [])
+    )
     # Normalize query terms once so accent-bearing queries (e.g. "japon") match
     # article text that uses accented forms ("japón").
     normalized_terms = [_strip_accents(t) for t in (query_terms or [])]
@@ -815,6 +819,9 @@ def _extract_generic_content_lines(text: str, query_terms: list[str]) -> list[st
                     if not next_line or next_lower.startswith(("url:", "sources:", "http")) or "http" in next_lower or "sources" in next_lower:
                         break
                     if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ0-9]", next_line):
+                        break
+                    if sports_results_query and re.search(r"\b\d+\s*-\s*\d+\b", next_line):
+                        result.append(next_line)
                         break
                     result.append(next_line)
             elif re.search(r"\b\d+\s*-\s*\d+\b", line) and score_lines_seen == 0:
@@ -1736,6 +1743,72 @@ async def run_web_scraping_flow(
             if fallback_lines:
                 fallback_candidates = _extract_generic_search_candidates(fallback_search)
                 fallback_sources = _extract_sources_from_text(fallback_search)
+                sports_results_query = any(
+                    term in {"futbol", "football", "soccer", "resultado", "resultados", "partido", "partidos", "marcador", "nba", "nfl", "mlb", "tenis"}
+                    for term in fallback_terms
+                )
+                if sports_results_query and (fallback_candidates or fallback_sources):
+                    fetch_prompt = _build_generic_fetch_prompt(last_message)
+                    if fallback_candidates:
+                        ordered_candidates = sorted(
+                            fallback_candidates,
+                            key=lambda candidate: _score_generic_candidate(candidate, fallback_terms, fallback_query_source_group),
+                            reverse=True,
+                        )
+                    else:
+                        ordered_candidates = [
+                            {
+                                "title": source.get("title") or source.get("url") or "search result",
+                                "url": source.get("url") or "",
+                            }
+                            for source in fallback_sources
+                        ]
+                    for candidate in ordered_candidates[:3]:
+                        candidate_url = candidate.get("url") or ""
+                        if not candidate_url:
+                            continue
+                        try:
+                            fetched_candidate = await _fetch_web_page_follow_redirect(candidate_url, fetch_prompt, use_dynamic=False)
+                        except Exception:
+                            continue
+                        if not isinstance(fetched_candidate, str):
+                            fetched_candidate = str(fetched_candidate)
+                        if fetched_candidate.startswith("Error") or fetched_candidate.startswith("URL rechazada") or _is_no_info_response(fetched_candidate):
+                            continue
+                        fetched_lines = _extract_generic_content_lines(fetched_candidate, fallback_terms)
+                        if not fetched_lines:
+                            continue
+                        fetched_sources = _extract_sources_from_text(fetched_candidate) or [{
+                            "title": candidate.get("title") or candidate_url or "search result",
+                            "url": candidate_url,
+                        }]
+                        _fallback_raw = _build_source_backed_response(fetched_lines[:10], fetched_sources)
+                        summary = await _synthesize_search_summary(_fallback_raw, last_message, get_llm_fn, fetched_sources)
+                        summary, fetched_sources, words = _finalize_web_user_summary(summary, last_message, fetched_sources)
+                        duration_ms = int((time.time() - t0) * 1000)
+                        reliability = _scrape_reliability(len(words))
+                        new_tracker, analytics = cast(tuple[dict[str, Any], dict[str, Any]], _update_scrape_tracker(
+                            tracker, category, len(words), turn_count,
+                            duration_ms=duration_ms, cost_usd=0.0,
+                            source_type="webfetch", reliability_override=reliability,
+                        ))
+                        analytics = cast(dict[str, Any], analytics)
+                        new_score = _get_category_score(new_tracker, category, turn_count)
+                        _emit_node_outcome(
+                            rid, "web_scraping_node", "success", phase="agent",
+                            agent="web_scraping_agent", duration_ms=duration_ms,
+                            category=category, exploring=False, strategy="web_search_fetch", exp_rate=0.0,
+                            scrape_reliability=reliability, prior_reliability=prior_reliability,
+                            prior_score=prior_score, scrape_score=new_score,
+                            retry_done=False, source_type="webfetch",
+                            ml_recommended=ml_recommended, prediction_match=prediction_match,
+                            ml_would_succeed=(bool(analytics.get("quality_target", 0)) if prediction_match is True else None),
+                            **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **_extract_followup({"messages": []}, "success"), **analytics, **_node_meta(),
+                        )
+                        return await _guardrail_fast_result(
+                            summary, new_tracker, rid, t0,
+                            should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+                        )
                 if fallback_candidates:
                     top_candidate = max(
                         fallback_candidates,
