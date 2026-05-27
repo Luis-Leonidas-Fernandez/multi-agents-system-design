@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Optional, Sequence
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables.config import RunnableConfig
 
+from core.ports.confirmation_port import ConfirmationPort
 from core.helpers.audit_flow_helpers import (
     _emit_node_outcome,
     _extract_followup,
@@ -21,8 +22,6 @@ from core.helpers.audit_flow_helpers import (
     _extract_tokens,
     _node_meta,
 )
-from application.policies.agentdog import _should_evaluate_guard, evaluate_trajectory_safe
-from application.policies.hitl_flow import ConfirmationHandler
 from core.domain.models import AgentState
 
 
@@ -33,10 +32,12 @@ def make_generic_agent_node(
     agent_name: str,
     tags: Sequence[str],
     hitl_prompt_label: Optional[str] = None,
-    confirmation_handler: Optional[ConfirmationHandler] = None,
+    confirmation_handler: Optional[ConfirmationPort] = None,
     cancel_message: str = "Operación cancelada por el usuario.",
     rejected_reason: str = "hitl_rejected",
     blocked_reason: Optional[str] = None,
+    should_evaluate_guard_fn: Optional[Callable[[str], bool]] = None,
+    evaluate_trajectory_safe_fn: Optional[Callable[[Any, str], Awaitable[tuple[bool, dict[str, Any]]]]] = None,
 ) -> Callable[[AgentState], Awaitable[dict[str, Any]]]:
     """Crea un nodo async reutilizable para agentes especializados."""
 
@@ -79,9 +80,11 @@ def make_generic_agent_node(
             followup = _extract_followup(result, "success")
             meta = _node_meta()
 
-            if _should_evaluate_guard(node_name):
+            should_evaluate = should_evaluate_guard_fn or (lambda _node_name: False)
+            evaluate_guard = evaluate_trajectory_safe_fn
+            if evaluate_guard is not None and should_evaluate(node_name):
                 combined = messages + result.get("messages", [])
-                is_safe, _ = await evaluate_trajectory_safe(
+                is_safe, _ = await evaluate_guard(
                     {"messages": combined, "next_agent": state.get("next_agent", "")},
                     node_name,
                 )
