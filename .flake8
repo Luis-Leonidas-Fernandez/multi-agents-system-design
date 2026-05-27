@@ -24,6 +24,8 @@ per-file-ignores =
     # Playwright async and Moodle scraping still contain nested callback/orchestration debt
     features/web_scraping/infrastructure/scraping_infra.py: CFQ001
     features/web_scraping/infrastructure/scraping_tools.py: CFQ001
+    # Temporary Notion sync orchestration debt; refactor pending
+    integrations/notion_tasks_sync.py: CFQ001
 exclude =
     __pycache__,
     .git,
