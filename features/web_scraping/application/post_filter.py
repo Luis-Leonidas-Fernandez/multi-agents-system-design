@@ -341,9 +341,11 @@ def apply_web_response_post_filter(
 
     filtered_sources = sources
     if sources:
+        kept_count = len(kept_lines)
+        filtered_sources = list(sources[:kept_count])
         source_lines = [
             f"- [{source.get('title') or source.get('url') or 'source'}]({source.get('url') or ''})"
-            for source in sources
+            for source in filtered_sources
             if (source.get("url") or "").strip()
         ]
 

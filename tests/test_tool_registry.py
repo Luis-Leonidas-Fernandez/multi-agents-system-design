@@ -17,6 +17,9 @@ def test_tool_registry_expone_tools_por_agente():
         "scrape_website_dynamic",
         "scrape_website_with_json_capture",
         "web_fetch",
+        "scrape_moodle_assignments_for_review",
+        "prepare_moodle_assignments_for_calendar",
+        "sync_validated_moodle_artifact_to_notion",
     ]
 
 
