@@ -1,8 +1,10 @@
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from features.web_scraping.infrastructure import scraping_infra
 from features.web_scraping.infrastructure.scraping_tools import fetch_web_page
 
 
@@ -64,3 +66,55 @@ async def test_web_fetch_reports_cross_host_redirect():
     assert "REDIRECT DETECTED" in result
     assert "Redirect URL: https://redirect.example.org/article" in result
     assert llm.ainvoke.await_count == 0
+
+
+def test_sync_playwright_browser_is_scoped_per_thread():
+    scraping_infra._shutdown_playwright()
+
+    launched = []
+    stopped = []
+
+    class FakeBrowser:
+        def __init__(self, owner: int):
+            self.owner = owner
+
+        def close(self):
+            pass
+
+    class FakeChromium:
+        def launch(self, headless=True):
+            browser = FakeBrowser(threading.get_ident())
+            launched.append(browser)
+            return browser
+
+    class FakePlaywright:
+        def __init__(self, owner: int):
+            self.owner = owner
+            self.chromium = FakeChromium()
+
+        def stop(self):
+            stopped.append(self.owner)
+
+    class FakeSyncPlaywright:
+        def start(self):
+            return FakePlaywright(threading.get_ident())
+
+    browser_by_thread: dict[int, object] = {}
+
+    with patch("playwright.sync_api.sync_playwright", return_value=FakeSyncPlaywright()):
+        def worker():
+            browser_by_thread[threading.get_ident()] = scraping_infra._get_browser()
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(browser_by_thread) == 2
+        assert len({id(browser) for browser in browser_by_thread.values()}) == 2
+        assert len(launched) == 2
+
+        scraping_infra._shutdown_playwright()
+
+    assert len(stopped) == 2

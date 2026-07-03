@@ -17,6 +17,7 @@ import asyncio
 import time
 from typing import Any, Optional
 
+from core.helpers.url_helpers import _safe_hostname
 from core.ports.country_news_ports import IDynamicPressSourceDiscovery
 
 # ---------------------------------------------------------------------------
@@ -140,14 +141,13 @@ class DefaultDynamicPressDiscovery(IDynamicPressSourceDiscovery):
         if not isinstance(lookup_text, str):
             lookup_text = str(lookup_text)
 
-        from urllib.parse import urlparse as _urlparse
         sources = _extract_country_press_sources(lookup_text)
         seen_domains: set[str] = set()
         domains: list[str] = []
         names: list[str] = []
         for source in sources:
             url = source.get("url", "")
-            hostname = (_urlparse(url).hostname or "").lower().removeprefix("www.")
+            hostname = _safe_hostname(url).lower().removeprefix("www.")
             if hostname and hostname not in seen_domains:
                 seen_domains.add(hostname)
                 domains.append(hostname)

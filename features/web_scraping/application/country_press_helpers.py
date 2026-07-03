@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Optional
-from urllib.parse import urlparse
+
+from core.helpers.url_helpers import _safe_hostname
 
 
 async def _run_country_press_search_candidates(
@@ -19,6 +20,10 @@ async def _run_country_press_search_candidates(
     from features.web_scraping.infrastructure.search_tools import search_web
     from features.web_scraping.infrastructure.scraping_tools import fetch_web_page
     from features.web_scraping.application import flow as _flow
+
+    _MAX_RELEVANT_TARGETS = 4
+    _DOMAIN_RECENT_ARTICLE_THRESHOLD = 3
+    _COUNTRY_RECENT_ARTICLE_THRESHOLD = 6
 
     country_press_domains, country_press_names = await _flow._discover_country_press_sources(
         last_message,
@@ -39,11 +44,12 @@ async def _run_country_press_search_candidates(
     combined_search_text: list[str] = []
     raw_candidates: list[dict[str, str]] = []
     dynamic_fetch_available: Optional[bool] = None
+    total_recent_articles = 0
     country_press_sources = _flow._country_press_source_cache_get(query_source_group, source_terms)
     sources_by_domain: dict[str, dict[str, str]] = {}
     for source in country_press_sources:
         url = source.get("url", "")
-        hostname = (urlparse(url).hostname or "").lower()
+        hostname = _safe_hostname(url).lower()
         if hostname.startswith("www."):
             hostname = hostname[4:]
         if hostname and hostname not in sources_by_domain:
@@ -57,14 +63,24 @@ async def _run_country_press_search_candidates(
             _flow._web_debug("country_press.search.source_skipped", domain=domain, press_name=press_name, reason="irrelevant_for_query")
             continue
         relevant_targets.append((domain, press_name))
-        if len(relevant_targets) >= 8:
+        if len(relevant_targets) >= _MAX_RELEVANT_TARGETS:
             break
 
     for domain, press_name in relevant_targets:
         all_diary_candidates: list[dict[str, str]] = []
         domain_search_texts: list[str] = []
-        queries = _flow._build_country_press_search_queries(last_message, domain, press_name)
-        for query in queries:
+        query_specs = _flow._build_country_press_search_query_specs(last_message, domain, press_name)
+        _flow._web_debug(
+            "country_press.search.language_plan",
+            domain=domain,
+            press_name=press_name,
+            languages=[spec.language for spec in query_specs],
+            queries=[spec.query for spec in query_specs],
+        )
+        domain_recent_articles = 0
+        for query_spec in query_specs:
+            query = query_spec.query
+            language = query_spec.language
             query_attempts = [
                 ("news", _flow._build_country_press_search_invoke_args(
                     query,
@@ -100,6 +116,7 @@ async def _run_country_press_search_candidates(
                     "country_press.search.domain_result",
                     domain=domain,
                     press_name=press_name,
+                    language=language,
                     query=query,
                     attempt=attempt_label,
                     invoke_args=invoke_args,
@@ -109,7 +126,29 @@ async def _run_country_press_search_candidates(
                 )
                 if article_candidates or diary_candidates:
                     break
-            if any(_is_specific_article_hit(c) for c in all_diary_candidates):
+            if query_horizon == "week":
+                url_age_threshold = search_age_days or 14
+                recent_from_query = len([
+                    c for c in all_diary_candidates
+                    if _is_specific_article_hit(c) and _flow._candidate_url_is_recent(c.get("url", ""), url_age_threshold)
+                ])
+                domain_recent_articles = max(domain_recent_articles, recent_from_query)
+                _flow._web_debug(
+                    "country_press.search.language_metrics",
+                    country=query_source_group,
+                    domain=domain,
+                    language=language,
+                    recent_article_count=recent_from_query,
+                    total_candidate_count=len(all_diary_candidates),
+                )
+            if domain_recent_articles >= _DOMAIN_RECENT_ARTICLE_THRESHOLD:
+                _flow._web_debug(
+                    "country_press.search.domain_early_stop",
+                    domain=domain,
+                    language=language,
+                    recent_article_count=domain_recent_articles,
+                    threshold=_DOMAIN_RECENT_ARTICLE_THRESHOLD,
+                )
                 break
 
         diary_candidates = _flow._dedup_candidates_by_event(all_diary_candidates, query_terms) if all_diary_candidates else []
@@ -134,6 +173,7 @@ async def _run_country_press_search_candidates(
                 article_recent_candidate_count=len(article_recent_candidates),
                 recent_urls=[c.get("url", "") for c in strict_recent_candidates],
             )
+            total_recent_articles += len(article_recent_candidates)
             if article_recent_candidates:
                 diary_candidates = article_recent_candidates
             else:
@@ -180,7 +220,14 @@ async def _run_country_press_search_candidates(
                         )
                         homepage_lines = _flow._dedupe_homepage_lines(homepage_lines)
                     section_candidates: list[dict[str, str]] = []
-                    for section_url, section_label in _flow._build_country_press_section_targets(domain, fallback_url, last_message):
+                    section_targets, dynamic_fetch_available = await _flow._discover_homepage_section_targets(
+                        domain=domain,
+                        fallback_url=fallback_url,
+                        last_message=last_message,
+                        press_name=fallback_source.get("title") or domain,
+                        dynamic_fetch_available=dynamic_fetch_available is not False,
+                    )
+                    for section_url, section_label in section_targets:
                         section_prompt = _flow._build_newspaper_section_fetch_prompt(
                             last_message,
                             fallback_source.get("title") or domain,
@@ -354,6 +401,14 @@ async def _run_country_press_search_candidates(
                             "snippet": " ".join(homepage_lines[:3]),
                             "source_kind": "homepage_fallback",
                         })
+        if total_recent_articles >= _COUNTRY_RECENT_ARTICLE_THRESHOLD:
+            _flow._web_debug(
+                "country_press.search.country_early_stop",
+                country=query_source_group,
+                total_recent_articles=total_recent_articles,
+                threshold=_COUNTRY_RECENT_ARTICLE_THRESHOLD,
+            )
+            break
 
     ranked_candidates = _flow._rank_candidates_by_source_policy(raw_candidates, query_terms, query_source_group)
     ranked_candidates = [

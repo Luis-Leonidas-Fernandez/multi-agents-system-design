@@ -5,7 +5,7 @@ import type { LogEntry } from '@/entities/log/model/types'
 import type { TokenMetric } from '@/entities/token-metric/model/types'
 import { createDashboardRealtimeClient } from '@/shared/api/realtime'
 import { WS_URL } from '@/shared/config/env'
-import type { DashboardArtifact, DashboardRealtimeMessage } from '@/shared/types/realtime'
+import type { DashboardArtifact, DashboardRealtimeMessage, MoodleAuditTree } from '@/shared/types/realtime'
 
 const INITIAL_AGENT_ID = 'analysis'
 
@@ -25,6 +25,7 @@ export function useDashboardStream(agents: Agent[]) {
   const [lastUserMessage, setLastUserMessage] = useState('')
   const [lastAssistantResponse, setLastAssistantResponse] = useState('')
   const [artifacts, setArtifacts] = useState<DashboardArtifact[]>([])
+  const [moodleAuditTree, setMoodleAuditTree] = useState<MoodleAuditTree | null>(null)
   const [connected, setConnected] = useState(false)
   const [mode, setMode] = useState<'mock' | 'websocket'>('mock')
 
@@ -52,6 +53,7 @@ export function useDashboardStream(agents: Agent[]) {
         setLastUserMessage(message.payload.lastUserMessage)
         setLastAssistantResponse(message.payload.lastAssistantResponse)
         setArtifacts(message.payload.artifacts ?? [])
+        setMoodleAuditTree(message.payload.moodleAuditTree ?? null)
         setEvents((current) => [...message.payload.events, ...current].slice(0, 50))
         setLogs((current) => [...message.payload.logs, ...current].slice(0, 50))
         setTokens(message.payload.tokens)
@@ -91,6 +93,7 @@ export function useDashboardStream(agents: Agent[]) {
     lastUserMessage,
     lastAssistantResponse,
     artifacts,
+    moodleAuditTree,
     connected,
     mode,
     selectedAgent,

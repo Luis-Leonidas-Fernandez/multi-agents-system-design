@@ -71,6 +71,45 @@ def _clean_digest_text(text: str) -> str:
     return cleaned
 
 
+def _is_redirect_payload(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    return (
+        normalized.startswith("redirect detected:")
+        or normalized.startswith("original url:")
+        or "redirect url:" in normalized[:500]
+    )
+
+
+def _is_prompt_echo_line(line: str) -> bool:
+    normalized = _strip_accents((line or "").lower()).strip()
+    prompt_echoes = (
+        "consulta original:",
+        "pais objetivo:",
+        "tema objetivo:",
+        "lee la seccion",
+        "lee la homepage",
+        "identifica todas las noticias",
+        "si la seccion no tiene",
+        "no hay noticias concretas relevantes",
+    )
+    return normalized.startswith(prompt_echoes)
+
+
+def _is_dirty_section_label(label: str) -> bool:
+    normalized = (label or "").strip().lower()
+    if not normalized:
+        return True
+    if len(normalized) > 80:
+        return True
+    dirty_tokens = [
+        "<", ">", "</a", "<a", "href=", "http://", "https://",
+        "&lt;", "&gt;", "javascript:", "mailto:", "tel:",
+    ]
+    return any(token in normalized for token in dirty_tokens)
+
+
 def _format_sources(sources: list[SourceDict]) -> str:
     if not sources:
         return ""
@@ -106,10 +145,10 @@ def _unique_sources(sources: list[SourceDict]) -> list[SourceDict]:
 def _display_source_title(source: SourceDict) -> str:
     raw_url = source.get("url") or ""
     url = _clean_source_url(raw_url)
-    hostname = (urlparse(url).hostname or "").replace("www.", "").strip()
+    hostname = _safe_hostname(url).replace("www.", "").strip()
     title = _clean_digest_text(source.get("title") or "")
     if title:
-        title_host = (urlparse(title).hostname or "").replace("www.", "").strip()
+        title_host = _safe_hostname(title).replace("www.", "").strip()
         if title_host and title_host == hostname:
             return hostname or title
         return title
@@ -429,3 +468,4 @@ def _dedup_synthesis_bullets(text: str, query_terms: Optional[list[str]] = None)
 
     all_parts = prefix_lines + accepted
     return "\n\n".join(p.strip() for p in all_parts if p.strip())
+from core.helpers.url_helpers import _safe_hostname

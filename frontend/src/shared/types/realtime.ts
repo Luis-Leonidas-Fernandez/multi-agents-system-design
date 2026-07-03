@@ -17,6 +17,54 @@ export type DashboardArtifact = {
   syncCreatedCount: number
 }
 
+export type MoodleAuditTreeNode = {
+  id: string
+  kind:
+    | 'course'
+    | 'page'
+    | 'section'
+    | 'forum'
+    | 'quiz'
+    | 'assignment'
+    | 'document'
+    | 'image'
+    | 'video'
+    | 'preview'
+    | 'link'
+    | 'google_slides'
+    | 'google_drive'
+    | 'external_redirect'
+    | 'unknown'
+  title: string
+  url?: string
+  canonicalUrl?: string
+  previewUrl?: string
+  downloadUrl?: string
+  redirectUrl?: string
+  mimeType?: string
+  subtitle?: string
+  description?: string
+  badges?: string[]
+  metadata?: Record<string, string | number | boolean>
+  children: MoodleAuditTreeNode[]
+}
+
+export type MoodleAuditTree = {
+  jobUid: string
+  courseName: string
+  auditPath: string
+  summaryPath?: string
+  stats: {
+    pageCount: number
+    retainedPageCount?: number
+    externalRedirectCount?: number
+    downloadDocumentCount?: number
+    assignmentLikeCount?: number
+    resourceTypeCounts?: Record<string, number>
+  }
+  root: MoodleAuditTreeNode
+}
+
 export type DashboardSnapshot = {
   activeAgent: Agent
   reasoning: string
@@ -32,6 +80,7 @@ export type DashboardSnapshot = {
   tokens: TokenMetric
   sessionId: string
   artifacts: DashboardArtifact[]
+  moodleAuditTree?: MoodleAuditTree | null
 }
 
 export type DashboardAction = {

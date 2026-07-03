@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 from urllib.parse import urlparse
+
+from core.helpers.url_helpers import _safe_hostname
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -57,6 +59,44 @@ class DashboardArtifact:
 
 
 @dataclass(frozen=True)
+class DashboardMoodleAuditTreeStats:
+    pageCount: int
+    retainedPageCount: int = 0
+    externalRedirectCount: int = 0
+    downloadDocumentCount: int = 0
+    assignmentLikeCount: int = 0
+    resourceTypeCounts: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DashboardMoodleAuditTreeNode:
+    id: str
+    kind: str
+    title: str
+    url: str = ""
+    canonicalUrl: str = ""
+    previewUrl: str = ""
+    downloadUrl: str = ""
+    redirectUrl: str = ""
+    mimeType: str = ""
+    subtitle: str = ""
+    description: str = ""
+    badges: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    children: list["DashboardMoodleAuditTreeNode"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DashboardMoodleAuditTree:
+    jobUid: str
+    courseName: str
+    auditPath: str
+    summaryPath: str = ""
+    stats: DashboardMoodleAuditTreeStats | None = None
+    root: DashboardMoodleAuditTreeNode | None = None
+
+
+@dataclass(frozen=True)
 class DashboardSnapshot:
     activeAgent: DashboardAgent
     reasoning: str
@@ -72,6 +112,7 @@ class DashboardSnapshot:
     tokens: DashboardTokens
     sessionId: str
     artifacts: list[DashboardArtifact] = field(default_factory=list)
+    moodleAuditTree: DashboardMoodleAuditTree | None = None
 
 
 @dataclass(frozen=True)
@@ -130,7 +171,7 @@ def parse_response_sections(text: str) -> tuple[str, str, str]:
     source_titles: list[str] = []
     seen: set[str] = set()
     for title, url in re.findall(r"\[([^\]]+)\]\((https?://[^)]+)\)", cleaned):
-        label = f"{title.strip()} ({urlparse(url).hostname or url})".strip()
+        label = f"{title.strip()} ({_safe_hostname(url) or url})".strip()
         if label and label not in seen:
             seen.add(label)
             source_titles.append(label)

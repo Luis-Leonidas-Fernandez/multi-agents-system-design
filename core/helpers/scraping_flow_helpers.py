@@ -2,6 +2,7 @@
 from typing import Any, Dict, Optional, Tuple
 
 from core.helpers.text_truncation import truncate_suffix
+from core.helpers.url_helpers import _normalize_http_url, _validate_public_http_url
 
 _CACHE_TTL_SECONDS = 60
 _SCRAPE_CACHE_MAX = 256
@@ -34,29 +35,8 @@ def _set_cache(key: str, value: str) -> None:
 
 
 def _validate_url(url: str) -> Optional[str]:
-    from urllib.parse import urlparse
-    import ipaddress
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return "URL inválida"
-
-    if parsed.scheme not in ("http", "https"):
-        return f"Esquema no permitido: {parsed.scheme!r}. Solo se permiten http y https."
-
-    hostname = parsed.hostname or ""
-    blocked_hostnames = {"localhost", "0.0.0.0", "::1", "metadata.google.internal"}
-    if hostname.lower() in blocked_hostnames:
-        return f"Host no permitido: {hostname!r}"
-
-    try:
-        ip = ipaddress.ip_address(hostname)
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
-            return f"Dirección IP privada/reservada no permitida: {hostname!r}"
-    except ValueError:
-        pass
-
-    return None
+    _, error = _validate_public_http_url(url)
+    return error
 
 
 def _clean_text(text: str) -> str:
@@ -88,6 +68,8 @@ def _extract_links(soup, base_url: str, max_links: int = 20) -> Tuple[int, str]:
         link_text = link.get_text(strip=True)
         if href.startswith("/"):
             href = urljoin(base_url, href)
+        elif href.startswith("http"):
+            href = _normalize_http_url(href) or href
         links.append(f"- {link_text}: {href}")
     total = len(links)
     return total, "\n".join(links[:max_links])

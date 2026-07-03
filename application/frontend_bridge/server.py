@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from websockets.exceptions import ConnectionClosed
@@ -16,6 +18,9 @@ from application.frontend_bridge.protocol import (
     DashboardArtifactAction,
     DashboardEvent,
     DashboardLog,
+    DashboardMoodleAuditTree,
+    DashboardMoodleAuditTreeNode,
+    DashboardMoodleAuditTreeStats,
     DashboardSnapshot,
     DashboardStatus,
     DashboardTokens,
@@ -24,6 +29,8 @@ from application.frontend_bridge.protocol import (
 )
 from application.services.request_runtime import use_request_runtime
 from application.services.runtime import AgentRuntime, SessionLifecycle
+from features.web_scraping.application.moodle_audit import load_moodle_audit_snapshot
+from features.web_scraping.application.moodle_audit_tree import build_moodle_audit_tree
 from features.web_scraping.application.moodle_artifacts import (
     approve_moodle_artifact,
     delete_moodle_artifact,
@@ -45,6 +52,80 @@ def _build_artifacts(session_id: str) -> list[DashboardArtifact]:
         flush=True,
     )
     return artifacts
+
+
+_MOODLE_AUDIT_JSON_RE = re.compile(r"(?P<path>(?:/|data/)[^\s]+__moodle_audit_snapshot\.json)")
+_MOODLE_AUDIT_SUMMARY_RE = re.compile(r"(?P<path>(?:/|data/)[^\s]+__moodle_audit_summary\.md)")
+
+
+def _build_moodle_tree_node(payload: dict[str, object]) -> DashboardMoodleAuditTreeNode:
+    return DashboardMoodleAuditTreeNode(
+        id=str(payload.get("id") or ""),
+        kind=str(payload.get("kind") or "unknown"),
+        title=str(payload.get("title") or "Sin título"),
+        url=str(payload.get("url") or ""),
+        canonicalUrl=str(payload.get("canonicalUrl") or ""),
+        previewUrl=str(payload.get("previewUrl") or ""),
+        downloadUrl=str(payload.get("downloadUrl") or ""),
+        redirectUrl=str(payload.get("redirectUrl") or ""),
+        mimeType=str(payload.get("mimeType") or ""),
+        subtitle=str(payload.get("subtitle") or ""),
+        description=str(payload.get("description") or ""),
+        badges=[str(item) for item in (payload.get("badges") or []) if str(item).strip()],
+        metadata=dict(payload.get("metadata") or {}),
+        children=[
+            _build_moodle_tree_node(child)
+            for child in (payload.get("children") or [])
+            if isinstance(child, dict)
+        ],
+    )
+
+
+def _extract_moodle_audit_tree(final_response: str) -> DashboardMoodleAuditTree | None:
+    response = (final_response or "").strip()
+    if not response:
+        return None
+    json_match = _MOODLE_AUDIT_JSON_RE.search(response)
+    if not json_match:
+        return None
+    audit_path = Path(json_match.group("path"))
+    if not audit_path.exists():
+        return None
+    summary_match = _MOODLE_AUDIT_SUMMARY_RE.search(response)
+    summary_path = summary_match.group("path") if summary_match else ""
+    try:
+        snapshot = load_moodle_audit_snapshot(audit_path)
+        payload = build_moodle_audit_tree(
+            snapshot,
+            audit_json_path=str(audit_path),
+            summary_path=summary_path,
+        )
+    except Exception as exc:
+        print(f"[MOODLE_AUDIT_TREE][backend] error={exc} path={audit_path}", flush=True)
+        return None
+
+    root_payload = payload.get("root")
+    if not isinstance(root_payload, dict):
+        return None
+    stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+    return DashboardMoodleAuditTree(
+        jobUid=str(payload.get("jobUid") or ""),
+        courseName=str(payload.get("courseName") or ""),
+        auditPath=str(payload.get("auditPath") or audit_path),
+        summaryPath=str(payload.get("summaryPath") or summary_path),
+        stats=DashboardMoodleAuditTreeStats(
+            pageCount=int(stats_payload.get("pageCount") or 0),
+            retainedPageCount=int(stats_payload.get("retainedPageCount") or 0),
+            externalRedirectCount=int(stats_payload.get("externalRedirectCount") or 0),
+            downloadDocumentCount=int(stats_payload.get("downloadDocumentCount") or 0),
+            assignmentLikeCount=int(stats_payload.get("assignmentLikeCount") or 0),
+            resourceTypeCounts={
+                str(key): int(value or 0)
+                for key, value in dict(stats_payload.get("resourceTypeCounts") or {}).items()
+            },
+        ),
+        root=_build_moodle_tree_node(root_payload),
+    )
 
 
 async def _build_snapshot(
@@ -93,6 +174,7 @@ async def _build_snapshot(
         tokens=tokens,
         sessionId=session_id,
         artifacts=_build_artifacts(session_id),
+        moodleAuditTree=_extract_moodle_audit_tree(final_response),
     )
 
 

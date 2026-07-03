@@ -126,7 +126,7 @@ def _domain_matches(domain: str, pattern: str) -> bool:
 
 
 def _domain_allowed(url: str, *, allowed: Optional[list[str]] = None, blocked: Optional[list[str]] = None) -> bool:
-    host = urlparse(url).hostname or ""
+    host = _safe_hostname(url)
     if not host:
         return False
 
@@ -167,7 +167,7 @@ def _is_preapproved_host(hostname: str, pathname: str) -> bool:
 
 def _is_preapproved_url(url: str) -> bool:
     parsed = urlparse(url)
-    host = parsed.hostname or ""
+    host = _safe_hostname(url)
     return bool(host) and _is_preapproved_host(host, parsed.path or "/")
 
 
@@ -236,3 +236,4 @@ __all__ = [
     "_build_web_fetch_prompt",
     "_build_redirect_message",
 ]
+from core.helpers.url_helpers import _safe_hostname

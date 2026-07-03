@@ -34,6 +34,11 @@ def is_web_information_query(text: str) -> bool:
             "noticias",
             "noticia",
             "news",
+            "moodle",
+            "materias",
+            "materia",
+            "cursos",
+            "curso",
         ]
     )
 

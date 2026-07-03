@@ -135,6 +135,69 @@ def test_detect_recent_query_horizon_supports_month_queries() -> None:
     assert detect_recent_query_horizon("security news in italy last month") == "month"
 
 
+def test_detect_recent_query_horizon_maps_latest_news_to_week_but_today_stays_today() -> None:
+    from application.policies.web_source_policy import detect_recent_query_horizon
+
+    assert detect_recent_query_horizon("dame las ultimas noticias sobre seguridad en japon") == "week"
+    assert detect_recent_query_horizon("dame las noticias de hoy sobre seguridad en japon") == "today"
+
+
+def test_country_press_search_queries_prioritize_public_safety_terms() -> None:
+    from features.web_scraping.application.flow import _build_country_press_search_queries
+
+    queries = _build_country_press_search_queries(
+        "dame las ultimas noticias sobre inseguridad y policiales en corea del sur esta semana",
+        "arirang.com",
+        "Arirang",
+    )
+
+    joined = " || ".join(queries).lower()
+    assert "inseguridad" in joined
+    assert ("policiales" in joined) or ("policia" in joined)
+    assert ("crime" in joined) or ("police" in joined) or ("public safety" in joined)
+    assert ("치안" in " || ".join(queries)) or ("경찰" in " || ".join(queries))
+
+
+def test_localized_news_query_builder_emits_local_terms_for_korea_security() -> None:
+    from features.web_scraping.domain.query_localization import (
+        GeoLanguageResolver,
+        LocalizedNewsQueryBuilder,
+        QueryLocalizationContext,
+    )
+
+    debug_events: list[tuple[str, dict]] = []
+
+    def _debug(label: str, **data) -> None:
+        debug_events.append((label, data))
+
+    builder = LocalizedNewsQueryBuilder(debug_hook=_debug)
+    resolver = GeoLanguageResolver()
+    context = QueryLocalizationContext(
+        geography="Corea del Sur",
+        geo_en="South Korea",
+        topic="security",
+        horizon="week",
+        query_source_group="south_korea",
+        public_safety_query=True,
+    )
+
+    terms = builder.build_terms(context)
+    specs = builder.build_query_specs(domain="arirang.com", press_name="Arirang", context=context)
+    queries = builder.build_queries(domain="arirang.com", press_name="Arirang", context=context)
+
+    assert resolver.resolve(country_group="south_korea", domain="arirang.com")[:3] == ["en", "ko", "es"]
+    assert any(term in terms for term in ("치안", "경찰", "범죄"))
+    assert any(("치안" in query) or ("경찰" in query) for query in queries)
+    assert any("한국" in query and "이번 주" in query for query in queries)
+    assert any("South Korea" in query and "this week" in query for query in queries)
+    assert not any("Corea del Sur 치안 week" in query for query in queries)
+    assert [spec.language for spec in specs[:3]] == ["en", "en", "en"]
+    assert any(spec.language == "ko" and "한국" in spec.query for spec in specs)
+    assert any(spec.language == "es" and "Corea del Sur" in spec.query for spec in specs)
+    assert any(label == "query_localizer.build_terms" for label, _ in debug_events)
+    assert any(label == "query_localizer.build_queries" for label, _ in debug_events)
+
+
 def test_topic_landings_are_treated_as_hubs_for_recent_news() -> None:
     from features.web_scraping.application.flow import _is_hub_like_candidate, _is_invalid_news_candidate
 

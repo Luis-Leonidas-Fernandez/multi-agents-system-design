@@ -16,6 +16,16 @@ async def _synthesize_search_summary(
     from features.web_scraping.application import flow as _flow
 
     try:
+        query_source_group = _flow.detect_query_source_group(query)
+        query_horizon_local = _flow.detect_recent_query_horizon(query) if _flow._is_recent_web_information_query(query) else None
+        query_topic = _flow._detect_news_topic(query)
+        has_news_word = any(term in (query or "").lower() for term in ("noticia", "noticias", "news", "headline", "headlines"))
+        is_recent_country_news_query = bool(
+            query_source_group
+            and query_horizon_local in {"today", "week"}
+            and (query_topic in {"security", "economy", "politics"} or has_news_word)
+        )
+
         llm = get_llm_fn()
         sources_block = _flow._format_sources(sources)
         clean_lines = []
@@ -28,11 +38,13 @@ async def _synthesize_search_summary(
             if any(word.count("-") >= 3 for word in stripped.split()):
                 continue
             clean_lines.append(stripped)
+        valid_sources = [source for source in sources if (source.get("url") or "").strip()]
+        if is_recent_country_news_query and (len(valid_sources) < 2 or len(clean_lines) < 2):
+            return _flow._build_no_local_sources_response(query)["summary"]
         import datetime
         today_str = datetime.date.today().strftime("%d de %B de %Y")
         clean_content = "\n\n".join(clean_lines[:40])
         query_terms_for_dedup = _flow._extract_generic_query_terms(query)
-        query_horizon_local = _flow.detect_recent_query_horizon(query) if _flow._is_recent_web_information_query(query) else None
         translation_prefix = ""
         if has_labeled_content:
             translation_prefix = (
@@ -61,6 +73,13 @@ async def _synthesize_search_summary(
             "- Cada punto tiene 2-3 oraciones con el hecho concreto, quiénes están involucrados y por qué importa\n"
             "- NO uses títulos ni headers (##, ###) dentro de la respuesta\n"
         )
+        if is_recent_country_news_query:
+            prompt += (
+                "- Esta consulta pide NOTICIAS RECIENTES de un país concreto: respondé SOLO con hechos recientes y verificables, no con análisis geopolítico general\n"
+                "- Cada punto debe corresponder a UNA noticia concreta y reciente, idealmente de los últimos 7-14 días\n"
+                "- Si un punto no está claramente anclado a un hecho reciente, descartalo\n"
+                "- NO escribas conclusión final, balance general ni interpretación editorial\n"
+            )
         if has_labeled_content:
             prompt += (
                 "- OBLIGATORIO: después del texto de cada punto, en una nueva línea escribí exactamente "

@@ -117,6 +117,7 @@ async def _run_week_search_candidates(
     web_search_runtime_args: Optional[dict[str, Any]] = None,
 ) -> tuple[list[dict[str, str]], str]:
     from features.web_scraping.application import flow as _flow
+    from features.web_scraping.domain.classifier import _is_specific_article_hit
     from features.web_scraping.infrastructure.search_tools import search_web
 
     source_terms = list(get_query_source_terms(last_message))
@@ -140,6 +141,16 @@ async def _run_week_search_candidates(
     ]
     ranked_candidates = _flow._rank_candidates_by_source_policy(candidates, query_terms, query_source_group)
     diverse_candidates = _flow._dedup_candidates_by_event(ranked_candidates, query_terms)[:8]
+
+    def _is_strong_recent_candidate(candidate: dict[str, str]) -> bool:
+        snippet = str(candidate.get("snippet") or "").strip()
+        if len(snippet.split()) < 6:
+            return False
+        if _flow._is_hub_like_candidate(candidate):
+            return False
+        return _is_specific_article_hit(candidate) or _flow._candidate_url_has_date(candidate.get("url", ""))
+
+    strong_generic_candidates = [candidate for candidate in diverse_candidates if _is_strong_recent_candidate(candidate)]
     _flow._web_debug(
         "week_search.generic",
         invoke_args=search_invoke_args,
@@ -147,6 +158,7 @@ async def _run_week_search_candidates(
         extracted_candidate_count=len(candidates),
         ranked_candidate_count=len(ranked_candidates),
         diverse_candidate_count=len(diverse_candidates),
+        strong_generic_candidate_count=len(strong_generic_candidates),
         search_preview=search_text[:500],
         diverse_urls=[c.get("url", "") for c in diverse_candidates],
     )
@@ -154,7 +166,7 @@ async def _run_week_search_candidates(
     if query_source_group == "japan":
         return diverse_candidates, search_text
 
-    if len(diverse_candidates) >= 2:
+    if len(strong_generic_candidates) >= 2:
         return diverse_candidates, search_text
 
     country_press_candidates, country_press_search_text = [], ""

@@ -7,8 +7,9 @@ import asyncio
 import os
 import re
 import time
+import unicodedata
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from typing import Any, Optional, Callable, Mapping, cast
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -16,6 +17,7 @@ from langchain_core.runnables.config import RunnableConfig
 
 from application.policies.agentdog import evaluate_trajectory_safe, _should_evaluate_guard, _is_allowed_public_price_request
 from core.helpers.audit_flow_helpers import (
+    _emit_guard_audit,
     _emit_node_outcome,
     _emit_country_news_metrics,
     _extract_tokens,
@@ -24,6 +26,7 @@ from core.helpers.audit_flow_helpers import (
     _node_meta,
     _get_model_name,
 )
+from core.helpers.url_helpers import _normalize_http_url, _safe_hostname
 from core.helpers.message_flow_helpers import extract_final_ai_text, get_last_message_text, is_web_information_query
 from core.helpers.trace_flow_helpers import get_or_create_request_id
 from application.services.prompt_loader import load_agent_prompt
@@ -61,6 +64,11 @@ from features.web_scraping.domain.section_path_resolver import (
     GENERIC_SECTION_PATHS,
     build_country_press_section_targets,
 )
+from features.web_scraping.domain.query_localization import (
+    QuerySpec,
+    LocalizedNewsQueryBuilder,
+    QueryLocalizationContext,
+)
 from features.web_scraping.infrastructure.country_profile_repo import PERIODICOS_CONTINENT_SLUG_BY_COUNTRY
 from core.ports.country_news_ports import (
     ICountryResolver,
@@ -96,6 +104,9 @@ from features.web_scraping.domain.text_utils import (
     _dedup_synthesis_bullets,
     _candidate_url_has_date,
     _candidate_url_is_recent,
+    _is_dirty_section_label,
+    _is_prompt_echo_line,
+    _is_redirect_payload,
 )
 from features.web_scraping.domain.classifier import (
     _NON_NEWS_DOMAINS,
@@ -139,10 +150,35 @@ def _web_debug(label: str, **data: Any) -> None:
     print(f"[WEB_DEBUG] {label}{(' ' + payload) if payload else ''}", flush=True)
 
 
-_MOODLE_KEYWORDS = (
+_MOODLE_ASSIGNMENT_KEYWORDS = (
     "moodle", "tarea", "tareas", "entrega", "entregas",
     "trabajo práctico", "trabajos prácticos", "actividad", "actividades",
     "pendiente", "pendientes", "vencida", "vencidas", "campus virtual",
+)
+_MOODLE_COURSE_LIST_KEYWORDS = (
+    "mis materias",
+    "mis cursos",
+    "que materias tengo",
+    "qué materias tengo",
+    "que cursos tengo",
+    "qué cursos tengo",
+    "mostrame mis materias",
+    "mostrame mis cursos",
+    "mostrar mis materias",
+    "mostrar mis cursos",
+    "lista de materias",
+    "lista de cursos",
+)
+_MOODLE_COURSE_AUDIT_PATTERNS = (
+    re.compile(
+        r"\b(?:audit[aá]|audita|revis[aá]|revisa|inspeccion[aá]|inspecciona|mostr[aá]|mostra|mostrame|muestrame|muéstrame|abr[ií]|abre|ver)\s+"
+        r"(?:la\s+)?(?:materia|curso)\s+(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:audit[aá]|audita|revis[aá]|revisa|inspeccion[aá]|inspecciona)\s+(.+)$",
+        re.IGNORECASE,
+    ),
 )
 _NOTION_SYNC_KEYWORDS = (
     "notion",
@@ -161,9 +197,122 @@ _NOTION_SYNC_KEYWORDS = (
 )
 
 
-def _is_moodle_query(message: str) -> bool:
-    lowered = (message or "").lower()
-    return any(keyword in lowered for keyword in _MOODLE_KEYWORDS)
+def _normalize_intent_text(message: str) -> str:
+    lowered = (message or "").strip().lower()
+    normalized = unicodedata.normalize("NFKD", lowered)
+    without_accents = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", without_accents).strip()
+
+
+def _extract_moodle_course_query(message: str) -> str:
+    raw_message = (message or "").strip()
+    normalized = _normalize_intent_text(raw_message)
+    for pattern in _MOODLE_COURSE_AUDIT_PATTERNS:
+        match = pattern.search(raw_message)
+        if not match:
+            continue
+        candidate = (match.group(1) or "").strip(" .:;-")
+        if not candidate:
+            continue
+        if pattern is _MOODLE_COURSE_AUDIT_PATTERNS[1] and not any(
+            token in normalized for token in ("moodle", "campus virtual", "materia", "curso")
+        ):
+            continue
+        return candidate
+    return ""
+
+
+def _detect_moodle_intent(message: str) -> tuple[Optional[str], str]:
+    normalized = _normalize_intent_text(message)
+    if any(keyword in normalized for keyword in _MOODLE_COURSE_LIST_KEYWORDS):
+        return "course_list", ""
+
+    course_query = _extract_moodle_course_query(message)
+    if course_query:
+        return "course_audit", course_query
+
+    if any(keyword in normalized for keyword in _MOODLE_ASSIGNMENT_KEYWORDS):
+        return "assignments", ""
+
+    return None, ""
+
+
+def _render_moodle_courses_chat(payload: Mapping[str, Any]) -> str:
+    courses = payload.get("courses") if isinstance(payload.get("courses"), list) else []
+    if not courses:
+        return "No encontré materias visibles en Moodle."
+
+    lines = ["Estas son tus materias visibles en Moodle:\n"]
+    for course in courses:
+        if not isinstance(course, Mapping):
+            continue
+        idx = int(course.get("index") or 0)
+        name = str(course.get("course_name") or "Materia sin nombre").strip()
+        if not name:
+            name = "Materia sin nombre"
+        lines.append(f"{idx}. {name}")
+
+    lines.append("")
+    lines.append("Si querés, decime `auditá la materia 1` o el nombre exacto y te traigo el contenido completo.")
+    return "\n".join(lines).strip()
+
+
+def _render_moodle_course_audit_chat(payload: Mapping[str, Any]) -> str:
+    if not bool(payload.get("resolved", True)):
+        candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+        lines = [str(payload.get("message") or "No pude resolver la materia de forma unívoca.").strip()]
+        if candidates:
+            lines.append("")
+            lines.append("Candidatas encontradas:")
+            for item in candidates[:10]:
+                if not isinstance(item, Mapping):
+                    continue
+                idx = item.get("index")
+                name = str(item.get("course_name") or "Materia sin nombre").strip()
+                prefix = f"{idx}. " if idx is not None else "- "
+                lines.append(f"{prefix}{name}")
+        return "\n".join(lines).strip()
+
+    course_name = str(payload.get("course_name") or payload.get("root_page_title") or "Materia Moodle").strip()
+    page_count = int(payload.get("page_count") or 0)
+    assignment_count = int(payload.get("assignment_count") or 0)
+    warning_count = int(payload.get("warning_count") or 0)
+    visited_count_raw = int(payload.get("visited_count_raw") or 0)
+    retained_page_count = int(payload.get("retained_page_count") or page_count)
+    resource_type_counts = payload.get("resource_type_counts") if isinstance(payload.get("resource_type_counts"), Mapping) else {}
+    audit_json_path = str(payload.get("audit_json_path") or "").strip()
+    audit_schema_path = str(payload.get("audit_schema_path") or "").strip()
+    audit_summary_path = str(payload.get("audit_summary_path") or "").strip()
+
+    lines = [
+        f"Audité la materia **{course_name}**.",
+        "",
+        f"- Páginas auditadas: {page_count}",
+        f"- Entregas detectadas: {assignment_count}",
+        f"- Warnings: {warning_count}",
+    ]
+    if visited_count_raw or retained_page_count:
+        lines.append(f"- Crawl: {visited_count_raw or retained_page_count} visitas / {retained_page_count} páginas retenidas")
+    if assignment_count == 0 and resource_type_counts:
+        details: list[str] = []
+        for key, count_value in sorted(resource_type_counts.items()):
+            count = int(count_value or 0)
+            if count <= 0:
+                continue
+            label = str(key).replace("_", " ")
+            details.append(f"{count} {label}")
+        if details:
+            lines.append(
+                "- No se detectaron actividades de entrega tipo assignment/workshop. "
+                f"Sí se detectaron: {', '.join(details)}."
+            )
+    if audit_json_path:
+        lines.append(f"- JSON audit: {audit_json_path}")
+    if audit_schema_path:
+        lines.append(f"- Schema: {audit_schema_path}")
+    if audit_summary_path:
+        lines.append(f"- Resumen: {audit_summary_path}")
+    return "\n".join(lines).strip()
 
 
 def _is_notion_sync_request(message: str) -> bool:
@@ -372,23 +521,16 @@ def _country_press_query_terms(last_message: str) -> list[str]:
     geo_en = _GEO_ENGLISH.get(geography, geography)
     topic = _detect_news_topic(last_message)
     horizon = detect_recent_query_horizon(last_message)
-
-    topic_terms_map = {
-        "security": ["seguridad", "sicurezza", "cronaca", "polizia"],
-        "economy": ["economia", "mercato", "finanza"],
-        "politics": ["politica", "governo", "parlamento"],
-        "default": ["noticias", "attualita"],
-    }
-    terms: list[str] = []
-    for value in [geography, geo_en, *topic_terms_map.get(topic, topic_terms_map["default"])]:
-        cleaned = str(value or "").strip()
-        if cleaned and cleaned.lower() not in {term.lower() for term in terms}:
-            terms.append(cleaned)
-    if horizon == "week":
-        for value in ["esta semana", "week"]:
-            if value.lower() not in {term.lower() for term in terms}:
-                terms.append(value)
-    return terms
+    query_source_group = detect_query_source_group(last_message)
+    builder = LocalizedNewsQueryBuilder(debug_hook=_web_debug)
+    return builder.build_terms(QueryLocalizationContext(
+        geography=geography,
+        geo_en=geo_en,
+        topic=topic,
+        horizon=horizon,
+        query_source_group=query_source_group,
+        public_safety_query=_query_targets_public_safety(last_message),
+    ))
 
 
 def _build_country_press_search_query(last_message: str, domain: str, press_name: str) -> str:
@@ -409,53 +551,41 @@ def _build_country_press_search_queries(last_message: str, domain: str, press_na
     geo_en = _GEO_ENGLISH.get(geography, geography)
     topic = _detect_news_topic(last_message)
     horizon = detect_recent_query_horizon(last_message)
-
-    variants_by_topic = {
-        "security": [
-            [geography, "sicurezza"],
-            [geography, "cronaca"],
-            [geo_en, "security"],
-            [geography, "polizia"],
-        ],
-        "economy": [
-            [geography, "economia"],
-            [geo_en, "economy"],
-            [geography, "mercato"],
-        ],
-        "politics": [
-            [geography, "politica"],
-            [geo_en, "politics"],
-            [geography, "governo"],
-        ],
-        "default": [
-            [geography, "noticias"],
-            [geo_en, "news"],
-        ],
-    }
-    variants = variants_by_topic.get(topic, variants_by_topic["default"])
-    queries: list[str] = []
-    seen: set[str] = set()
-    normalized_press = _strip_accents((press_name or "").lower())
-    short_press_name = (
-        press_name.strip()
-        if press_name
-        and len(press_name.split()) <= 4
-        and not any(noise in normalized_press for noise in ("deportivo", "sport", "stadio"))
-        else ""
+    query_source_group = detect_query_source_group(last_message)
+    builder = LocalizedNewsQueryBuilder(debug_hook=_web_debug)
+    return builder.build_queries(
+        domain=domain,
+        press_name=press_name,
+        context=QueryLocalizationContext(
+            geography=geography,
+            geo_en=geo_en,
+            topic=topic,
+            horizon=horizon,
+            query_source_group=query_source_group,
+            public_safety_query=_query_targets_public_safety(last_message),
+        ),
     )
-    for variant in variants:
-        parts = [f"site:{domain}", *[part for part in variant if part]]
-        if horizon == "week":
-            parts.append("week")
-        if short_press_name:
-            parts.append(short_press_name)
-        query = " ".join(str(part).strip() for part in parts if str(part).strip())
-        if query and query not in seen:
-            seen.add(query)
-            queries.append(query)
-    if not queries:
-        queries.append(_build_country_press_search_query(last_message, domain, press_name))
-    return queries
+
+
+def _build_country_press_search_query_specs(last_message: str, domain: str, press_name: str) -> list[QuerySpec]:
+    geography = _extract_query_geography(last_message) or ""
+    geo_en = _GEO_ENGLISH.get(geography, geography)
+    topic = _detect_news_topic(last_message)
+    horizon = detect_recent_query_horizon(last_message)
+    query_source_group = detect_query_source_group(last_message)
+    builder = LocalizedNewsQueryBuilder(debug_hook=_web_debug)
+    return builder.build_query_specs(
+        domain=domain,
+        press_name=press_name,
+        context=QueryLocalizationContext(
+            geography=geography,
+            geo_en=geo_en,
+            topic=topic,
+            horizon=horizon,
+            query_source_group=query_source_group,
+            public_safety_query=_query_targets_public_safety(last_message),
+        ),
+    )
 
 
 def _build_country_press_search_invoke_args(
@@ -576,6 +706,8 @@ def _filter_homepage_lines_for_query(lines: list[str], last_message: str, query_
 
 def _is_homepage_meta_line(line: str) -> bool:
     normalized = _strip_accents((line or "").lower())
+    if _is_prompt_echo_line(line):
+        return True
     meta_patterns = (
         "estos titulares",
         "estos temas",
@@ -663,6 +795,169 @@ _SECTION_LOCAL_LABELS = {
     "política", "noticias", "actualidad", "último momento",
 }
 
+_SECTION_DISCOVERY_TIME_BUDGET_SECONDS = 20.0
+_NAV_CONTAINER_HINTS = (
+    "nav", "menu", "header", "section", "category", "topic", "subnav",
+    "drawer", "navbar", "gnb", "lnb", "tab", "breadcrumb", "global", "local",
+)
+_SECTION_TOPIC_ALIAS_WEIGHTS: dict[str, dict[str, int]] = {
+    "security": {
+        "security": 6, "safety": 5, "crime": 6, "police": 6, "justice": 5, "court": 4,
+        "law": 3, "public safety": 5, "incident": 4, "local": 2, "national": 3, "society": 4,
+        "international": 2, "politics": 1, "world": 1,
+        "seguridad": 6, "inseguridad": 5, "policial": 6, "policiales": 6, "policia": 6,
+        "policía": 6, "sucesos": 5, "justicia": 5, "tribunales": 4, "sociedad": 4,
+        "internacional": 2, "política": 1,
+        "cronaca": 5, "sicurezza": 6, "polizia": 6, "giustizia": 5, "interni": 3,
+        "사회": 5, "사건": 6, "범죄": 6, "경찰": 6, "치안": 6, "수사": 5, "법원": 4, "국내": 2,
+        "국제": 2, "정치": 1,
+        "事件": 6, "犯罪": 6, "警察": 6, "治安": 6, "司法": 5,
+        "治安": 6, "警察": 6, "犯罪": 6, "事件": 6, "社会": 4,
+    },
+    "politics": {
+        "politics": 6, "political": 5, "government": 6, "parliament": 5, "election": 5,
+        "policy": 4, "national": 3, "politica": 6, "política": 6, "gobierno": 6,
+        "parlamento": 5, "elecciones": 5, "nación": 3, "nacional": 3,
+        "politica": 6, "governo": 6, "elezioni": 5,
+        "정치": 6, "정부": 6, "국회": 5, "선거": 5,
+        "政治": 6, "政府": 6, "議会": 5, "選挙": 5,
+    },
+    "economy": {
+        "economy": 6, "economic": 5, "business": 5, "finance": 6, "market": 5, "markets": 5,
+        "economia": 6, "economía": 6, "finanzas": 6, "mercado": 5, "mercados": 5,
+        "negocios": 5, "empresas": 4, "finanza": 6, "mercato": 5, "mercati": 5,
+        "economy": 6, "경제": 6, "금융": 6, "시장": 5, "기업": 4, "物価": 4,
+        "経済": 6, "金融": 6, "市場": 5, "企業": 4,
+    },
+}
+
+
+def _section_topic_aliases(last_message: str) -> dict[str, int]:
+    return _SECTION_TOPIC_ALIAS_WEIGHTS.get(_detect_news_topic(last_message), {})
+
+
+def _section_label_score(label_norm: str, path_norm: str, *, topic_aliases: dict[str, int]) -> int:
+    score = 0
+    for token, weight in topic_aliases.items():
+        if token in label_norm:
+            score += weight
+        if token in path_norm:
+            score += max(1, weight - 1)
+    return score
+
+
+def _section_area_score(area_blob: str, label: str) -> int:
+    score = 0
+    normalized_area = _strip_accents(area_blob.lower())
+    if " role navigation " in f" {normalized_area} " or " nav " in f" {normalized_area} ":
+        score += 4
+    if any(hint in normalized_area for hint in _NAV_CONTAINER_HINTS):
+        score += 3
+    word_count = len(label.split())
+    if 1 <= word_count <= 4:
+        score += 1
+    return score
+
+
+def _extract_navigation_sources_from_html(html: str, *, base_url: str, domain: str) -> list[dict[str, Any]]:
+    from bs4 import BeautifulSoup
+
+    if not html or "<" not in html:
+        return []
+
+    normalized_domain = domain.lower().removeprefix("www.")
+    soup = BeautifulSoup(html, "html.parser")
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    banned_terms = {
+        "facebook", "instagram", "twitter", "x.com", "youtube", "tiktok", "whatsapp",
+        "author", "authors", "archive", "archives", "tag", "tags", "category", "categories",
+        "newsletter", "subscribe", "login", "signin", "register", "advertise", "podcast",
+    }
+
+    for anchor in soup.find_all("a", href=True):
+        raw_href = str(anchor.get("href") or "").strip()
+        if not raw_href or raw_href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        raw_title = " ".join(anchor.stripped_strings)
+        if not raw_title or len(raw_title) > 80 or _is_dirty_section_label(raw_title):
+            continue
+        absolute_url = raw_href if raw_href.startswith("http") else urljoin(base_url, raw_href)
+        absolute_url = _normalize_http_url(absolute_url)
+        if not absolute_url:
+            continue
+        parsed = urlparse(absolute_url)
+        hostname = (_safe_hostname(absolute_url)).lower().removeprefix("www.")
+        if hostname and hostname != normalized_domain:
+            continue
+        clean_url = f"{parsed.scheme or 'https'}://{parsed.netloc}{parsed.path}".rstrip("/")
+        if not parsed.path or parsed.path == "/":
+            continue
+        if _is_article_url(clean_url) or _candidate_url_has_date(clean_url):
+            continue
+        title_norm = _strip_accents(raw_title.lower())
+        path_norm = _strip_accents(parsed.path.lower())
+        if any(term in f"{title_norm} {path_norm}" for term in banned_terms):
+            continue
+
+        area_parts: list[str] = []
+        parent = anchor.parent
+        depth = 0
+        while parent is not None and getattr(parent, "name", None) and depth < 5:
+            tag_name = str(parent.name or "")
+            area_parts.append(tag_name)
+            parent_id = parent.get("id")
+            if parent_id:
+                area_parts.append(str(parent_id))
+            parent_classes = parent.get("class") or []
+            area_parts.extend(str(value) for value in parent_classes if value)
+            role = parent.get("role")
+            if role:
+                area_parts.append(f"role {role}")
+            parent = parent.parent
+            depth += 1
+        area_blob = " ".join(area_parts)
+        dedupe_key = f"{_slugify_periodicos_label(raw_title)}|{_slugify_periodicos_label(parsed.path)}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        collected.append(
+            {
+                "url": clean_url,
+                "title": raw_title[:80],
+                "area_score": _section_area_score(area_blob, raw_title),
+            }
+        )
+
+    return collected
+
+
+async def _fetch_homepage_document(url: str, *, use_dynamic: bool) -> str:
+    from features.web_scraping.infrastructure import scraping_infra
+
+    if not use_dynamic:
+        try:
+            html_bytes = await asyncio.to_thread(scraping_infra._fetch_html, url, 8)
+        except Exception as exc:
+            return f"Error al procesar la pagina web: {str(exc)}"
+        return html_bytes.decode("utf-8", errors="replace")
+
+    def _fetch_dynamic_html() -> str:
+        try:
+            browser = scraping_infra._get_browser()
+            context = browser.new_context()
+            page = context.new_page()
+            scraping_infra._configure_page(page)
+            page.goto(url, wait_until="domcontentloaded", timeout=8000)
+            page.wait_for_timeout(500)
+            html = page.content()
+            context.close()
+            return html
+        except Exception as exc:
+            return f"Error al procesar la pagina web: {str(exc)}"
+
+    return await asyncio.to_thread(_fetch_dynamic_html)
+
 
 def _build_newspaper_homepage_fetch_prompt(last_message: str, press_name: str) -> str:
     topic = _detect_news_topic(last_message)
@@ -709,6 +1004,197 @@ def _build_newspaper_section_fetch_prompt(last_message: str, press_name: str, se
         "Si la sección no tiene noticias concretas sobre el tema, devolvé exactamente: 'No hay noticias concretas relevantes.'\n\n"
         f"Consulta original: {last_message}"
     )
+
+
+def _build_newspaper_section_discovery_prompt(last_message: str, press_name: str) -> str:
+    topic = _detect_news_topic(last_message)
+    geography = _extract_query_geography(last_message) or ""
+    geo_line = f"País objetivo: {geography}. " if geography else ""
+    topic_line = {
+        "security": "Tema objetivo: seguridad, crimen, policía, policiales, sucesos, justicia, ciberseguridad, defensa.",
+        "politics": "Tema objetivo: política, gobierno, parlamento, elecciones, decretos, poder judicial.",
+        "economy": "Tema objetivo: economía, finanzas, inflación, mercado, empresas, presupuesto.",
+    }.get(topic, "Tema objetivo: noticias y actualidad.")
+    return (
+        f"Leé la homepage del diario {press_name}. "
+        f"{geo_line}{topic_line} "
+        "Identificá SOLO secciones o categorías del sitio que probablemente publiquen noticias sobre ese tema. "
+        "No devuelvas artículos individuales, no devuelvas redes sociales, no devuelvas autores, no devuelvas tags, no devuelvas archives. "
+        "Devolvé cada sección en una línea con formato markdown exacto: [Nombre de la sección](URL absoluta). "
+        "Si hay secciones repetidas o equivalentes, devolvé solo la más específica. "
+        "Si no encontrás secciones relevantes, devolvé exactamente: 'No hay secciones relevantes.'\n\n"
+        f"Consulta original: {last_message}"
+    )
+
+
+def _topic_section_terms(last_message: str) -> set[str]:
+    topic = _detect_news_topic(last_message)
+    terms_map = {
+        "security": {
+            "security", "safety", "crime", "police", "policing", "incident", "incidents", "justice", "court", "law",
+            "seguridad", "inseguridad", "policial", "policiales", "policia", "sucesos", "justicia", "tribunales",
+            "cronaca", "sicurezza", "polizia", "giustizia",
+            "사회", "사건", "범죄", "경찰", "치안", "수사", "법원",
+            "事件", "犯罪", "警察", "治安", "司法",
+        },
+        "politics": {
+            "politics", "political", "government", "election", "parliament", "policy", "congress", "senate",
+            "politica", "gobierno", "elecciones", "parlamento", "congreso", "senado",
+            "politica", "governo", "elezioni", "parlamento",
+            "정치", "정부", "국회", "선거",
+            "政治", "政府", "議会", "選挙",
+        },
+        "economy": {
+            "economy", "economic", "business", "finance", "market", "markets", "companies", "inflation",
+            "economia", "finanzas", "mercado", "mercados", "negocios", "empresas", "inflacion",
+            "economia", "finanza", "mercato", "mercati", "imprese", "inflazione",
+            "경제", "금융", "시장", "기업", "물가",
+            "経済", "金融", "市場", "企業", "物価",
+        },
+    }
+    return terms_map.get(topic, set())
+
+
+def _extract_relevant_homepage_sections(
+    text: str,
+    *,
+    domain: str,
+    base_url: str,
+    last_message: str,
+) -> list[tuple[str, str]]:
+    if not text or _classify_fetch_error(text) or _is_no_info_response(text):
+        return []
+
+    topical_terms = _topic_section_terms(last_message)
+    topic_aliases = _section_topic_aliases(last_message)
+    normalized_domain = domain.lower().removeprefix("www.")
+    candidates: list[tuple[int, int, str, str]] = []
+    seen_keys: set[str] = set()
+    seen_paths: set[str] = set()
+    banned_terms = {
+        "facebook", "instagram", "twitter", "x.com", "youtube", "tiktok", "whatsapp",
+        "author", "authors", "archive", "archives", "tag", "tags", "category", "categories",
+        "newsletter", "subscribe", "login", "signin", "register",
+    }
+
+    structured_sources = [
+        {**source, "area_score": 0}
+        for source in _extract_sources_from_text(text)
+    ]
+    html_sources = _extract_navigation_sources_from_html(text, base_url=base_url, domain=domain)
+
+    for source in [*html_sources, *structured_sources]:
+        raw_url = (source.get("url") or "").strip()
+        raw_title = " ".join((source.get("title") or "").split())
+        if not raw_url or not raw_title or _is_dirty_section_label(raw_title):
+            continue
+        absolute_url = raw_url if raw_url.startswith("http") else urljoin(base_url, raw_url)
+        absolute_url = _normalize_http_url(absolute_url)
+        if not absolute_url:
+            continue
+        parsed = urlparse(absolute_url)
+        hostname = (_safe_hostname(absolute_url)).lower().removeprefix("www.")
+        if hostname and hostname != normalized_domain:
+            continue
+        clean_url = f"{parsed.scheme or 'https'}://{parsed.netloc}{parsed.path}".rstrip("/")
+        if not parsed.path or parsed.path == "/":
+            continue
+        if _is_article_url(clean_url) or _candidate_url_has_date(clean_url):
+            continue
+        title_norm = _strip_accents(raw_title.lower())
+        path_norm = _strip_accents(parsed.path.lower())
+        blob = f"{title_norm} {path_norm}"
+        if any(term in blob for term in banned_terms):
+            continue
+        topical_score = _section_label_score(title_norm, path_norm, topic_aliases=topic_aliases)
+        if topical_terms:
+            topical_score += sum(3 for term in topical_terms if term in title_norm)
+            topical_score += sum(2 for term in topical_terms if term in path_norm)
+        if topical_score <= 0:
+            continue
+        area_score = int(source.get("area_score") or 0)
+        score = topical_score + area_score
+        dedupe_key = f"{_slugify_periodicos_label(raw_title)}|{_slugify_periodicos_label(parsed.path)}"
+        path_key = _slugify_periodicos_label(parsed.path)
+        if dedupe_key in seen_keys or path_key in seen_paths:
+            continue
+        seen_keys.add(dedupe_key)
+        seen_paths.add(path_key)
+        label = raw_title[:80]
+        candidates.append((score, area_score, clean_url, label))
+
+    candidates.sort(key=lambda item: (-item[0], -item[1], len(urlparse(item[2]).path)))
+    return [(url, label) for _, _, url, label in candidates[:4]]
+
+
+async def _discover_homepage_section_targets(
+    *,
+    domain: str,
+    fallback_url: str,
+    last_message: str,
+    press_name: str,
+    dynamic_fetch_available: bool = True,
+) -> tuple[list[tuple[str, str]], bool]:
+    from time import perf_counter
+
+    started_at = perf_counter()
+    merged_targets: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for use_dynamic in ((False, True) if dynamic_fetch_available else (False,)):
+        fetch_started_at = perf_counter()
+        homepage = await _fetch_homepage_document(fallback_url, use_dynamic=use_dynamic)
+        issue = _classify_fetch_error(homepage)
+        if issue == "missing_playwright":
+            dynamic_fetch_available = False
+        discovered_targets = _extract_relevant_homepage_sections(
+            homepage,
+            domain=domain,
+            base_url=fallback_url,
+            last_message=last_message,
+        )
+        _web_debug(
+            "country_press.search.homepage_section_discovery",
+            domain=domain,
+            press_name=press_name,
+            fallback_url=fallback_url,
+            use_dynamic=use_dynamic,
+            discovered_count=len(discovered_targets),
+            discovered_targets=discovered_targets,
+            discovered_labels=[label for _, label in discovered_targets],
+            issue=issue,
+            elapsed_ms=round((perf_counter() - fetch_started_at) * 1000, 1),
+        )
+        for section_url, section_label in discovered_targets:
+            normalized_url = section_url.rstrip("/")
+            if normalized_url in seen_urls:
+                continue
+            seen_urls.add(normalized_url)
+            merged_targets.append((section_url, section_label))
+        if discovered_targets:
+            break
+
+    for section_url, section_label in _build_country_press_section_targets(
+        domain,
+        fallback_url,
+        last_message,
+        allow_generic_fallback=False,
+    ):
+        normalized_url = section_url.rstrip("/")
+        if normalized_url in seen_urls:
+            continue
+        seen_urls.add(normalized_url)
+        merged_targets.append((section_url, section_label))
+
+    _web_debug(
+        "country_press.search.section_targets_merged",
+        domain=domain,
+        press_name=press_name,
+        target_count=len(merged_targets),
+        targets=merged_targets[:6],
+        target_labels=[label for _, label in merged_targets[:10]],
+        elapsed_ms=round((perf_counter() - started_at) * 1000, 1),
+    )
+    return merged_targets[:6], dynamic_fetch_available
 
 
 
@@ -835,6 +1321,8 @@ def _extract_generic_content_lines(text: str, query_terms: list[str]) -> list[st
 def _extract_section_content_lines(text: str, last_message: str, section_label: str) -> list[str]:
     if not text:
         return []
+    if _is_redirect_payload(text):
+        return []
     issue = _classify_fetch_error(text)
     if issue or _is_no_info_response(text):
         return []
@@ -850,6 +1338,8 @@ def _extract_section_content_lines(text: str, last_message: str, section_label: 
             continue
         cleaned = re.sub(r"^\s*(?:[-*•]\s+|\d+\.\s+)", "", line).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
+        if _is_prompt_echo_line(cleaned):
+            continue
         if len(cleaned) < 12:
             continue
         if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", cleaned):
@@ -880,7 +1370,7 @@ def _extract_section_content_lines(text: str, last_message: str, section_label: 
     extracted = []
     for match in re.finditer(r'(?:^|\s)(?:[-*•]|\d+\.)\s+([^-\n].{12,220}?)(?=(?:\s(?:[-*•]|\d+\.)\s+)|$)', compact):
         cleaned = match.group(1).strip()
-        if cleaned and not _is_homepage_meta_line(cleaned) and not _is_no_info_response(cleaned):
+        if cleaned and not _is_homepage_meta_line(cleaned) and not _is_no_info_response(cleaned) and not _is_prompt_echo_line(cleaned):
             extracted.append(cleaned)
     return _dedupe_homepage_lines(extracted)
 
@@ -922,6 +1412,8 @@ def _filter_section_lines_for_query(lines: list[str], last_message: str, section
     filtered: list[str] = []
     for line in lines:
         normalized = _strip_accents(line.lower())
+        if _is_redirect_payload(line) or _is_prompt_echo_line(line):
+            continue
         if _is_homepage_meta_line(normalized) or _is_no_info_response(normalized):
             continue
         if any(term in normalized for term in ("islamabad", "iran", "pakistan", "gaza", "ukraine", "ucrania", "russia", "washington", "trump")):
@@ -937,6 +1429,12 @@ def _filter_section_lines_for_query(lines: list[str], last_message: str, section
                 continue
         filtered.append(line)
     return _dedupe_homepage_lines(filtered)
+
+
+def _is_same_site_redirect(original_url: str, redirect_url: str) -> bool:
+    original_host = _safe_hostname(original_url).lower().removeprefix("www.")
+    redirect_host = _safe_hostname(redirect_url).lower().removeprefix("www.")
+    return bool(original_host and redirect_host and original_host == redirect_host)
 
 
 
@@ -960,7 +1458,7 @@ def _extract_sources_from_text(text: str) -> list[dict[str, str]]:
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        domain = urlparse(normalized).hostname or normalized
+        domain = _safe_hostname(normalized) or normalized
         sources.append({"title": title.strip() or normalized, "url": normalized, "domain": domain, "snippet": ""})
 
     if sources:
@@ -969,7 +1467,7 @@ def _extract_sources_from_text(text: str) -> list[dict[str, str]]:
     for url in _extract_urls_from_text(text):
         if url not in seen:
             seen.add(url)
-            domain = urlparse(url).hostname or url
+            domain = _safe_hostname(url) or url
             sources.append({"title": url, "url": url, "domain": domain, "snippet": ""})
     return sources
 
@@ -1076,7 +1574,7 @@ async def _discover_country_press_sources_via_directory(
         url = source.get("url", "").strip()
         if not url or "periodicos.com.ar" in url:
             continue
-        hostname = (urlparse(url).hostname or "").lower()
+        hostname = _safe_hostname(url).lower()
         if hostname.startswith("www."):
             hostname = hostname[4:]
         if not hostname or url in seen_urls:
@@ -1114,16 +1612,28 @@ async def _discover_country_press_sources_via_directory(
 def _extract_country_press_sources(text: str) -> list[dict[str, str]]:
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
+    generic_titles = {"enlace", "link", "source", "fuente"}
     for source in _extract_sources_from_text(text):
-        url = source.get("url", "")
+        url = _normalize_http_url((source.get("url", "") or "").strip())
         if not url:
             continue
         if "periodicos.com.ar" in url:
             continue
+        hostname = _safe_hostname(url).lower().removeprefix("www.")
+        if not hostname:
+            continue
         if url in seen:
             continue
         seen.add(url)
-        sources.append(source)
+        title = (source.get("title", "") or "").strip()
+        if not title or title.lower() in generic_titles:
+            title = hostname
+        sources.append({
+            "title": title,
+            "url": url,
+            "domain": hostname,
+            "snippet": source.get("snippet", "") or "",
+        })
     return sources
 
 
@@ -1263,7 +1773,7 @@ async def _discover_country_press_sources(
     for source in discovered_sources:
         url = source.get("url", "")
         title = (source.get("title") or "").strip()
-        hostname = (urlparse(url).hostname or "").lower()
+        hostname = _safe_hostname(url).lower()
         if hostname.startswith("www."):
             hostname = hostname[4:]
         if hostname and hostname not in seen_domains:
@@ -1524,7 +2034,20 @@ async def _guardrail_fast_result(
         "scrape_tracker": new_tracker,
     }
     if should_evaluate_guard_fn("web_scraping_node"):
-        _is_safe, _ = await evaluate_trajectory_safe_fn(fast_result, "web_scraping_node")
+        _is_safe, guard_meta = await evaluate_trajectory_safe_fn(fast_result, "web_scraping_node")
+        guard_label = str(guard_meta.get("label") or "")
+        verdict_source = str(guard_meta.get("verdict_source") or "")
+        degraded_guard = verdict_source == "error" or guard_label == "error"
+        _emit_guard_audit({
+            "event_type": "node_guard_status",
+            "request_id": rid,
+            "node": "web_scraping_node",
+            "guard_status": "degraded" if degraded_guard else "ok",
+            "success_kind": "success_with_guard_degradation" if degraded_guard else "success_clean",
+            "verdict_source": verdict_source,
+            "guard_label": guard_label or "unknown",
+            "ts_ms": int(time.time() * 1000),
+        })
         if not _is_safe:
             _emit_node_outcome(
                 rid, "web_scraping_node", "blocked", phase="post_guard",
@@ -1589,7 +2112,39 @@ async def run_web_scraping_flow(
         _web_debug("run_web_scraping_flow.notion_sync_shortcut", result_preview=notion_result[:200])
         return {"messages": [AIMessage(content=notion_result)]}
 
-    if _is_moodle_query(last_message):
+    moodle_intent, moodle_course_query = _detect_moodle_intent(last_message)
+    if moodle_intent == "course_list":
+        print(
+            f"[WEB_FLOW] branch=moodle_course_list_shortcut request_id={rid} query={last_message[:160]!r}",
+            flush=True,
+        )
+        from integrations.google_calendar_tools import prepare_moodle_courses_payload
+
+        courses_payload = await asyncio.to_thread(
+            prepare_moodle_courses_payload,
+            "",
+        )
+        courses_result = _render_moodle_courses_chat(cast(Mapping[str, Any], courses_payload))
+        _web_debug("run_web_scraping_flow.moodle_course_list_shortcut", result_preview=courses_result[:200])
+        return {"messages": [AIMessage(content=courses_result)]}
+
+    if moodle_intent == "course_audit":
+        print(
+            f"[WEB_FLOW] branch=moodle_course_audit_shortcut request_id={rid} query={last_message[:160]!r} course_query={moodle_course_query!r}",
+            flush=True,
+        )
+        from integrations.google_calendar_tools import prepare_moodle_course_audit_by_name_payload
+
+        course_payload = await asyncio.to_thread(
+            prepare_moodle_course_audit_by_name_payload,
+            moodle_course_query,
+            "",
+        )
+        course_result = _render_moodle_course_audit_chat(cast(Mapping[str, Any], course_payload))
+        _web_debug("run_web_scraping_flow.moodle_course_audit_shortcut", result_preview=course_result[:200])
+        return {"messages": [AIMessage(content=course_result)]}
+
+    if moodle_intent == "assignments":
         print(
             f"[WEB_FLOW] branch=moodle_review_shortcut request_id={rid} query={last_message[:160]!r}",
             flush=True,
@@ -1625,6 +2180,10 @@ async def run_web_scraping_flow(
         explicit_urls=explicit_urls,
         web_search_runtime_args=web_search_runtime_args,
     )
+    query_source_group = detect_query_source_group(last_message)
+    query_horizon = detect_recent_query_horizon(last_message) if _is_recent_web_information_query(last_message) else None
+    recent_country_news_query = _should_use_country_recent_news_strategy(last_message, query_source_group, query_horizon)
+    recent_country_news_agent_bypass = recent_country_news_query and query_source_group == "japan"
 
     guard_result = input_guard({"messages": [HumanMessage(content=last_message)]})
     if isinstance(guard_result, dict) and guard_result.get("blocked"):
@@ -1847,6 +2406,36 @@ async def run_web_scraping_flow(
                     summary, new_tracker, rid, t0,
                     should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
                 )
+
+        if recent_country_news_agent_bypass:
+            no_local = _build_no_local_sources_response(last_message)
+            summary = cast(str, no_local["summary"])
+            words = cast(list[str], no_local["words"])
+            duration_ms = int((time.time() - t0) * 1000)
+            reliability = _scrape_reliability(len(words))
+            new_tracker, analytics = cast(tuple[dict[str, Any], dict[str, Any]], _update_scrape_tracker(
+                tracker, category, len(words), turn_count,
+                duration_ms=duration_ms, cost_usd=0.0,
+                source_type="search", reliability_override=reliability,
+            ))
+            analytics = cast(dict[str, Any], analytics)
+            new_score = _get_category_score(new_tracker, category, turn_count)
+            _emit_node_outcome(
+                rid, "web_scraping_node", "low_confidence", phase="agent",
+                agent="web_scraping_agent", duration_ms=duration_ms,
+                category=category, exploring=False, strategy="country_recent_news", exp_rate=0.0,
+                scrape_reliability=reliability, prior_reliability=prior_reliability,
+                prior_score=prior_score, scrape_score=new_score,
+                retry_done=False, source_type="search",
+                evidence_status="insufficient_local_recent_evidence",
+                ml_recommended=ml_recommended, prediction_match=prediction_match,
+                followup_likely=True,
+                **_extract_tokens({"messages": []}), **_extract_quality({"messages": []}), **analytics, **_node_meta(),
+            )
+            return await _guardrail_fast_result(
+                summary, new_tracker, rid, t0,
+                should_evaluate_guard_fn, evaluate_trajectory_safe_fn,
+            )
 
         if is_web_information_query(last_message) or _is_recent_web_information_query(last_message):
             discovery = await _run_generic_web_search_fetch(last_message, web_search_runtime_args)

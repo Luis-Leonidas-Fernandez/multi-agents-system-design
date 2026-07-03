@@ -13,6 +13,8 @@ from features.web_scraping.domain.text_utils import (
     _strip_accents,
     _candidate_url_has_date,
     _candidate_url_is_recent,
+    _is_prompt_echo_line,
+    _is_redirect_payload,
 )
 from features.web_scraping.domain.models import (
     EvidenceKind,
@@ -172,6 +174,8 @@ def _candidate_snippet_lines(candidate: dict[str, str]) -> list[str]:
     snippet = (candidate.get("snippet") or "").strip()
     if not snippet:
         return []
+    if _is_redirect_payload(snippet) or _is_prompt_echo_line(snippet):
+        return []
     snippet = re.sub(r"^#+\s+", "", snippet)
     snippet = re.sub(r"\s+#+\s+", " ", snippet).strip()
     if len(snippet.split()) < 4:
@@ -220,12 +224,20 @@ def _query_targets_public_safety(query: str) -> bool:
     signals = (
         "seguridad",
         "security",
+        "inseguridad",
         "sicurezza",
         "policia",
         "police",
         "polizia",
+        "policial",
+        "policiales",
         "crime",
         "crimen",
+        "delito",
+        "delincuencia",
+        "robo",
+        "homicidio",
+        "sucesos",
         "cronaca",
         "public safety",
         "orden publico",

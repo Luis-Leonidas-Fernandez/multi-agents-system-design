@@ -204,6 +204,8 @@ def get_recent_query_min_sources() -> int:
 
 def detect_recent_query_horizon(query: str) -> Optional[str]:
     lowered = (query or "").lower()
+    if any(term in lowered for term in ("today", "hoy", "de hoy")):
+        return "today"
     if any(term in lowered for term in ("this week", "esta semana", "de esta semana", "semana")):
         return "week"
     if any(
@@ -224,8 +226,8 @@ def detect_recent_query_horizon(query: str) -> Optional[str]:
         )
     ):
         return "month"
-    if any(term in lowered for term in ("today", "hoy", "de hoy", "latest", "últimas noticias", "ultimas noticias", "últimas", "ultimas")):
-        return "today"
+    if any(term in lowered for term in ("latest news", "latest", "últimas noticias", "ultimas noticias", "últimas", "ultimas")):
+        return "week"
     return None
 
 

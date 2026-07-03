@@ -28,6 +28,12 @@ def _build_no_local_sources_response(last_message: str) -> dict[str, Any]:
         f"No encontré fuentes locales confiables de {geography} para esta semana. "
         "Prefiero no mezclar resultados globales ruidosos o tangenciales."
     )
+    _flow._web_debug(
+        "postprocess.no_local_sources_response",
+        query=last_message,
+        geography=geography,
+        summary_preview=summary[:200],
+    )
     return {
         "summary": summary,
         "words": summary.split(),

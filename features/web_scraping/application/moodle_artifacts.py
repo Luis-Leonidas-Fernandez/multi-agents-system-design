@@ -54,7 +54,7 @@ class MoodleArtifactSummary:
         }
 
 
-def _session_artifact_dir() -> Path:
+def get_moodle_artifact_dir() -> Path:
     config = get_request_runtime_config()
     session_id = _slug(config.session_id or "local")
     request_id = _slug(config.request_id or "manual")
@@ -62,7 +62,7 @@ def _session_artifact_dir() -> Path:
 
 
 def _artifact_paths() -> MoodleArtifactPaths:
-    base_dir = _session_artifact_dir()
+    base_dir = get_moodle_artifact_dir()
     base_dir.mkdir(parents=True, exist_ok=True)
     return MoodleArtifactPaths(
         json_path=base_dir / "moodle_tasks.json",
@@ -232,6 +232,7 @@ __all__ = [
     "MoodleArtifactSummary",
     "approve_moodle_artifact",
     "delete_moodle_artifact",
+    "get_moodle_artifact_dir",
     "list_session_moodle_artifacts",
     "load_valid_moodle_assignments_from_artifact",
     "load_validated_moodle_artifact",

@@ -116,6 +116,20 @@ def _build_static_web_fetch_draft(
     )
 
 
+async def _build_static_web_fetch_draft_async(
+    url: str,
+    prompt: str,
+    max_chars: int,
+    extract_selector: Optional[str],
+) -> Union[WebFetchDraft, str]:
+    import asyncio as _asyncio
+
+    return await _asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _build_static_web_fetch_draft(url, prompt, max_chars, extract_selector),
+    )
+
+
 async def build_web_fetch_draft(
     url: str,
     prompt: str,
@@ -127,4 +141,4 @@ async def build_web_fetch_draft(
 ) -> Union[WebFetchDraft, str]:
     if use_dynamic:
         return await _build_dynamic_web_fetch_draft(url, prompt, wait_for_selector, extract_selector, max_chars, block_resources)
-    return _build_static_web_fetch_draft(url, prompt, max_chars, extract_selector)
+    return await _build_static_web_fetch_draft_async(url, prompt, max_chars, extract_selector)

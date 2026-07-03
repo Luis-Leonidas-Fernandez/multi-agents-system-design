@@ -31,8 +31,8 @@ from core.helpers.scraping_flow_helpers import (
 
 
 # ==================== CONSTANTES ====================
-_PLAYWRIGHT = None
-_BROWSER = None
+_THREAD_PLAYWRIGHT: dict[int, Any] = {}
+_THREAD_BROWSER: dict[int, Any] = {}
 _PLAYWRIGHT_LOCK: threading.RLock = threading.RLock()
 
 DATA_TRADING_DIR = Path("data") / "web_scraping" / "data_trading"
@@ -99,39 +99,47 @@ def _fetch_html(url: str, timeout_seconds: int = 10) -> bytes:
 # ==================== PLAYWRIGHT ====================
 
 def _get_playwright():
-    global _PLAYWRIGHT
+    thread_id = threading.get_ident()
     with _PLAYWRIGHT_LOCK:
-        if _PLAYWRIGHT is None:
+        playwright = _THREAD_PLAYWRIGHT.get(thread_id)
+        if playwright is None:
             import atexit
             from playwright.sync_api import sync_playwright  # pyright: ignore[reportMissingImports]
-            _PLAYWRIGHT = sync_playwright().start()
+            playwright = sync_playwright().start()
+            _THREAD_PLAYWRIGHT[thread_id] = playwright
             atexit.register(_shutdown_playwright)
-    return _PLAYWRIGHT
+    return playwright
 
 
 def _get_browser():
-    global _BROWSER
+    thread_id = threading.get_ident()
     with _PLAYWRIGHT_LOCK:
-        if _BROWSER is None:
-            _BROWSER = _get_playwright().chromium.launch(headless=True)
-    return _BROWSER
+        browser = _THREAD_BROWSER.get(thread_id)
+        if browser is None:
+            browser = _get_playwright().chromium.launch(headless=True)
+            _THREAD_BROWSER[thread_id] = browser
+    return browser
 
 
 def _shutdown_playwright() -> None:
-    """Cierra browser y playwright al terminar el proceso (registrado via atexit)."""
-    global _BROWSER, _PLAYWRIGHT
-    try:
-        if _BROWSER is not None:
-            _BROWSER.close()
-            _BROWSER = None
-    except Exception:
-        pass
-    try:
-        if _PLAYWRIGHT is not None:
-            _PLAYWRIGHT.stop()
-            _PLAYWRIGHT = None
-    except Exception:
-        pass
+    """Cierra browsers/playwright sync por thread al terminar el proceso."""
+    with _PLAYWRIGHT_LOCK:
+        browsers = list(_THREAD_BROWSER.values())
+        playwrights = list(_THREAD_PLAYWRIGHT.values())
+        _THREAD_BROWSER.clear()
+        _THREAD_PLAYWRIGHT.clear()
+
+    for browser in browsers:
+        try:
+            browser.close()
+        except Exception:
+            pass
+
+    for playwright in playwrights:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
 
 
 def _configure_page(page, block_resources: bool = True) -> None:

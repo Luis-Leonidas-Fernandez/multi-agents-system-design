@@ -5,6 +5,8 @@ from __future__ import annotations
 # Templates de búsqueda por ángulo en español, organizados por tópico.
 TOPIC_ANGLES: dict[str, list[str]] = {
     "security": [
+        "{geo} inseguridad policiales crimen robos seguridad publica {year}",
+        "{geo} policia operativos homicidios seguridad ciudadana {year}",
         "{geo} crimen delincuencia seguridad interna {year}",
         "{geo} defensa militar despliegue fuerzas {year}",
         "{geo} diplomacia tensiones política exterior {year}",
@@ -34,6 +36,8 @@ TOPIC_ANGLES: dict[str, list[str]] = {
 # retornan menos de 4 candidatos.
 TOPIC_ANGLES_EN: dict[str, list[str]] = {
     "security": [
+        "{geo_en} crime police public safety robbery homicide {year}",
+        "{geo_en} police operations internal security incidents {year}",
         "{geo_en} crime internal security {year}",
         "{geo_en} defense military deployment {year}",
         "{geo_en} diplomacy tensions foreign policy {year}",
@@ -64,8 +68,9 @@ def detect_news_topic(query: str) -> str:
     """Clasifica el query en uno de los tópicos: security, economy, politics, default."""
     lowered = query.lower()
     if any(k in lowered for k in [
-        "seguridad", "security", "crimen", "defensa", "militar",
-        "policía", "policia", "terroris", "ataque", "atentado", "conflicto",
+        "seguridad", "security", "inseguridad", "crimen", "delito", "defensa", "militar",
+        "policía", "policia", "policial", "policiales", "sucesos", "robo", "homicid",
+        "terroris", "ataque", "atentado", "conflicto",
     ]):
         return "security"
     if any(k in lowered for k in [

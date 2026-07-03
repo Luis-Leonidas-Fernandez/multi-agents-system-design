@@ -1,13 +1,15 @@
 import { useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent } from 'react'
 import { useEffect } from 'react'
-import type { DashboardArtifact } from '@/shared/types/realtime'
+import type { DashboardArtifact, MoodleAuditTree } from '@/shared/types/realtime'
+import { MoodleAuditTreeCard } from '@/widgets/agent-workflow/ui/MoodleAuditTreeCard'
 
 type Props = {
+  lastUserMessage: string
   reasoning: string
   conclusion: string
   finalResponse: string
   artifacts: DashboardArtifact[]
+  moodleAuditTree: MoodleAuditTree | null
   googleCalendarEnabled: boolean
   onApproveArtifact: (artifactPath: string) => void
   onDeleteArtifact: (artifactPath: string) => void
@@ -20,11 +22,30 @@ function fileNameFromPath(path: string) {
   return path.split('/').filter(Boolean).pop() || path
 }
 
+function sanitizeAuditResponse(text: string) {
+  if (!text.trim()) return text
+  return text
+    .split('\n')
+    .filter((line) => {
+      const normalized = line.trim().toLowerCase()
+      return !(
+        normalized.startsWith('- json audit:') ||
+        normalized.startsWith('- schema:') ||
+        normalized.startsWith('- resumen:')
+      )
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 export function AgentWorkflow({
+  lastUserMessage,
   reasoning,
   conclusion,
   finalResponse,
   artifacts,
+  moodleAuditTree,
   googleCalendarEnabled,
   onApproveArtifact,
   onDeleteArtifact,
@@ -32,17 +53,20 @@ export function AgentWorkflow({
   isThinking,
   status,
 }: Props) {
-  const hasContent = Boolean(reasoning || conclusion || finalResponse || artifacts.length > 0)
+  const hasContent = Boolean(lastUserMessage || reasoning || conclusion || finalResponse || artifacts.length > 0 || moodleAuditTree)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({})
+  const [artifactPreviewMode, setArtifactPreviewMode] = useState<Record<string, 'json' | 'markdown'>>({})
   const [copyStatus, setCopyStatus] = useState('')
   const showThinkingInline = isThinking || status === 'thinking' || status === 'responding'
+  const cleanedFinalResponse = useMemo(() => sanitizeAuditResponse(finalResponse), [finalResponse])
 
   const transcript = useMemo(
     () => [
-      finalResponse ? { id: 'final-response', label: 'Final response', className: 'chat-bubble-final', text: finalResponse } : null,
-    ].filter((item): item is { id: string; label: string; className: string; text: string } => item !== null),
-    [finalResponse],
+      lastUserMessage ? { id: 'last-user-message', label: 'Tu pregunta', className: 'chat-bubble-user', text: lastUserMessage, kind: 'user' as const } : null,
+      cleanedFinalResponse ? { id: 'final-response', label: 'Respuesta', className: 'chat-bubble-final', text: cleanedFinalResponse, kind: 'assistant' as const } : null,
+    ].filter((item): item is { id: string; label: string; className: string; text: string; kind: 'user' | 'assistant' } => item !== null),
+    [cleanedFinalResponse, lastUserMessage],
   )
 
   const toggleExpanded = (id: string) => {
@@ -72,54 +96,13 @@ export function AgentWorkflow({
     }
   }
 
-  const scrollTranscript = (direction: 'up' | 'down' | 'top' | 'bottom') => {
-    const element = scrollRef.current
-    if (!element) return
-    if (direction === 'top') {
-      element.scrollTo({ top: 0, behavior: 'smooth' })
-      return
-    }
-    if (direction === 'bottom') {
-      element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
-      return
-    }
-    element.scrollBy({ top: direction === 'up' ? -180 : 180, behavior: 'smooth' })
-  }
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      scrollTranscript('up')
-    }
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      scrollTranscript('down')
-    }
-    if (event.key === 'PageUp') {
-      event.preventDefault()
-      scrollTranscript('up')
-    }
-    if (event.key === 'PageDown') {
-      event.preventDefault()
-      scrollTranscript('down')
-    }
-    if (event.key === 'Home') {
-      event.preventDefault()
-      scrollTranscript('top')
-    }
-    if (event.key === 'End') {
-      event.preventDefault()
-      scrollTranscript('bottom')
-    }
-  }
-
   useEffect(() => {
     const element = scrollRef.current
     if (!element || !hasContent) return
     window.requestAnimationFrame(() => {
       element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
     })
-  }, [hasContent, reasoning, conclusion, finalResponse, showThinkingInline, artifacts])
+  }, [hasContent, lastUserMessage, reasoning, conclusion, finalResponse, showThinkingInline, artifacts, moodleAuditTree])
 
   useEffect(() => {
     console.log('[ARTIFACT_DEBUG][frontend] AgentWorkflow render', {
@@ -129,17 +112,26 @@ export function AgentWorkflow({
   }, [artifacts])
 
   return (
-    <section className="panel workflow-panel chat-panel">
+    <section className={`panel workflow-panel chat-panel ${hasContent ? 'chat-panel-has-content' : 'chat-panel-is-empty'}`}>
       {status === 'responding' && hasContent ? <div className="workflow-status">Respuesta en camino</div> : null}
       {hasContent ? (
         <>
-          <div className="workflow-scroll" ref={scrollRef} tabIndex={0} onKeyDown={handleKeyDown} aria-label="Transcript">
+          <div className="workflow-scroll" ref={scrollRef} aria-label="Transcript">
             {transcript.map((entry) => {
               const isExpanded = Boolean(expandedIds[entry.id])
               return (
                 <article key={entry.id} className={`chat-bubble ${entry.className} transcript-card`}>
                   <div className="chat-bubble-head">
-                    <span className="chat-meta">{entry.label}</span>
+                    <span className="chat-meta chat-meta-with-icon">
+                      {entry.kind === 'user' ? (
+                        <span className="chat-meta-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" focusable="false">
+                            <path d="M12 4C7.03 4 3 7.42 3 11.64c0 2.16 1.06 4.1 2.77 5.46L5.2 20l3.38-1.67c1.05.38 2.2.59 3.42.59 4.97 0 9-3.42 9-7.64C21 7.42 16.97 4 12 4Z" fill="currentColor" />
+                          </svg>
+                        </span>
+                      ) : null}
+                      {entry.label}
+                    </span>
                     <div className="chat-bubble-actions">
                       <button type="button" className="bubble-action" onClick={() => copyMessage(entry.id, entry.label, entry.text)}>
                         Copy
@@ -150,13 +142,18 @@ export function AgentWorkflow({
                     </div>
                   </div>
                   <p className={isExpanded ? 'chat-bubble-body' : 'chat-bubble-body is-collapsed'}>{entry.text}</p>
+                  {entry.kind === 'user' ? (
+                    <div className="chat-bubble-pending">
+                      <span className="chat-bubble-sent-dot" aria-hidden="true" />
+                      <span>Enviado</span>
+                    </div>
+                  ) : null}
                 </article>
               )
             })}
 
             {artifacts.map((artifact, index) => {
-              const rawPreview = expandedIds[`artifact-preview-${artifact.jsonPath}`]
-              const selectedPreview = rawPreview === 'json' ? 'json' : 'markdown'
+              const selectedPreview = artifactPreviewMode[artifact.jsonPath] ?? 'markdown'
               const previewLabel = selectedPreview === 'json' ? 'JSON' : 'Markdown'
               const previewContent = selectedPreview === 'json' ? artifact.jsonContent : artifact.markdownContent
               return (
@@ -207,7 +204,7 @@ export function AgentWorkflow({
                     <button
                       type="button"
                       className={`artifact-file ${selectedPreview === 'json' ? 'artifact-file-active' : ''}`}
-                      onClick={() => setExpandedIds((current) => ({ ...current, [`artifact-preview-${artifact.jsonPath}`]: 'json' }))}
+                      onClick={() => setArtifactPreviewMode((current) => ({ ...current, [artifact.jsonPath]: 'json' }))}
                     >
                       <span className="artifact-file-icon">{'{ }'}</span>
                       <span className="artifact-file-copy">
@@ -218,7 +215,7 @@ export function AgentWorkflow({
                     <button
                       type="button"
                       className={`artifact-file ${selectedPreview === 'markdown' ? 'artifact-file-active' : ''}`}
-                      onClick={() => setExpandedIds((current) => ({ ...current, [`artifact-preview-${artifact.jsonPath}`]: 'markdown' }))}
+                      onClick={() => setArtifactPreviewMode((current) => ({ ...current, [artifact.jsonPath]: 'markdown' }))}
                     >
                       <span className="artifact-file-icon">MD</span>
                       <span className="artifact-file-copy">
@@ -246,6 +243,8 @@ export function AgentWorkflow({
               )
             })}
 
+            {moodleAuditTree ? <MoodleAuditTreeCard tree={moodleAuditTree} /> : null}
+
             {showThinkingInline ? (
               <article className="chat-bubble chat-bubble-assistant transcript-card workflow-thinking-inline">
                 <div className="chat-bubble-head">
@@ -260,17 +259,7 @@ export function AgentWorkflow({
               </article>
             ) : null}
           </div>
-
-          <div className="workflow-nav-row">
-            <div className="workflow-nav-buttons" aria-label="Transcript navigation">
-              <button type="button" className="bubble-action" onClick={() => scrollTranscript('up')}>↑</button>
-              <button type="button" className="bubble-action" onClick={() => scrollTranscript('down')}>↓</button>
-              <button type="button" className="bubble-action" onClick={() => scrollTranscript('top')}>Home</button>
-              <button type="button" className="bubble-action" onClick={() => scrollTranscript('bottom')}>End</button>
-            </div>
-            <small className="workflow-hints">Scroll · ↑↓ · PgUp/Dn · Home/End · Copy · Expand</small>
-            {copyStatus ? <span className="workflow-copy-status">{copyStatus}</span> : null}
-          </div>
+          {copyStatus ? <span className="workflow-copy-status">{copyStatus}</span> : null}
         </>
       ) : isThinking ? (
         <div className="workflow-empty workflow-thinking" aria-live="polite" aria-label="Pensando">

@@ -200,9 +200,14 @@ COUNTRY_PRESS_SECTION_PATHS: dict[str, dict[str, list[tuple[str, str]]]] = {
 GENERIC_SECTION_PATHS: dict[str, list[tuple[str, str]]] = {
     "security": [
         ("/seguridad/", "seguridad"),
+        ("/inseguridad/", "inseguridad"),
         ("/policiales/", "policiales"),
+        ("/policia/", "policía"),
+        ("/police/", "police"),
+        ("/crime/", "crime"),
         ("/sociedad/", "sociedad"),
         ("/sucesos/", "sucesos"),
+        ("/justicia/", "justicia"),
         ("/espana/", "españa"),
         ("/nacional/", "nacional"),
         ("/cronaca/", "cronaca"),
@@ -241,6 +246,7 @@ def build_country_press_section_targets(
     last_message: str,
     section_paths: Optional[dict[str, dict[str, list[tuple[str, str]]]]] = None,
     generic_paths: Optional[dict[str, list[tuple[str, str]]]] = None,
+    allow_generic_fallback: bool = True,
 ) -> list[tuple[str, str]]:
     """Construye la lista de URLs de secciones a scrapear para un dominio dado.
 
@@ -264,7 +270,7 @@ def build_country_press_section_targets(
 
     domain_map = effective_section.get(domain, {})
     candidates = list(domain_map.get(topic) or domain_map.get("default") or [])
-    if not candidates:
+    if not candidates and allow_generic_fallback:
         candidates = list(effective_generic.get(topic, effective_generic.get("default", [])))
 
     built: list[tuple[str, str]] = []
