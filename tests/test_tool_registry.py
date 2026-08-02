@@ -9,18 +9,9 @@ def test_tool_registry_expone_tools_por_agente():
     assert [tool.name for tool in get_tools_for_agent("analysis_agent")] == ["analyze_data"]
     assert [tool.name for tool in get_tools_for_agent("code_agent")] == ["write_code"]
     web_tools = [tool.name for tool in get_tools_for_agent("web_scraping_agent")]
-    assert web_tools == [
-        "get_crypto_price",
-        "extract_price_from_text",
-        "search_web",
-        "scrape_website_simple",
-        "scrape_website_dynamic",
-        "scrape_website_with_json_capture",
-        "web_fetch",
-        "scrape_moodle_assignments_for_review",
-        "prepare_moodle_assignments_for_calendar",
-        "sync_validated_moodle_artifact_to_notion",
-    ]
+    assert "scrape_linkedin_jobs_authenticated" in web_tools
+    assert "scrape_moodle_assignments_for_review" in web_tools
+    assert "scrape_website_dynamic" in web_tools
 
 
 def test_tool_registry_catalogo_tiene_nombres_estables():

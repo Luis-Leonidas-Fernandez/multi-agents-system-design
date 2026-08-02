@@ -59,6 +59,7 @@ from application.policies.web_search_context import QueryContext, RecentPolicy
 from features.web_scraping.domain.country_profile import GEO_ENGLISH
 from features.web_scraping.domain.country_resolver import GENERIC_WEB_STOPWORDS, GEOGRAPHY_TERMS, extract_query_geography
 from features.web_scraping.domain.topic_detector import TOPIC_ANGLES, TOPIC_ANGLES_EN, detect_news_topic
+from features.web_scraping.application.linkedin_intent import detect_linkedin_jobs_intent
 from features.web_scraping.domain.section_path_resolver import (
     COUNTRY_PRESS_SECTION_PATHS,
     GENERIC_SECTION_PATHS,
@@ -2111,6 +2112,60 @@ async def run_web_scraping_flow(
         )
         _web_debug("run_web_scraping_flow.notion_sync_shortcut", result_preview=notion_result[:200])
         return {"messages": [AIMessage(content=notion_result)]}
+
+    if detect_linkedin_jobs_intent(last_message):
+        print(
+            f"[WEB_FLOW] branch=linkedin_jobs_authenticated request_id={rid} "
+            f"query={last_message[:160]!r}",
+            flush=True,
+        )
+        linkedin_guard = input_guard({"messages": [HumanMessage(content=last_message)]})
+        if isinstance(linkedin_guard, dict) and linkedin_guard.get("blocked"):
+            return linkedin_guard
+
+        from features.web_scraping.application.linkedin_service import run_linkedin_jobs_vertical
+
+        linkedin_result = await asyncio.to_thread(
+            run_linkedin_jobs_vertical,
+            last_message,
+        )
+        summary = str(linkedin_result.user_summary or "").strip()
+        source_type = "linkedin_authenticated"
+
+        linkedin_ctx = _select_strategy_context(
+            state,
+            last_message,
+            get_runtime_policy,
+        )
+        tracker = cast(dict[str, Any], linkedin_ctx["tracker"])
+        duration_ms = int((time.time() - t0) * 1000)
+        _emit_node_outcome(
+            rid,
+            "web_scraping_node",
+            "success" if linkedin_result.status == "ok" else "degraded",
+            phase="agent",
+            agent="web_scraping_agent",
+            duration_ms=duration_ms,
+            category="jobs",
+            exploring=False,
+            strategy="linkedin_jobs_authenticated",
+            source_type=source_type,
+            linkedin_status=linkedin_result.status,
+            result_count=len(linkedin_result.records),
+            warning_count=len(linkedin_result.warnings),
+            followup_likely=linkedin_result.status != "ok",
+            **_extract_tokens({"messages": []}),
+            **_extract_quality({"messages": []}),
+            **_node_meta(),
+        )
+        return await _guardrail_fast_result(
+            summary,
+            tracker,
+            rid,
+            t0,
+            should_evaluate_guard_fn,
+            evaluate_trajectory_safe_fn,
+        )
 
     moodle_intent, moodle_course_query = _detect_moodle_intent(last_message)
     if moodle_intent == "course_list":
