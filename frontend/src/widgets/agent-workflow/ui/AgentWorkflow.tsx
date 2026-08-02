@@ -22,9 +22,18 @@ function fileNameFromPath(path: string) {
   return path.split('/').filter(Boolean).pop() || path
 }
 
+function normalizeMarkdownSpacing(text: string) {
+  return text
+    .replace(/\s+(#{3,6}\s+)/g, '\n\n$1')
+    .replace(/\s+(- \*\*)/g, '\n$1')
+    .replace(/\s+(> )/g, '\n$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 function sanitizeAuditResponse(text: string) {
   if (!text.trim()) return text
-  return text
+  return normalizeMarkdownSpacing(text)
     .split('\n')
     .filter((line) => {
       const normalized = line.trim().toLowerCase()
@@ -37,6 +46,61 @@ function sanitizeAuditResponse(text: string) {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+
+function formatMessageForCopy(text: string) {
+  return normalizeMarkdownSpacing(text)
+    .split('\n')
+    .map((rawLine) => {
+      const line = rawLine.trim()
+      if (!line) return ''
+      return line
+        .replace(/^#{3,6}\s+/, '')
+        .replace(/^>\s?/, '')
+        .replace(/^-\s+/, '• ')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function renderInlineMarkdown(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g)
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={`${part}-${index}`}>{part.slice(2, -2)}</strong>
+    }
+    return part
+  })
+}
+
+function renderFormattedMessage(text: string) {
+  return text.split('\n').map((rawLine, index) => {
+    const line = rawLine.trim()
+    const key = `${index}-${line.slice(0, 24)}`
+    if (!line) return <span key={key} className="formatted-response-spacer" aria-hidden="true" />
+
+    const heading = /^(#{3,6})\s+(.*)$/.exec(line)
+    if (heading) {
+      const level = heading[1].length
+      const className = `formatted-response-heading formatted-response-heading-${level}`
+      return <div key={key} className={className}>{renderInlineMarkdown(heading[2])}</div>
+    }
+
+    const bullet = /^-\s+(.*)$/.exec(line)
+    if (bullet) {
+      return <div key={key} className="formatted-response-line formatted-response-bullet"><span aria-hidden="true">•</span><span>{renderInlineMarkdown(bullet[1])}</span></div>
+    }
+
+    const quote = /^>\s?(.*)$/.exec(line)
+    if (quote) {
+      return <blockquote key={key} className="formatted-response-quote">{renderInlineMarkdown(quote[1])}</blockquote>
+    }
+
+    return <div key={key} className="formatted-response-line">{renderInlineMarkdown(line)}</div>
+  })
 }
 
 export function AgentWorkflow({
@@ -118,7 +182,7 @@ export function AgentWorkflow({
         <>
           <div className="workflow-scroll" ref={scrollRef} aria-label="Transcript">
             {transcript.map((entry) => {
-              const isExpanded = Boolean(expandedIds[entry.id])
+              const isExpanded = entry.kind === 'assistant' ? expandedIds[entry.id] ?? true : Boolean(expandedIds[entry.id])
               return (
                 <article key={entry.id} className={`chat-bubble ${entry.className} transcript-card`}>
                   <div className="chat-bubble-head">
@@ -133,7 +197,7 @@ export function AgentWorkflow({
                       {entry.label}
                     </span>
                     <div className="chat-bubble-actions">
-                      <button type="button" className="bubble-action" onClick={() => copyMessage(entry.id, entry.label, entry.text)}>
+                      <button type="button" className="bubble-action" onClick={() => copyMessage(entry.id, entry.label, entry.kind === 'assistant' ? formatMessageForCopy(entry.text) : entry.text)}>
                         Copy
                       </button>
                       <button type="button" className="bubble-action" onClick={() => toggleExpanded(entry.id)}>
@@ -141,7 +205,7 @@ export function AgentWorkflow({
                       </button>
                     </div>
                   </div>
-                  <p className={isExpanded ? 'chat-bubble-body' : 'chat-bubble-body is-collapsed'}>{entry.text}</p>
+                  <div className={isExpanded ? 'chat-bubble-body formatted-response' : 'chat-bubble-body formatted-response is-collapsed'}>{renderFormattedMessage(entry.text)}</div>
                   {entry.kind === 'user' ? (
                     <div className="chat-bubble-pending">
                       <span className="chat-bubble-sent-dot" aria-hidden="true" />

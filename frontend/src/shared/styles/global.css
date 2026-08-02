@@ -245,7 +245,7 @@ textarea {
 }
 
 .workflow-scroll {
-  padding-right: 0.25rem;
+  padding: 0.15rem 0.45rem 0.25rem;
   min-height: 0;
 }
 
@@ -461,6 +461,72 @@ textarea {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.formatted-response {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.formatted-response-heading {
+  margin-top: 0.45rem;
+  color: #f8fafc;
+  font-weight: 850;
+  letter-spacing: -0.01em;
+}
+
+.formatted-response-heading:first-child {
+  margin-top: 0;
+}
+
+.formatted-response-heading-3 {
+  font-size: 1.1rem;
+}
+
+.formatted-response-heading-4 {
+  font-size: 1rem;
+  color: rgba(226, 232, 240, 0.96);
+}
+
+.formatted-response-heading-5,
+.formatted-response-heading-6 {
+  font-size: 0.88rem;
+  color: rgba(125, 211, 252, 0.95);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.formatted-response-line {
+  min-width: 0;
+}
+
+.formatted-response-bullet {
+  display: grid;
+  grid-template-columns: 0.8rem minmax(0, 1fr);
+  gap: 0.35rem;
+  align-items: start;
+}
+
+.formatted-response-bullet > span:first-child {
+  color: rgba(125, 211, 252, 0.9);
+}
+
+.formatted-response-quote {
+  margin: 0.12rem 0 0.12rem 0.2rem;
+  padding: 0.55rem 0.75rem;
+  border-left: 2px solid rgba(125, 211, 252, 0.38);
+  border-radius: 0 12px 12px 0;
+  background: rgba(125, 211, 252, 0.055);
+  color: rgba(226, 232, 240, 0.9);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.formatted-response-spacer {
+  display: block;
+  height: 0.45rem;
 }
 
 .chat-bubble-body.is-collapsed {
@@ -497,8 +563,8 @@ textarea {
 }
 
 .chat-bubble-final {
-  width: fit-content;
-  max-width: min(82%, 760px);
+  width: min(100%, 1040px);
+  max-width: 100%;
   margin-right: auto;
   border-left: 0;
   border-right: 3px solid rgba(118, 141, 196, 0.34);
@@ -508,6 +574,7 @@ textarea {
   box-shadow:
     0 12px 28px rgba(3, 8, 18, 0.28),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 1.35rem 1.45rem;
 }
 
 .chat-meta {
@@ -580,6 +647,7 @@ textarea {
   box-shadow:
     0 12px 28px rgba(3, 8, 18, 0.28),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 1.2rem 1.3rem;
 }
 
 .composer {
