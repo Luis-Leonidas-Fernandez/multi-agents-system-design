@@ -15,19 +15,14 @@ from features.web_scraping.domain.linkedin_models import LinkedInJobsRequest, Li
 from features.web_scraping.infrastructure.authenticated_browser import (
     BrowserProfileInUseError,
 )
+from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+    scrape_linkedin_jobs,
+)
 from features.web_scraping.infrastructure.linkedin_scraper import (
     LinkedInAuthRequiredError,
     LinkedInBlockedError,
     configured_linkedin_max_results,
-    scrape_linkedin_jobs,
 )
-
-
-def _truncate_words(value: str, limit: int = 200) -> str:
-    words = (value or "").split()
-    if len(words) <= limit:
-        return (value or "").strip()
-    return " ".join(words[:limit]).strip()
 
 
 def _split_location_fallback(value: str) -> tuple[str, ...]:
@@ -37,13 +32,6 @@ def _split_location_fallback(value: str) -> tuple[str, ...]:
         if item.strip()
     ]
     return tuple(dict.fromkeys(locations))
-
-
-def _compact_value(value: str, *, max_words: int) -> str:
-    words = (value or "no informado").split()
-    if len(words) <= max_words:
-        return " ".join(words)
-    return " ".join(words[:max_words]) + "…"
 
 
 def _record_country_group(record) -> str:
@@ -100,24 +88,6 @@ def _status_label(value: str, *, kind: str) -> str:
         "no_sponsorship": "sin sponsorship",
     }
     return labels.get(value, value or f"{kind} no informado")
-
-
-def _word_count(parts: list[str]) -> int:
-    return len(" ".join(parts).split())
-
-
-def _omitted_line(count: int) -> str:
-    return f"{count} vacantes adicionales con metadata completa en el audit."
-
-
-def _compact_record_line(record) -> str:
-    return (
-        f"- {_compact_value(record.title, max_words=7)} | "
-        f"Empresa: {_compact_value(record.company_name, max_words=3)} | "
-        f"Ubicación: {_compact_value(record.location, max_words=3)} | "
-        f"Fecha: {_compact_value(record.posted_at_text, max_words=3)} | "
-        f"{record.canonical_url}"
-    )
 
 
 def _markdown_blockquote(value: str) -> str:

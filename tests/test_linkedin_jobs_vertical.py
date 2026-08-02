@@ -1901,6 +1901,7 @@ def test_linkedin_query_builder_consolidates_topics_per_location():
         "Machine Learning Engineer",
         "ML Engineer",
         "Data Scientist",
+        "Data Analyst",
         "Deep Learning Engineer",
         "DL Engineer",
         "MLOps Engineer",
@@ -1915,6 +1916,7 @@ def test_linkedin_query_builder_consolidates_topics_per_location():
         "AI Product",
         "Applied AI Engineer",
         "AI Specialist",
+        "AI Mentor",
         "AI Architect",
         "AI Solutions Architect",
         "Solution Architect AI",
@@ -1925,6 +1927,83 @@ def test_linkedin_query_builder_consolidates_topics_per_location():
         "RAG & LLM System",
     ):
         assert topic in keywords
+
+
+
+def test_linkedin_semantic_dedupe_collapses_same_post_with_different_ids():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _dedupe_linkedin_vacancies_semantically,
+    )
+
+    body = "\n".join(
+        [
+            "Acerca del empleo",
+            "Position: AI Mentor",
+            "We are looking for passionate AI Mentors to guide high school students as they explore artificial intelligence and build independent AI projects.",
+            "Key Responsibilities",
+            "Mentor and support students in learning AI and Python programming",
+            "Guide students in developing independent AI projects",
+            "Requirements",
+            "Knowledge of AI concepts including Machine Learning, NLP, Computer Vision, or LLMs",
+            "Strong Python programming fundamentals",
+            "Experience with scikit-learn, TensorFlow, or other ML tools",
+            "Native or fluent Japanese language skills are required.",
+        ]
+    )
+    generic = LinkedInVacancyRecord(
+        linkedin_job_id="4390928986",
+        title="AI Mentor",
+        company_name="Crimson Education",
+        location="Japón",
+        canonical_url="https://www.linkedin.com/jobs/view/4390928986",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI+Mentor&location=Japan",
+        description_full_text=body,
+        published_at=datetime(2026, 8, 2, 12, 50, tzinfo=timezone.utc),
+    )
+    specific = LinkedInVacancyRecord(
+        linkedin_job_id="4390929954",
+        title="AI Mentor",
+        company_name="Crimson Education",
+        location="Tokio, Tokio, Japón",
+        canonical_url="https://www.linkedin.com/jobs/view/4390929954",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI+Mentor&location=Japan",
+        description_full_text=body,
+        published_at=datetime(2026, 8, 2, 14, 24, tzinfo=timezone.utc),
+    )
+
+    deduped, warnings = _dedupe_linkedin_vacancies_semantically([generic, specific])
+
+    assert [record.linkedin_job_id for record in deduped] == ["4390929954"]
+    assert warnings == ["semantic_duplicate_dropped:4390928986:kept:4390929954"]
+
+
+def test_linkedin_relevance_accepts_seniority_prefixes_for_data_analyst():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        parse_linkedin_jobs_html,
+    )
+
+    html = """
+    <div class="job-card-container">
+      <a class="job-card-list__title--link" href="https://www.linkedin.com/jobs/view/123">
+        <span class="job-card-list__title">Senior Data Analyst</span>
+      </a>
+      <span class="job-card-container__primary-description">Example Corp</span>
+      <span class="job-card-container__metadata-item">Tokyo, Japan</span>
+      <time datetime="2026-08-02T10:00:00Z">1 hour ago</time>
+    </div>
+    """
+
+    records = parse_linkedin_jobs_html(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=Data+Analyst",
+    )
+
+    assert records
+    assert records[0].title == "Senior Data Analyst"
+    assert "data analyst" in records[0].matched_terms
 
 
 def test_linkedin_query_builder_resolves_canonical_geo_ids_and_aliases():
@@ -2938,6 +3017,7 @@ def test_linkedin_discovery_enriches_by_source_before_final_round_robin(
                 ),
                 "workplace_type": "hybrid",
                 "hard_skills": ["Python"],
+                "description_full_text": "Build AI systems with Python for Tokyo products.",
             }
         )
 
@@ -3080,6 +3160,7 @@ def test_linkedin_stale_detail_panel_retries_same_candidate_once(monkeypatch):
                 "location": "Seoul, South Korea",
                 "workplace_type": "hybrid",
                 "hard_skills": ["Python"],
+                "description_full_text": "Build AI systems with Python in Korea.",
             }
         )
 
@@ -3132,7 +3213,7 @@ def test_linkedin_stale_detail_panel_retries_same_candidate_once(monkeypatch):
     assert any(warning == "detail_panel_stale_retry:101" for warning in warnings)
 
 
-def test_linkedin_panel_failure_isolated_and_known_date_record_is_retained(
+def test_linkedin_panel_failure_isolated_and_bodyless_record_is_rejected(
     monkeypatch,
 ):
     from features.web_scraping.domain.linkedin_models import (
@@ -3224,6 +3305,7 @@ def test_linkedin_panel_failure_isolated_and_known_date_record_is_retained(
                 "location": "Tokyo, Japan",
                 "workplace_type": "remote",
                 "hard_skills": ["Python"],
+                "description_full_text": "Build AI systems with Python for Tokyo products.",
             }
         )
 
@@ -3266,10 +3348,10 @@ def test_linkedin_panel_failure_isolated_and_known_date_record_is_retained(
             session_store=FakeStore(),  # type: ignore[arg-type]
         )
 
-    assert [record.linkedin_job_id for record in records] == ["101", "201"]
-    assert records[0].company_name == ""
-    assert records[1].company_name == "Tokyo AI"
-    assert rejected == []
+    assert [record.linkedin_job_id for record in records] == ["201"]
+    assert records[0].company_name == "Tokyo AI"
+    assert records[0].description_full_text
+    assert [item.reason for item in rejected] == ["detail_network_failure"]
     assert (
         "metadata_enrichment_incomplete:101:detail_network_failure"
         in warnings
