@@ -3082,3 +3082,165 @@ textarea {
     display: none;
   }
 }
+
+.linkedin-jobs-response {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.linkedin-jobs-summary {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  border-radius: 999px;
+  background: rgba(125, 211, 252, 0.07);
+  color: rgba(226, 232, 240, 0.94);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.linkedin-jobs-grid {
+  display: grid;
+  gap: 0.95rem;
+  min-width: 0;
+}
+
+.linkedin-job-card {
+  display: grid;
+  gap: 0.9rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid rgba(118, 141, 196, 0.24);
+  border-radius: 1.1rem;
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 34%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.76), rgba(8, 13, 24, 0.82));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.linkedin-job-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: start;
+  min-width: 0;
+}
+
+.linkedin-job-card h3 {
+  margin: 0.18rem 0 0;
+  color: #f8fafc;
+  font-size: 1rem;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.linkedin-job-country,
+.linkedin-job-index {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.18rem 0.48rem;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  border-radius: 999px;
+  background: rgba(125, 211, 252, 0.08);
+  color: rgba(125, 211, 252, 0.95);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.linkedin-job-index {
+  flex: 0 0 auto;
+  border-color: rgba(52, 211, 153, 0.22);
+  background: rgba(52, 211, 153, 0.08);
+  color: rgba(134, 239, 172, 0.95);
+}
+
+.linkedin-job-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0;
+}
+
+.linkedin-job-metadata-item {
+  min-width: 0;
+  padding: 0.58rem 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.13);
+  border-radius: 0.8rem;
+  background: rgba(15, 23, 42, 0.44);
+}
+
+.linkedin-job-metadata dt {
+  margin: 0 0 0.18rem;
+  color: rgba(148, 163, 184, 0.92);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.linkedin-job-metadata dd {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.94);
+  font-size: 0.84rem;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+
+.linkedin-job-body-section {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.linkedin-job-body-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: rgba(125, 211, 252, 0.95);
+  font-size: 0.78rem;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.linkedin-job-body-content {
+  display: grid;
+  gap: 0.55rem;
+  max-height: 32rem;
+  overflow: auto;
+  padding: 0.75rem;
+  border: 1px solid rgba(125, 211, 252, 0.16);
+  border-radius: 0.9rem;
+  background: rgba(2, 6, 23, 0.32);
+  color: rgba(226, 232, 240, 0.9);
+}
+
+.linkedin-job-body-content.is-collapsed {
+  max-height: 8.75rem;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 62%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 62%, transparent 100%);
+}
+
+.linkedin-job-body-content p {
+  margin: 0;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .linkedin-job-metadata {
+    grid-template-columns: 1fr;
+  }
+
+  .linkedin-job-card-head,
+  .linkedin-job-body-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

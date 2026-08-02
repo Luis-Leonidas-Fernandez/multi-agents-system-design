@@ -3,6 +3,108 @@ import { useEffect } from 'react'
 import type { DashboardArtifact, MoodleAuditTree } from '@/shared/types/realtime'
 import { MoodleAuditTreeCard } from '@/widgets/agent-workflow/ui/MoodleAuditTreeCard'
 
+
+type LinkedInVacancyCardData = {
+  id: string
+  country: string
+  title: string
+  metadataLines: string[]
+  bodyLines: string[]
+}
+
+type LinkedInVacancyResponse = {
+  summary: string
+  jobs: LinkedInVacancyCardData[]
+}
+
+function parseLinkedInVacancyResponse(text: string): LinkedInVacancyResponse | null {
+  if (!text.includes('##### Body completo') || !text.includes('#### 📌')) return null
+
+  const lines = normalizeMarkdownSpacing(text).split('\n')
+  const jobs: LinkedInVacancyCardData[] = []
+  const summaryLines: string[] = []
+  let currentCountry = ''
+  let currentJob: LinkedInVacancyCardData | null = null
+  let section: 'summary' | 'metadata' | 'body' = 'summary'
+
+  const commitJob = () => {
+    if (!currentJob) return
+    jobs.push({
+      ...currentJob,
+      metadataLines: currentJob.metadataLines.filter(Boolean),
+      bodyLines: currentJob.bodyLines.filter(Boolean),
+    })
+    currentJob = null
+  }
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim()
+    const countryMatch = /^###\s+(.+)$/.exec(line)
+    const jobMatch = /^####\s+📌\s+(.+)$/.exec(line)
+
+    if (jobMatch) {
+      commitJob()
+      section = 'metadata'
+      currentJob = {
+        id: `linkedin-job-${jobs.length}`,
+        country: currentCountry,
+        title: jobMatch[1].trim(),
+        metadataLines: [],
+        bodyLines: [],
+      }
+      return
+    }
+
+    if (countryMatch && !jobMatch) {
+      const heading = countryMatch[1].trim()
+      if (heading.includes('🇯🇵') || heading.includes('Japón') || heading.includes('🇰🇷') || heading.includes('Corea') || heading.includes('🌏')) {
+        commitJob()
+        currentCountry = heading
+        section = 'summary'
+        return
+      }
+    }
+
+    if (line === '##### Metadata') {
+      section = 'metadata'
+      return
+    }
+
+    if (line === '##### Body completo') {
+      section = 'body'
+      return
+    }
+
+    if (!currentJob) {
+      if (line) summaryLines.push(line)
+      return
+    }
+
+    if (section === 'body') {
+      currentJob.bodyLines.push(line.replace(/^>\s?/, ''))
+      return
+    }
+
+    if (section === 'metadata') {
+      currentJob.metadataLines.push(line)
+    }
+  })
+
+  commitJob()
+  if (!jobs.length) return null
+
+  return {
+    summary: summaryLines.join('\n').replace(/^#{3,6}\s+/, '').trim(),
+    jobs,
+  }
+}
+
+function parseMetadataLine(line: string) {
+  const match = /^-\s+\*\*([^*]+):\*\*\s*(.*)$/.exec(line.trim())
+  if (!match) return null
+  return { label: match[1].trim(), value: match[2].trim() }
+}
+
 type Props = {
   lastUserMessage: string
   reasoning: string
@@ -122,6 +224,7 @@ export function AgentWorkflow({
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({})
   const [artifactPreviewMode, setArtifactPreviewMode] = useState<Record<string, 'json' | 'markdown'>>({})
   const [copyStatus, setCopyStatus] = useState('')
+  const [expandedLinkedInBodies, setExpandedLinkedInBodies] = useState<Record<string, boolean>>({})
   const showThinkingInline = isThinking || status === 'thinking' || status === 'responding'
   const cleanedFinalResponse = useMemo(() => sanitizeAuditResponse(finalResponse), [finalResponse])
 
@@ -135,6 +238,10 @@ export function AgentWorkflow({
 
   const toggleExpanded = (id: string) => {
     setExpandedIds((current) => ({ ...current, [id]: !current[id] }))
+  }
+
+  const toggleLinkedInBody = (id: string) => {
+    setExpandedLinkedInBodies((current) => ({ ...current, [id]: !current[id] }))
   }
 
   const copyMessage = async (id: string, label: string, text: string) => {
@@ -183,6 +290,7 @@ export function AgentWorkflow({
           <div className="workflow-scroll" ref={scrollRef} aria-label="Transcript">
             {transcript.map((entry) => {
               const isExpanded = entry.kind === 'assistant' ? expandedIds[entry.id] ?? true : Boolean(expandedIds[entry.id])
+              const linkedinResponse = entry.kind === 'assistant' ? parseLinkedInVacancyResponse(entry.text) : null
               return (
                 <article key={entry.id} className={`chat-bubble ${entry.className} transcript-card`}>
                   <div className="chat-bubble-head">
@@ -205,7 +313,55 @@ export function AgentWorkflow({
                       </button>
                     </div>
                   </div>
-                  <div className={isExpanded ? 'chat-bubble-body formatted-response' : 'chat-bubble-body formatted-response is-collapsed'}>{renderFormattedMessage(entry.text)}</div>
+                  <div className={isExpanded ? 'chat-bubble-body formatted-response' : 'chat-bubble-body formatted-response is-collapsed'}>
+                    {linkedinResponse ? (
+                      <div className="linkedin-jobs-response">
+                        {linkedinResponse.summary ? <div className="linkedin-jobs-summary">{renderInlineMarkdown(linkedinResponse.summary)}</div> : null}
+                        <div className="linkedin-jobs-grid">
+                          {linkedinResponse.jobs.map((job, jobIndex) => {
+                            const isBodyExpanded = Boolean(expandedLinkedInBodies[job.id])
+                            const metadata = job.metadataLines.map(parseMetadataLine).filter((item): item is { label: string; value: string } => Boolean(item))
+                            return (
+                              <article key={job.id} className="linkedin-job-card">
+                                <div className="linkedin-job-card-head">
+                                  <div>
+                                    {job.country ? <span className="linkedin-job-country">{job.country}</span> : null}
+                                    <h3>{job.title}</h3>
+                                  </div>
+                                  <span className="linkedin-job-index">#{jobIndex + 1}</span>
+                                </div>
+                                {metadata.length ? (
+                                  <dl className="linkedin-job-metadata">
+                                    {metadata.map((item) => (
+                                      <div key={`${job.id}-${item.label}`} className="linkedin-job-metadata-item">
+                                        <dt>{item.label}</dt>
+                                        <dd>{renderInlineMarkdown(item.value || 'no informado')}</dd>
+                                      </div>
+                                    ))}
+                                  </dl>
+                                ) : null}
+                                {job.bodyLines.length ? (
+                                  <section className="linkedin-job-body-section">
+                                    <div className="linkedin-job-body-head">
+                                      <span>Body completo</span>
+                                      <button type="button" className="bubble-action" onClick={() => toggleLinkedInBody(job.id)}>
+                                        {isBodyExpanded ? 'Ocultar body' : 'Ver body completo'}
+                                      </button>
+                                    </div>
+                                    <div className={isBodyExpanded ? 'linkedin-job-body-content' : 'linkedin-job-body-content is-collapsed'}>
+                                      {job.bodyLines.map((bodyLine, bodyIndex) => (
+                                        bodyLine ? <p key={`${job.id}-body-${bodyIndex}`}>{renderInlineMarkdown(bodyLine)}</p> : <span key={`${job.id}-body-${bodyIndex}`} className="formatted-response-spacer" aria-hidden="true" />
+                                      ))}
+                                    </div>
+                                  </section>
+                                ) : null}
+                              </article>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ) : renderFormattedMessage(entry.text)}
+                  </div>
                   {entry.kind === 'user' ? (
                     <div className="chat-bubble-pending">
                       <span className="chat-bubble-sent-dot" aria-hidden="true" />
