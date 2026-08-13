@@ -18,6 +18,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_CMD = ["npm", "--prefix", "frontend", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"]
 BACKEND_CMD = [sys.executable, "main.py", "--frontend-bridge"]
+LINKEDIN_BOOTSTRAP_CMD = [
+    sys.executable,
+    "scripts/bootstrap_linkedin_session.py",
+    "--browser",
+    "brave",
+    "--executable-path",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "--observe-ready",
+    "--ready-timeout-seconds",
+    "300",
+]
 POLL_SECONDS = 0.75
 IGNORE_PARTS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist"}
 WATCH_ROOTS = [ROOT / "main.py", ROOT / "application", ROOT / "core", ROOT / "features", ROOT / "agents", ROOT / "config", ROOT / "integrations", ROOT / "tests"]
@@ -50,6 +61,9 @@ def _watch_snapshot() -> dict[Path, int]:
 def _start_process(command: list[str], name: str) -> subprocess.Popen:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    if name == "backend":
+        env["LINKEDIN_AUTO_BOOTSTRAP_ON_AUTH_FAILURE"] = "1"
+        env["LINKEDIN_DIRECT_DETAIL_FALLBACK"] = "1"
     print(f"[dev] starting {name}: {' '.join(command)}")
     return subprocess.Popen(command, cwd=ROOT, env=env)
 
@@ -90,6 +104,32 @@ def _restart_backend(process: subprocess.Popen) -> subprocess.Popen:
     return _start_process(BACKEND_CMD, "backend")
 
 
+def _refresh_linkedin_session_after_backend_failure(returncode: int | None) -> None:
+    if returncode == 0:
+        return
+
+    print(
+        "[dev] backend falló; refrescando sesión LinkedIn antes de reiniciar...",
+        flush=True,
+    )
+    print(f"[dev] running: {' '.join(LINKEDIN_BOOTSTRAP_CMD)}", flush=True)
+    try:
+        subprocess.run(LINKEDIN_BOOTSTRAP_CMD, cwd=ROOT, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"[dev] bootstrap LinkedIn terminó con código {exc.returncode}; "
+            "reinicio backend igual para no bloquear el loop de desarrollo.",
+            flush=True,
+        )
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        print(
+            f"[dev] no se pudo refrescar la sesión LinkedIn: {exc}",
+            flush=True,
+        )
+
+
 def main() -> int:
     stopping = False
 
@@ -122,6 +162,7 @@ def main() -> int:
 
             if backend.poll() is not None:
                 print(f"[dev] backend terminó con código {backend.returncode}; reiniciando...")
+                _refresh_linkedin_session_after_backend_failure(backend.returncode)
                 backend = _start_process(BACKEND_CMD, "backend")
                 snapshot = _watch_snapshot()
                 continue

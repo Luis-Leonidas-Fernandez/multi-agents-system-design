@@ -396,6 +396,33 @@ def _shutdown_reusable_authenticated_sessions() -> None:
             pass
 
 
+def close_reusable_authenticated_contexts(
+    *,
+    profile_path: str | Path,
+) -> int:
+    """Cierra contextos cacheados de un perfil antes de cederlo a otro proceso."""
+
+    resolved_profile = str(Path(profile_path).resolve())
+    with _REUSABLE_SESSION_LOCK:
+        matching_keys = [
+            key
+            for key in _REUSABLE_SESSIONS
+            if key[1] == resolved_profile
+        ]
+        sessions = [
+            _REUSABLE_SESSIONS.pop(key)
+            for key in matching_keys
+        ]
+    for session in sessions:
+        try:
+            session.close()
+        except Exception:
+            # AuthenticatedBrowserSession.close() libera el lock en finally. El
+            # observador externo hará la validación autoritativa al abrir.
+            pass
+    return len(sessions)
+
+
 def open_persistent_authenticated_context(
     *,
     profile_path: str | Path,
@@ -465,6 +492,7 @@ __all__ = [
     "AuthenticatedBrowserSession",
     "BrowserProfileInUseError",
     "BrowserProfileLock",
+    "close_reusable_authenticated_contexts",
     "configured_linkedin_headless",
     "open_persistent_authenticated_context",
 ]
