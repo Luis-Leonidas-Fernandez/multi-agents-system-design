@@ -42,6 +42,15 @@ def _build_job_uid(session_id: str, request_id: str) -> str:
     )
 
 
+def new_linkedin_job_uid() -> str:
+    """Allocate the stable UID shared by public audit and private diagnostics."""
+    runtime = get_request_runtime_config()
+    return _build_job_uid(
+        str(runtime.session_id or "local"),
+        str(runtime.request_id or "manual"),
+    )
+
+
 def _warning_types(warnings: list[str]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for warning in warnings:
@@ -113,6 +122,17 @@ def _render_summary(snapshot: LinkedInAuditSnapshot) -> str:
                 f"queued=**{timing.retained_count}**",
                 f"  - Discovery: mode=`{diagnostics.discovery_mode}`, "
                 f"degraded=**{diagnostics.discovery_degraded}**",
+                f"  - Row activation: attempts=**{diagnostics.row_activation_count}**, "
+                f"success=**{diagnostics.row_activation_success_count}**, "
+                f"no_change=**{diagnostics.row_activation_no_change_count}**, "
+                f"no_job_id=**{diagnostics.row_activation_no_job_id_count}**, "
+                f"duplicate=**{diagnostics.row_activation_duplicate_count}**, "
+                f"scrolls=**{diagnostics.row_activation_scroll_count}**, "
+                f"resolved=**{diagnostics.row_job_ids_resolved}**, "
+                f"stop=`{diagnostics.row_activation_stop_reason}`",
+                f"  - Row panel: score=**{diagnostics.selected_row_container_score}**, "
+                f"candidates=**{diagnostics.row_candidate_count}**, "
+                f"interactive=**{diagnostics.row_interactive_count}**",
                 f"  - Parseable: **{diagnostics.parseable_candidate_count}**",
                 f"  - Discard reasons: `{diagnostics.discard_reasons}`",
             ]
@@ -139,6 +159,7 @@ def _render_summary(snapshot: LinkedInAuditSnapshot) -> str:
                 f"→{diagnostic.scroll_top_after}, "
                 f"scroll_size={diagnostic.client_height}"
                 f"/{diagnostic.scroll_height}, "
+                f"row_panel_score={diagnostic.selected_row_container_score}, "
                 f"anchors={diagnostic.all_anchor_count}, "
                 f"jobs_view={diagnostic.jobs_view_href_count}, "
                 f"urn={diagnostic.job_urn_count}, "
@@ -146,6 +167,15 @@ def _render_summary(snapshot: LinkedInAuditSnapshot) -> str:
                 f"data_occludable={diagnostic.data_occludable_job_id_count}, "
                 f"scrollables={diagnostic.scrollable_container_count}, "
                 f"frames={diagnostic.frame_count}, "
+                f"row_activation={diagnostic.row_activation_count}/"
+                f"{diagnostic.row_activation_success_count}, "
+                f"row_no_change={diagnostic.row_activation_no_change_count}, "
+                f"row_no_job_id={diagnostic.row_activation_no_job_id_count}, "
+                f"row_duplicate={diagnostic.row_activation_duplicate_count}, "
+                f"row_candidates={diagnostic.row_candidate_count}, "
+                f"row_interactive={diagnostic.row_interactive_count}, "
+                f"row_resolved={diagnostic.row_job_ids_resolved}, "
+                f"row_stop={diagnostic.row_activation_stop_reason}, "
                 f"empty={diagnostic.empty_state_visible}, "
                 f"auth_checkpoint={diagnostic.auth_checkpoint_visible})"
             )
@@ -247,11 +277,12 @@ def persist_linkedin_audit_snapshot(
     ) = None,
     static_probe_diagnostics: list[LinkedInStaticProbeDiagnostic] | None = None,
     visual_diagnostics: list[LinkedInVisualDiagnosticArtifact] | None = None,
+    job_uid: str | None = None,
 ) -> LinkedInAuditPaths:
     runtime = get_request_runtime_config()
     session_id = str(runtime.session_id or "local")
     request_id = str(runtime.request_id or "manual")
-    job_uid = _build_job_uid(session_id, request_id)
+    job_uid = job_uid or _build_job_uid(session_id, request_id)
     paths = _audit_paths(job_uid, session_id, request_id)
     snapshot = LinkedInAuditSnapshot(
         meta=LinkedInAuditMeta(
@@ -295,6 +326,7 @@ def load_linkedin_audit_snapshot(path: str | Path) -> LinkedInAuditSnapshot:
 __all__ = [
     "LinkedInAuditPaths",
     "current_linkedin_audit_dir",
+    "new_linkedin_job_uid",
     "load_linkedin_audit_snapshot",
     "persist_linkedin_audit_snapshot",
 ]

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from features.web_scraping.application.linkedin_audit import (
     current_linkedin_audit_dir,
+    new_linkedin_job_uid,
     persist_linkedin_audit_snapshot,
 )
 from features.web_scraping.application.linkedin_intent import (
@@ -483,12 +484,16 @@ class _LinkedInScrapeExecutionError(Exception):
         self.visual_diagnostics = list(visual_diagnostics)
 
 
-def _execute_linkedin_scrape(request: LinkedInJobsRequest):
+def _execute_linkedin_scrape(request: LinkedInJobsRequest, *, job_uid: str = "local"):
     with (
         detail_diagnostics_context() as detail_diagnostics,
         search_hydration_diagnostics_context() as search_hydration_diagnostics,
         static_probe_diagnostics_context() as static_probe_diagnostics,
-        visual_diagnostics_context(current_linkedin_audit_dir()) as visual_diagnostics,
+        visual_diagnostics_context(
+            current_linkedin_audit_dir(),
+            job_uid=job_uid,
+            diagnostics_root=ROOT / "data" / "private" / "linkedin" / "diagnostics",
+        ) as visual_diagnostics,
     ):
         try:
             records, rejected, timings, warnings, queries = scrape_linkedin_jobs(request)
@@ -563,6 +568,7 @@ def run_linkedin_jobs_vertical(
     search_hydration_diagnostics = []
     static_probe_diagnostics = []
     visual_diagnostics = []
+    job_uid = new_linkedin_job_uid()
     try:
         prompt_locations = extract_linkedin_locations(original_query)
         fallback_locations = _split_location_fallback(
@@ -595,7 +601,7 @@ def run_linkedin_jobs_vertical(
                 search_hydration_diagnostics,
                 static_probe_diagnostics,
                 visual_diagnostics,
-            ) = _execute_linkedin_scrape(request)
+            ) = _execute_linkedin_scrape(request, job_uid=job_uid)
         except _LinkedInScrapeExecutionError as exc:
             status = _apply_linkedin_execution_error(
                 exc,
@@ -634,7 +640,7 @@ def run_linkedin_jobs_vertical(
                     retry_search_hydration_diagnostics,
                     retry_static_probe_diagnostics,
                     retry_visual_diagnostics,
-                ) = _execute_linkedin_scrape(request)
+                ) = _execute_linkedin_scrape(request, job_uid=job_uid)
                 detail_diagnostics.extend(retry_detail_diagnostics)
                 search_hydration_diagnostics.extend(
                     retry_search_hydration_diagnostics
@@ -678,6 +684,7 @@ def run_linkedin_jobs_vertical(
         search_hydration_diagnostics=search_hydration_diagnostics,
         static_probe_diagnostics=static_probe_diagnostics,
         visual_diagnostics=visual_diagnostics,
+        job_uid=job_uid,
     )
     result = LinkedInJobsResult(
         status=status,
