@@ -410,6 +410,34 @@ def test_linkedin_reusable_context_survives_job_page_cleanup(tmp_path):
     session.close()
 
 
+def test_linkedin_reusable_context_can_be_released_for_manual_refresh(tmp_path):
+    from features.web_scraping.infrastructure.authenticated_browser import (
+        AuthenticatedBrowserLaunchConfig,
+        close_reusable_authenticated_contexts,
+        open_persistent_authenticated_context,
+    )
+
+    profile_path = tmp_path / "private" / "browser-profile"
+    profile_path.mkdir(parents=True)
+    page = MagicMock(url="about:blank")
+    context = MagicMock()
+    context.pages = [page]
+    chromium = MagicMock()
+    chromium.launch_persistent_context.return_value = context
+    playwright = SimpleNamespace(chromium=chromium)
+
+    open_persistent_authenticated_context(
+        playwright=playwright,
+        profile_path=profile_path,
+        launch_config=AuthenticatedBrowserLaunchConfig(browser="chromium"),
+        reuse=True,
+    )
+
+    assert close_reusable_authenticated_contexts(profile_path=profile_path) == 1
+    assert close_reusable_authenticated_contexts(profile_path=profile_path) == 0
+    context.close.assert_called_once()
+
+
 def test_linkedin_persistent_session_keeps_previous_page_if_replacement_unusable():
     from features.web_scraping.infrastructure.authenticated_browser import (
         AuthenticatedBrowserSession,
@@ -597,6 +625,182 @@ def test_linkedin_bootstrap_detects_google_block_in_popup_context():
     assert detect_google_oauth_automation_block_in_context(context)
 
 
+def test_linkedin_bootstrap_observer_detects_authenticated_jobs_ready():
+    from scripts.bootstrap_linkedin_session import observe_linkedin_jobs_readiness
+
+    class FakeLocator:
+        def inner_text(self, *, timeout):
+            return "LinkedIn Jobs"
+
+        def count(self):
+            return 0
+
+    class FakeContext:
+        def __init__(self):
+            self.pages = []
+
+        def cookies(self):
+            return [{"name": "li_at"}]
+
+    context = FakeContext()
+    page = SimpleNamespace(
+        url="https://www.linkedin.com/jobs/",
+        context=context,
+        locator=lambda _selector: FakeLocator(),
+    )
+    context.pages = [page]
+
+    assert observe_linkedin_jobs_readiness(
+        context,
+        timeout_seconds=1,
+        monotonic=lambda: 0.0,
+        sleep=lambda _seconds: None,
+    ) == "ready"
+
+
+def test_linkedin_bootstrap_observer_times_out_without_automating_login():
+    from scripts.bootstrap_linkedin_session import observe_linkedin_jobs_readiness
+
+    class FakeLocator:
+        def inner_text(self, *, timeout):
+            return "Sign in"
+
+        def count(self):
+            return 1
+
+    context = SimpleNamespace(pages=[])
+    page = SimpleNamespace(
+        url="https://www.linkedin.com/login",
+        context=SimpleNamespace(cookies=lambda: []),
+        locator=lambda _selector: FakeLocator(),
+    )
+    context.pages = [page]
+    clock = iter((0.0, 2.0))
+
+    assert observe_linkedin_jobs_readiness(
+        context,
+        timeout_seconds=1,
+        monotonic=lambda: next(clock),
+        sleep=lambda _seconds: None,
+    ) == "timeout"
+    assert not hasattr(page, "fill")
+
+
+def test_linkedin_bootstrap_exit_4_is_reserved_for_profile_in_use(tmp_path):
+    from features.web_scraping.infrastructure.authenticated_browser import (
+        BrowserProfileInUseError,
+    )
+    from scripts import bootstrap_linkedin_session
+
+    store = MagicMock()
+    store.resolve_profile_path.return_value = tmp_path / "browser-profile"
+    playwright_context = MagicMock()
+    playwright_context.__enter__.return_value = SimpleNamespace()
+
+    with patch.object(
+        bootstrap_linkedin_session,
+        "LinkedInSessionStore",
+        return_value=store,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "sync_playwright",
+        return_value=playwright_context,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "open_persistent_authenticated_context",
+        side_effect=BrowserProfileInUseError("profile already in use"),
+    ):
+        returncode = bootstrap_linkedin_session.main(
+            ["--observe-ready", "--ready-timeout-seconds", "1"]
+        )
+
+    assert returncode == 4
+
+
+def test_linkedin_bootstrap_observer_persists_ready_state_and_closes(tmp_path):
+    from scripts import bootstrap_linkedin_session
+
+    profile_path = tmp_path / "browser-profile"
+    store = MagicMock()
+    store.resolve_profile_path.return_value = profile_path
+    page = MagicMock()
+    context = SimpleNamespace(pages=[page])
+    session = SimpleNamespace(context=context, page=page, close=MagicMock())
+    playwright_context = MagicMock()
+    playwright_context.__enter__.return_value = SimpleNamespace()
+
+    with patch.object(
+        bootstrap_linkedin_session,
+        "LinkedInSessionStore",
+        return_value=store,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "sync_playwright",
+        return_value=playwright_context,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "open_persistent_authenticated_context",
+        return_value=session,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "observe_linkedin_jobs_readiness",
+        return_value="ready",
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "detect_google_oauth_automation_block_in_context",
+        return_value=False,
+    ):
+        returncode = bootstrap_linkedin_session.main(
+            ["--observe-ready", "--ready-timeout-seconds", "1"]
+        )
+
+    assert returncode == 0
+    store.save_from_context.assert_called_once()
+    assert store.save_from_context.call_args.args == (context,)
+    assert store.save_from_context.call_args.kwargs["profile_path"] == profile_path
+    session.close.assert_called_once()
+
+
+def test_linkedin_bootstrap_observer_returns_explicit_timeout_and_closes(tmp_path):
+    from scripts import bootstrap_linkedin_session
+
+    store = MagicMock()
+    store.resolve_profile_path.return_value = tmp_path / "browser-profile"
+    page = MagicMock()
+    session = SimpleNamespace(
+        context=SimpleNamespace(pages=[page]),
+        page=page,
+        close=MagicMock(),
+    )
+    playwright_context = MagicMock()
+    playwright_context.__enter__.return_value = SimpleNamespace()
+
+    with patch.object(
+        bootstrap_linkedin_session,
+        "LinkedInSessionStore",
+        return_value=store,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "sync_playwright",
+        return_value=playwright_context,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "open_persistent_authenticated_context",
+        return_value=session,
+    ), patch.object(
+        bootstrap_linkedin_session,
+        "observe_linkedin_jobs_readiness",
+        return_value="timeout",
+    ):
+        returncode = bootstrap_linkedin_session.main(
+            ["--observe-ready", "--ready-timeout-seconds", "1"]
+        )
+
+    assert returncode == 5
+    store.save_from_context.assert_not_called()
+    session.close.assert_called_once()
+
+
 def test_linkedin_intent_requires_jobs_and_target_topic():
     from features.web_scraping.application.linkedin_intent import (
         detect_linkedin_jobs_intent,
@@ -628,6 +832,12 @@ def test_linkedin_location_extraction_is_multi_value_and_alias_driven():
     ) == ("South Korea", "Japan")
     assert extract_linkedin_locations(
         "Find LinkedIn AI jobs in Japan and South Korea"
+    ) == ("South Korea",)
+    assert extract_linkedin_locations(
+        "Buscá vacantes solo para Corea del Sur. No incluyas Japón ni otros países."
+    ) == ("South Korea",)
+    assert extract_linkedin_locations(
+        "Buscá vacantes únicamente en Corea del Sur y descartá Japón."
     ) == ("South Korea",)
     assert extract_linkedin_locations("Buscá vacantes AI en Argentina") == ()
 
@@ -661,6 +871,58 @@ def test_linkedin_url_policy_is_jobs_only_and_canonicalizes_tracking():
             "https://www.linkedin.com/jobs/search/?keywords=AI&token=secret"
         )
     assert is_linkedin_auth_checkpoint("https://evil.example/login") is False
+
+
+def test_linkedin_entity_url_canonicalization_strips_query_and_fragment():
+    from features.web_scraping.infrastructure.linkedin_url_policy import (
+        canonicalize_linkedin_url,
+        linkedin_job_id_from_url,
+    )
+
+    assert canonicalize_linkedin_url(
+        "https://www.linkedin.com/jobs/view/4451609695#details"
+    ) == "https://www.linkedin.com/jobs/view/4451609695"
+    assert canonicalize_linkedin_url(
+        "https://linkedin.com/company/openai#about"
+    ) == "https://linkedin.com/company/openai"
+    assert {
+        linkedin_job_id_from_url(url)
+        for url in (
+            "https://www.linkedin.com/jobs/view/4451609695/",
+            "https://www.linkedin.com/jobs/view/4451609695?trackingId=x",
+            "https://www.linkedin.com/jobs/view/some-role-4451609695?refId=y",
+        )
+    } == {"4451609695"}
+
+
+def test_linkedin_url_policy_accepts_only_official_search_results_redirect():
+    from features.web_scraping.infrastructure.linkedin_url_policy import (
+        canonicalize_linkedin_url,
+        canonicalize_linkedin_job_url,
+        validate_linkedin_jobs_url,
+    )
+
+    redirected = (
+        "https://linkedin.com/jobs/search-results/?keywords=AI&f_TPR=r86400"
+        "&location=Japan&infoNotice=job-search-rewrite&skipRedirect=true"
+    )
+    assert validate_linkedin_jobs_url(redirected) == redirected
+    assert canonicalize_linkedin_job_url(redirected) == (
+        "https://www.linkedin.com/jobs/search-results?"
+        "keywords=AI&f_TPR=r86400&location=Japan&infoNotice=job-search-rewrite"
+        "&skipRedirect=true"
+    )
+    with pytest.raises(ValueError, match="path_not_allowed"):
+        canonicalize_linkedin_url(redirected)
+
+    with pytest.raises(ValueError, match="query_parameter_not_allowed"):
+        validate_linkedin_jobs_url(
+            "https://www.linkedin.com/jobs/search-results?keywords=AI&token=secret"
+        )
+    with pytest.raises(ValueError, match="path_not_allowed"):
+        validate_linkedin_jobs_url(
+            "https://www.linkedin.com/jobs/search-results/anything"
+        )
 
 
 def test_linkedin_session_store_writes_atomically_with_private_permissions(tmp_path):
@@ -843,6 +1105,162 @@ def test_linkedin_parser_handles_authenticated_dom_relative_hrefs_and_wrappers()
     assert diagnostics.discard_reasons["duplicate_wrapper"] >= 2
 
 
+def test_linkedin_parser_uses_semantic_search_area_and_exact_id_dedupe():
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        _parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+    html = """
+    <nav><a href="/jobs/view/900" aria-label="Global job link"></a></nav>
+    <main>
+      <ul class="jobs-search-results-list" role="listbox">
+        <li role="option" data-occludable-job-id="00111">
+          <a href="/jobs/view/111" aria-label="AI Engineer"></a>
+          <a href="/jobs/view/111">AI Engineer duplicate</a>
+        </li>
+        <li role="listitem" data-job-id="112">
+          <a href="/jobs/view/1112">Wrong exact ID</a>
+        </li>
+        <li role="listitem" data-job-id="222">
+          <a href="/jobs/view/222">Machine Learning Engineer</a>
+        </li>
+      </ul>
+      <aside class="jobs-search__job-details--container">
+        <a href="/jobs/view/333">Detail panel title</a>
+      </aside>
+    </main>
+    """
+
+    records, diagnostics = _parse_linkedin_jobs_html_with_diagnostics(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+
+    assert [record.linkedin_job_id for record in records] == ["111", "222"]
+    assert [record.title for record in records] == [
+        "AI Engineer",
+        "Machine Learning Engineer",
+    ]
+    assert diagnostics.candidate_count == 2
+    assert "legacy_selector_fallback" not in diagnostics.discard_reasons
+
+
+def test_linkedin_parser_rejects_standalone_job_link_by_default():
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        _parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+    records, diagnostics = _parse_linkedin_jobs_html_with_diagnostics(
+        '<main><a href="/jobs/view/111">AI Engineer</a></main>',
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+
+    assert records == []
+    assert diagnostics.href_count == 1
+    assert diagnostics.candidate_count == 0
+    assert "standalone_link_fallback" not in diagnostics.discard_reasons
+
+
+def test_linkedin_parser_opt_in_salvages_safe_standalone_job_links_in_order():
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        _parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+    html = """
+    <main>
+      <a href="/jobs/view/ai-engineer-111/?trackingId=secret"
+         aria-label="AI Engineer"></a>
+      <a href="/jobs/view/222">Machine Learning Engineer</a>
+      <a href="/jobs/view/00111">Duplicate AI Engineer</a>
+      <a href="https://www.linkedin.com/jobs/view/data-scientist-333">
+        Data Scientist
+      </a>
+    </main>
+    """
+
+    records, diagnostics = _parse_linkedin_jobs_html_with_diagnostics(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        allow_standalone_fallback=True,
+    )
+
+    assert [record.linkedin_job_id for record in records] == ["111", "222", "333"]
+    assert [record.title for record in records] == [
+        "AI Engineer",
+        "Machine Learning Engineer",
+        "Data Scientist",
+    ]
+    assert records[0].canonical_url == (
+        "https://www.linkedin.com/jobs/view/ai-engineer-111"
+    )
+    assert diagnostics.candidate_count == 3
+    assert diagnostics.parseable_candidate_count == 3
+    assert diagnostics.discard_reasons == {"standalone_link_fallback": 3}
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        '<nav><a href="/jobs/view/111">AI Engineer</a></nav>',
+        '<main><a href="/jobs/view/not-a-numeric-id">AI Engineer</a></main>',
+        '<main><a href="/jobs/view/111" aria-label=""></a></main>',
+        '<main><a href="https://evil.example/jobs/view/111">AI Engineer</a></main>',
+    ],
+)
+def test_linkedin_parser_opt_in_rejects_unsafe_standalone_job_links(html):
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        _parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+    records, diagnostics = _parse_linkedin_jobs_html_with_diagnostics(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        allow_standalone_fallback=True,
+    )
+
+    assert records == []
+    assert diagnostics.candidate_count == 0
+    assert "standalone_link_fallback" not in diagnostics.discard_reasons
+
+
+def test_linkedin_parser_discards_broken_card_without_aborting(monkeypatch):
+    from bs4 import BeautifulSoup
+
+    from features.web_scraping.infrastructure import linkedin_parser
+
+    class BrokenCard:
+        def select_one(self, _selector):
+            raise RuntimeError("do not leak this message")
+
+    soup = BeautifulSoup(
+        """
+        <ul class="jobs-search-results-list">
+          <li data-job-id="4451609695">
+            <a href="/jobs/view/4451609695">AI Engineer</a>
+            <span class="job-card-container__primary-description">Example AI</span>
+          </li>
+        </ul>
+        """,
+        "html.parser",
+    )
+    good_card = soup.select_one("li[data-job-id]")
+    good_link = good_card.select_one("a")
+
+    monkeypatch.setattr(
+        linkedin_parser,
+        "_semantic_candidates",
+        lambda _soup: [(BrokenCard(), good_link), (good_card, good_link)],
+    )
+
+    records, diagnostics = linkedin_parser._parse_linkedin_jobs_html_with_diagnostics(
+        str(soup),
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+
+    assert [record.linkedin_job_id for record in records] == ["4451609695"]
+    assert diagnostics.discard_reasons["duplicate_wrapper"] >= 1
+
+
 def test_linkedin_search_hydration_waits_progressively_for_late_cards():
     from features.web_scraping.infrastructure.linkedin_scraper import (
         _wait_for_search_results_hydration,
@@ -851,18 +1269,36 @@ def test_linkedin_search_hydration_waits_progressively_for_late_cards():
     state = {"polls": 0}
 
     class FakeLocator:
-        def __init__(self, selector: str) -> None:
+        def __init__(self, selector: str, index: int = 0) -> None:
             self.selector = selector
+            self.index = index
 
         @property
         def first(self):
             return self
 
         def count(self) -> int:
-            return int(
-                self.selector == ".job-card-container"
-                and state["polls"] >= 2
-            )
+            if state["polls"] < 2:
+                return 0
+            if (
+                self.selector
+                == ".jobs-search-results-list [data-job-id] a[href*='/jobs/view/']"
+            ):
+                return 2
+            if self.selector == "a[href*='/jobs/view/']":
+                return 2
+            return 0
+
+        def nth(self, index: int):
+            return FakeLocator(self.selector, index)
+
+        def get_attribute(self, name: str):
+            if name == "href" and self.count():
+                return f"/jobs/view/{111 + self.index}"
+            return None
+
+        def evaluate(self, _script: str) -> None:
+            return None
 
         def is_visible(self, timeout: int) -> bool:
             return bool(self.count())
@@ -937,6 +1373,687 @@ def test_linkedin_search_hydration_distinguishes_empty_and_indeterminate_timeout
     assert indeterminate_page.waits == [100, 150, 200]
 
 
+def test_linkedin_search_hydration_diagnostics_record_polling_and_timeout_safely():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_search_results_hydration,
+    )
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        LinkedInSearchHydrationDiagnosticsCollector,
+    )
+
+    state = {"polls": 0}
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            if self.selector == ".jobs-search-results-list [data-job-id]":
+                return min(state["polls"], 2)
+            return 0
+
+        def nth(self, _index: int):
+            return self
+
+        def get_attribute(self, name: str):
+            return "/jobs/view/secret-raw-url-111" if name == "href" else None
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def inner_text(self, timeout: int) -> str:
+            return "<html>Visible Job Title secret-token</html>"
+
+        def evaluate(self, _script: str) -> None:
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=secret-token"
+
+        def __init__(self) -> None:
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+            state["polls"] += 1
+
+    collector = LinkedInSearchHydrationDiagnosticsCollector()
+    result = _wait_for_search_results_hydration(
+        FakePage(),
+        max_wait_ms=450,
+        query="https://www.linkedin.com/jobs/search/?keywords=secret-token",
+        diagnostics=collector,
+    )
+
+    assert result == "timeout"
+    assert [event.sequence for event in collector.events] == [1, 2, 3, 4]
+    assert [event.outcome for event in collector.events] == [
+        "polling",
+        "polling",
+        "polling",
+        "timeout",
+    ]
+    assert [event.card_count for event in collector.events] == [0, 1, 2, 2]
+    assert {event.href_count for event in collector.events} == {0}
+    serialized = json.dumps(
+        [event.model_dump(mode="json") for event in collector.events]
+    )
+    assert "https://" not in serialized
+    assert "jobs/search" not in serialized
+    assert "secret-token" not in serialized
+    assert "<html" not in serialized.lower()
+    assert "Visible Job Title" not in serialized
+
+
+def test_linkedin_search_hydration_diagnostics_skip_unlabeled_internal_waits():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        search_hydration_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_search_results_hydration,
+    )
+
+    class FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return 0
+
+        def nth(self, _index: int):
+            return self
+
+        def get_attribute(self, _name: str):
+            return None
+
+        def is_visible(self, timeout: int) -> bool:
+            return False
+
+        def inner_text(self, timeout: int) -> str:
+            return ""
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+        def locator(self, _selector: str) -> FakeLocator:
+            return FakeLocator()
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    with search_hydration_diagnostics_context() as collector:
+        result = _wait_for_search_results_hydration(FakePage(), max_wait_ms=0)
+
+    assert result == "timeout"
+    assert collector.events == []
+
+
+def test_linkedin_search_hydration_rejects_isolated_job_link():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_search_results_hydration,
+    )
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return int(self.selector == "a[href*='/jobs/view/']")
+
+        def nth(self, _index: int):
+            return self
+
+        def get_attribute(self, name: str):
+            return "/jobs/view/111" if name == "href" else None
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def evaluate(self, _script: str) -> None:
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    assert _wait_for_search_results_hydration(
+        FakePage(),
+        max_wait_ms=450,
+    ) == "timeout"
+
+
+def test_linkedin_search_hydration_separates_raw_signals_from_unique_candidates():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        LinkedInSearchHydrationDiagnosticsCollector,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_search_results_hydration,
+    )
+
+    class FakeLocator:
+        def __init__(self, selector: str, index: int = 0) -> None:
+            self.selector = selector
+            self.index = index
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return {
+                "a[href*='/jobs/view/']": 2,
+                "[data-entity-urn*='jobPosting']": 1,
+                "[data-job-id]": 1,
+                "[data-occludable-job-id]": 1,
+            }.get(self.selector, 0)
+
+        def nth(self, index: int):
+            return FakeLocator(self.selector, index)
+
+        def get_attribute(self, name: str):
+            if self.selector == "a[href*='/jobs/view/']" and name == "href":
+                return "/jobs/view/123"
+            if (
+                self.selector == "[data-entity-urn*='jobPosting']"
+                and name == "data-entity-urn"
+            ):
+                return "urn:li:jobPosting:123"
+            if self.selector == "[data-job-id]" and name == "data-job-id":
+                return "123"
+            if (
+                self.selector == "[data-occludable-job-id]"
+                and name == "data-occludable-job-id"
+            ):
+                return "123"
+            return None
+
+        def is_visible(self, timeout: int) -> bool:
+            return False
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def evaluate(self, _script: str):
+            return 0
+
+    collector = LinkedInSearchHydrationDiagnosticsCollector()
+    assert (
+        _wait_for_search_results_hydration(
+            FakePage(),
+            max_wait_ms=0,
+            query="AI @ Korea",
+            diagnostics=collector,
+        )
+        == "timeout"
+    )
+
+    event = collector.events[-1]
+    assert event.raw_signal_count == 5
+    assert event.unique_candidate_count == 1
+    assert event.raw_signal_count > event.unique_candidate_count
+
+
+def test_linkedin_search_hydration_scroll_chooses_container_with_more_job_signals():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        _scroll_search_results_incrementally,
+    )
+
+    class FakeLocator:
+        def __init__(self, selector: str, page) -> None:
+            self.selector = selector
+            self.page = page
+
+        def count(self) -> int:
+            return int(self.selector in {".jobs-search-results-list", "main"})
+
+        def nth(self, _index: int):
+            return self
+
+        def evaluate(self, script: str):
+            if "scrollable" in script:
+                return {
+                    "jobSignalCount": (
+                        5 if self.selector == "main" else 1
+                    ),
+                    "scrollHeight": 2000,
+                    "clientHeight": 500,
+                    "scrollTop": 0,
+                    "scrollable": True,
+                }
+            if "scrollTopBefore" in script:
+                self.page.scrolled_selector = self.selector
+                return {
+                    "scrollHeight": 2000,
+                    "clientHeight": 500,
+                    "scrollTopBefore": 0,
+                    "scrollTopAfter": 500,
+                }
+            return None
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.scrolled_selector = ""
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector, self)
+
+        def evaluate(self, _script: str):
+            return {"found": False}
+
+    page = FakePage()
+    metrics = _scroll_search_results_incrementally(page)
+
+    assert metrics.selected_scroll_container == "main"
+    assert page.scrolled_selector == "main"
+
+
+def test_linkedin_search_hydration_scroll_and_reload_are_bounded():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_search_results_hydration,
+    )
+
+    class FakeLocator:
+        def __init__(self, selector: str, page) -> None:
+            self.selector = selector
+            self.page = page
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return int(self.selector == "main")
+
+        def nth(self, _index: int):
+            return self
+
+        def get_attribute(self, _name: str):
+            return None
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def evaluate(self, script: str):
+            if "jobSignalCount" in script:
+                return {
+                    "jobSignalCount": 0,
+                    "scrollHeight": 2000,
+                    "clientHeight": 480,
+                    "scrollTop": self.page.scroll_top,
+                    "scrollable": True,
+                }
+            if "scrollTopBefore" in script:
+                before = self.page.scroll_top
+                self.page.scroll_top += 480
+                self.page.scrolls += 1
+                return {
+                    "scrollHeight": 2000,
+                    "clientHeight": 480,
+                    "scrollTopBefore": before,
+                    "scrollTopAfter": self.page.scroll_top,
+                }
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+        def __init__(self) -> None:
+            self.scrolls = 0
+            self.scroll_top = 0
+            self.reloads = 0
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector, self)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+
+        def reload(self, **_kwargs) -> None:
+            self.reloads += 1
+
+    page = FakePage()
+    original_url = page.url
+
+    assert _wait_for_search_results_hydration(page, max_wait_ms=1000) == "timeout"
+    assert page.scrolls == 3
+    assert page.reloads == 1
+    assert sum(page.waits) == 1000
+    assert page.url == original_url
+
+
+def test_linkedin_search_hydration_stops_when_scroll_has_no_progress():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_search_results_hydration,
+    )
+
+    class FakeLocator:
+        def __init__(self, selector: str, page) -> None:
+            self.selector = selector
+            self.page = page
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return int(self.selector == "main")
+
+        def nth(self, _index: int):
+            return self
+
+        def get_attribute(self, _name: str):
+            return None
+
+        def is_visible(self, timeout: int) -> bool:
+            return False
+
+        def evaluate(self, script: str):
+            if "scrollable" in script:
+                return {
+                    "jobSignalCount": 0,
+                    "scrollHeight": 2000,
+                    "clientHeight": 480,
+                    "scrollTop": 0,
+                    "scrollable": True,
+                }
+            if "scrollTopBefore" in script:
+                self.page.scrolls += 1
+                return {
+                    "scrollHeight": 2000,
+                    "clientHeight": 480,
+                    "scrollTopBefore": 0,
+                    "scrollTopAfter": 0,
+                }
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+        def __init__(self) -> None:
+            self.scrolls = 0
+            self.waits = []
+            self.reloads = 0
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector, self)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+
+        def reload(self, **_kwargs) -> None:
+            self.reloads += 1
+
+        def evaluate(self, _script: str):
+            return {"found": False}
+
+    page = FakePage()
+    assert _wait_for_search_results_hydration(page, max_wait_ms=1000) == "timeout"
+    assert page.scrolls == 1
+    assert page.reloads == 1
+
+
+def test_linkedin_search_hydration_continues_bounded_when_scroll_moves_without_candidates():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_search_results_hydration,
+    )
+
+    class FakeLocator:
+        def __init__(self, selector: str, page) -> None:
+            self.selector = selector
+            self.page = page
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return int(self.selector == "main")
+
+        def nth(self, _index: int):
+            return self
+
+        def get_attribute(self, _name: str):
+            return None
+
+        def is_visible(self, timeout: int) -> bool:
+            return False
+
+        def evaluate(self, script: str):
+            if "scrollable" in script:
+                return {
+                    "jobSignalCount": 0,
+                    "scrollHeight": 3000,
+                    "clientHeight": 480,
+                    "scrollTop": self.page.scroll_top,
+                    "scrollable": True,
+                }
+            if "scrollTopBefore" in script:
+                before = self.page.scroll_top
+                self.page.scroll_top += 480
+                self.page.scrolls += 1
+                return {
+                    "scrollHeight": 3000,
+                    "clientHeight": 480,
+                    "scrollTopBefore": before,
+                    "scrollTopAfter": self.page.scroll_top,
+                }
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+        def __init__(self) -> None:
+            self.scrolls = 0
+            self.scroll_top = 0
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector, self)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+
+        def reload(self, **_kwargs) -> None:
+            return None
+
+        def evaluate(self, _script: str):
+            return {"found": False}
+
+    page = FakePage()
+    assert _wait_for_search_results_hydration(page, max_wait_ms=1000) == "timeout"
+    assert page.scrolls == 3
+
+
+def test_linkedin_visual_diagnostics_off_creates_no_artifacts(tmp_path, monkeypatch):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        visual_diagnostics_context,
+    )
+
+    monkeypatch.delenv("LINKEDIN_SEARCH_VISUAL_DIAGNOSTICS", raising=False)
+    with visual_diagnostics_context(tmp_path / "audit") as collector:
+        assert collector.start_run(SimpleNamespace(), query="AI @ Korea") is None
+
+    assert not (tmp_path / "audit" / "visual-diagnostics").exists()
+    assert collector.events == []
+
+
+def test_linkedin_visual_diagnostics_bundle_is_local_relative_and_sanitized(
+    tmp_path,
+    monkeypatch,
+):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        visual_diagnostics_context,
+    )
+
+    monkeypatch.setenv("LINKEDIN_SEARCH_VISUAL_DIAGNOSTICS", "true")
+
+    class FakeTracing:
+        def __init__(self) -> None:
+            self.start_kwargs = None
+            self.started_chunks = []
+            self.stopped_chunks = []
+            self.stop_called = False
+
+        def start(self, **kwargs) -> None:
+            self.start_kwargs = kwargs
+
+        def start_chunk(self, **kwargs) -> None:
+            self.started_chunks.append(kwargs)
+
+        def stop_chunk(self, **kwargs) -> None:
+            self.stopped_chunks.append(kwargs)
+            Path(kwargs["path"]).write_text("trace", encoding="utf-8")
+
+        def stop(self, **_kwargs) -> None:
+            self.stop_called = True
+
+    class FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return 1
+
+        def screenshot(self, *, path: str) -> None:
+            Path(path).write_text("main", encoding="utf-8")
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.context = SimpleNamespace(tracing=FakeTracing())
+            self.evaluate_calls = 0
+
+        def screenshot(self, *, path: str, full_page: bool) -> None:
+            assert full_page is True
+            Path(path).write_text("full", encoding="utf-8")
+
+        def locator(self, selector: str) -> FakeLocator:
+            assert selector == "main"
+            return FakeLocator()
+
+        def evaluate(self, _script: str) -> dict:
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                scroll_top = 415
+            else:
+                scroll_top = 895
+            return {
+                "schema_version": "1.0",
+                "node_count": 10,
+                "frame_count": 2,
+                "body_scrollHeight": 2000,
+                "viewport": {"width": 1280, "height": 720},
+                "signal_counts": {"jobs_view": 0},
+                "scrollables": [
+                    {
+                        "container_index": 2,
+                        "tag": "div",
+                        "class_tokens": ["scaffold-layout__list"],
+                        "attributes": {
+                            "data-job-id": "123",
+                            "data-private-token": "secret",
+                        },
+                        "contains_main": False,
+                        "scrollHeight": 1686,
+                        "clientHeight": 700,
+                        "scrollTop": scroll_top,
+                        "anchor_count": 4,
+                        "jobs_view_count": 0,
+                        "urn_count": 0,
+                        "data_job_id_count": 0,
+                        "data_occludable_job_id_count": 0,
+                        "job_signal_count": 0,
+                    }
+                ],
+                "structural": [
+                    {
+                        "container_index": 2,
+                        "tag": "div",
+                        "class_tokens": ["scaffold-layout__list"],
+                        "attributes": {"data-debug-id": "leak"},
+                        "innerText": "must not persist",
+                    }
+                ],
+            }
+
+    audit_dir = tmp_path / "audit"
+    page = FakePage()
+    with visual_diagnostics_context(audit_dir) as collector:
+        run = collector.start_run(page, query="AI @ Korea")
+        assert run is not None
+        run.capture_before(page)
+        run.capture_after(page)
+        run.stop_trace(page)
+        run.finalize()
+        assert collector.start_run(page, query="second query") is None
+
+    visual_dir = audit_dir / "visual-diagnostics"
+    expected_files = {
+        "manifest.json",
+        "before-full.png",
+        "before-main.png",
+        "structure-before.json",
+        "after-full.png",
+        "after-main.png",
+        "structure-after.json",
+        "trace.zip",
+    }
+    assert expected_files <= {item.name for item in visual_dir.iterdir()}
+    assert page.context.tracing.start_kwargs == {
+        "screenshots": True,
+        "snapshots": True,
+        "sources": False,
+    }
+    assert len(page.context.tracing.started_chunks) == 1
+    assert len(page.context.tracing.stopped_chunks) == 1
+    assert page.context.tracing.stop_called is True
+
+    manifest = json.loads((visual_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["trace"]["sensitive_local_artifact"] is True
+    assert manifest["trace"]["sources"] is False
+    assert manifest["artifacts"]["structure_before"] == "structure-before.json"
+    assert "/Users/" not in json.dumps(manifest)
+    assert collector.events[0].manifest_path == "visual-diagnostics/manifest.json"
+
+    before = json.loads((visual_dir / "structure-before.json").read_text(encoding="utf-8"))
+    after = json.loads((visual_dir / "structure-after.json").read_text(encoding="utf-8"))
+    assert before["scrollables"][0]["container_index"] == after["scrollables"][0]["container_index"] == 2
+    assert after["scrollables"][0]["scrollTopBefore"] == 415
+    assert after["scrollables"][0]["scrollTopAfter"] == 895
+    assert after["scrollables"][0]["scroll_delta"] == 480
+    assert after["scrollables"][0]["job_signal_count_before"] == 0
+    assert after["scrollables"][0]["job_signal_count_after"] == 0
+    serialized = json.dumps({"before": before, "after": after})
+    assert "data-private-token" not in serialized
+    assert "data-debug-id" not in serialized
+    assert "innerText" not in serialized
+    assert "must not persist" not in serialized
+
+
 def test_linkedin_detail_hydration_waits_for_late_parseable_date():
     from features.web_scraping.infrastructure.linkedin_scraper import (
         _wait_for_detail_hydration,
@@ -990,6 +2107,307 @@ def test_linkedin_detail_hydration_waits_for_late_parseable_date():
 
     assert result == "ready"
     assert page.waits == [100, 150]
+
+
+def test_linkedin_detail_hydration_waits_for_requested_description():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_detail_hydration,
+    )
+
+    state = {"polls": 0}
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            if self.selector.endswith("job-title h1"):
+                return 1
+            return int(
+                self.selector == ".jobs-description-content__text"
+                and state["polls"] >= 2
+            )
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def inner_text(self, timeout: int) -> str:
+            if self.selector == ".jobs-description-content__text":
+                return "Description loaded asynchronously."
+            return "AI Engineer"
+
+        def get_attribute(self, name: str):
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def __init__(self) -> None:
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+            state["polls"] += 1
+
+    page = FakePage()
+
+    assert _wait_for_detail_hydration(
+        page,
+        require_date=False,
+        require_description=True,
+        max_wait_ms=1000,
+    ) == "ready"
+    assert page.waits == [100, 150]
+
+
+def test_linkedin_detail_hydration_ignores_description_placeholder_until_body_arrives():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_detail_hydration,
+    )
+
+    state = {"polls": 0}
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return int(
+                self.selector.endswith("job-title h1")
+                or self.selector == ".jobs-description-content__text"
+            )
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def inner_text(self, timeout: int) -> str:
+            if self.selector == ".jobs-description-content__text":
+                return "About the job" if state["polls"] < 2 else "Full description arrived."
+            return "AI Engineer"
+
+        def get_attribute(self, name: str):
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def __init__(self) -> None:
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+            state["polls"] += 1
+
+    page = FakePage()
+
+    assert _wait_for_detail_hydration(
+        page,
+        require_date=False,
+        require_description=True,
+        max_wait_ms=1000,
+    ) == "ready"
+    assert page.waits == [100, 150]
+
+
+def test_linkedin_detail_hydration_requires_date_and_description_together():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_detail_hydration,
+    )
+
+    state = {"polls": 0}
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            if self.selector == ".jobs-description-content__text":
+                return int(state["polls"] >= 1)
+            return int(self.selector == "time" and state["polls"] >= 2)
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def inner_text(self, timeout: int) -> str:
+            if self.selector == "time":
+                return "2 hours ago"
+            return "Description arrived before the date."
+
+        def get_attribute(self, name: str):
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def __init__(self) -> None:
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+            state["polls"] += 1
+
+    page = FakePage()
+
+    assert _wait_for_detail_hydration(
+        page,
+        require_date=True,
+        require_description=True,
+        max_wait_ms=1000,
+    ) == "ready"
+    assert page.waits == [100, 150]
+
+
+def test_linkedin_detail_hydration_keeps_default_any_signal_behavior():
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_detail_hydration,
+    )
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return int(self.selector.endswith("job-title h1"))
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def inner_text(self, timeout: int) -> str:
+            return "AI Engineer"
+
+        def get_attribute(self, name: str):
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def __init__(self) -> None:
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+
+    page = FakePage()
+
+    assert _wait_for_detail_hydration(
+        page,
+        require_date=False,
+        max_wait_ms=1000,
+    ) == "ready"
+    assert page.waits == []
+
+
+@pytest.mark.parametrize(
+    ("include_description", "expected_waits", "expected_description"),
+    [
+        (True, [100, 150], "Description loaded asynchronously."),
+        (False, [], ""),
+    ],
+)
+def test_linkedin_direct_detail_waits_only_for_requested_description(
+    include_description,
+    expected_waits,
+    expected_description,
+):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _enrich_job_detail,
+    )
+
+    state = {"polls": 0}
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            if self.selector.endswith("job-title h1"):
+                return 1
+            return int(
+                self.selector == ".jobs-description-content__text"
+                and state["polls"] >= 2
+            )
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def inner_text(self, timeout: int) -> str:
+            if self.selector == ".jobs-description-content__text":
+                return "Description loaded asynchronously."
+            return "AI Engineer"
+
+        def get_attribute(self, name: str):
+            return None
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def __init__(self) -> None:
+            self.waits = []
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+            state["polls"] += 1
+
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+        published_at=datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+    )
+    page = FakePage()
+
+    with patch(
+        "features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"
+    ):
+        enriched = _enrich_job_detail(
+            page,
+            candidate,
+            include_description=include_description,
+        )
+
+    assert page.waits == expected_waits
+    assert enriched.description_full_text == expected_description
 
 
 def test_linkedin_panel_click_enriches_late_detail_without_top_level_goto():
@@ -1177,6 +2595,82 @@ def test_linkedin_detail_panel_wait_detects_stale_previous_job():
     ) == "timeout"
 
 
+def test_linkedin_detail_panel_hydration_ignores_description_placeholder_until_body_arrives():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _wait_for_detail_panel_hydration,
+    )
+
+    state = {"polls": 0}
+
+    class FakeLocator:
+        def __init__(self, selector: str) -> None:
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self) -> int:
+            return int(
+                self.selector
+                in {
+                    ".jobs-search__job-details--container a[href*='/jobs/view/']",
+                    ".job-details-jobs-unified-top-card__job-title h1",
+                    ".jobs-description-content__text",
+                    "time",
+                }
+            )
+
+        def nth(self, _index: int):
+            return self
+
+        def is_visible(self, timeout: int) -> bool:
+            return bool(self.count())
+
+        def get_attribute(self, name: str):
+            if name == "href" and "a[href*='/jobs/view/']" in self.selector:
+                return "/jobs/view/111/"
+            return None
+
+        def inner_text(self, timeout: int) -> str:
+            if self.selector == "time":
+                return "1 hour ago"
+            if self.selector == ".jobs-description-content__text":
+                return "About this job" if state["polls"] < 2 else "Panel description arrived."
+            return "AI Engineer"
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI&currentJobId=111"
+
+        def __init__(self) -> None:
+            self.waits = []
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(selector)
+
+        def wait_for_timeout(self, milliseconds: int) -> None:
+            self.waits.append(milliseconds)
+            state["polls"] += 1
+
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+    page = FakePage()
+
+    assert _wait_for_detail_panel_hydration(
+        page,
+        candidate,
+        include_description=True,
+        max_wait_ms=1000,
+    ) == "ready"
+    assert page.waits == [100, 150]
+
+
 def test_linkedin_panel_selector_and_click_failures_are_distinct():
     from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
     from features.web_scraping.infrastructure.linkedin_scraper import (
@@ -1217,8 +2711,136 @@ def test_linkedin_panel_selector_and_click_failures_are_distinct():
             card_link=FailingLink(),
             include_description=False,
         )
-    assert error.value.reason == "card_click_failed"
+    assert error.value.reason == "detail_click_failed"
     assert error.value.safe_label == "ValueError:runtime"
+
+
+def test_linkedin_detail_panel_job_id_comparison_is_normalized_and_exact():
+    from features.web_scraping.infrastructure.linkedin_detail_panel import (
+        _detail_panel_job_id_matches,
+    )
+
+    class EmptyLocator:
+        def count(self) -> int:
+            return 0
+
+        def nth(self, _index: int):
+            return self
+
+    class FakePage:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def locator(self, _selector: str) -> EmptyLocator:
+            return EmptyLocator()
+
+    assert _detail_panel_job_id_matches(
+        FakePage("https://www.linkedin.com/jobs/search/?currentJobId=00111"),
+        "111",
+    )
+    assert not _detail_panel_job_id_matches(
+        FakePage("https://www.linkedin.com/jobs/search/?currentJobId=1112"),
+        "111",
+    )
+
+
+def test_linkedin_direct_detail_fallback_uses_exact_url_and_restores_search():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _run_guarded_direct_detail_fallback,
+    )
+    from features.web_scraping.infrastructure.linkedin_url_policy import (
+        validate_linkedin_jobs_url,
+    )
+
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="00111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/ai-engineer-111",
+        source_url=source_url,
+        matched_terms=["ai"],
+    )
+
+    class FakePage:
+        url = source_url
+
+        def __init__(self) -> None:
+            self.navigations = []
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+            self.navigations.append(url)
+
+    page = FakePage()
+    direct_calls = []
+    warnings = []
+
+    def enrich(target_page, record, **_kwargs):
+        direct_calls.append(record.canonical_url)
+        target_page.url = record.canonical_url
+        return record
+
+    result = _run_guarded_direct_detail_fallback(
+        page,
+        candidate,
+        source_url=source_url,
+        include_description=False,
+        warnings=warnings,
+        validate_jobs_url=validate_linkedin_jobs_url,
+        validate_authenticated_page=lambda _page: None,
+        wait_for_search_results_hydration=lambda _page: "results",
+        enrich_job_detail=enrich,
+        safe_error_label=lambda exc: type(exc).__name__,
+        terminal_error_types=(),
+    )
+
+    assert result.linkedin_job_id == "111"
+    assert direct_calls == ["https://www.linkedin.com/jobs/view/ai-engineer-111"]
+    assert page.navigations == [source_url]
+    assert page.url == source_url
+    assert warnings == ["direct_detail_fallback_used:111"]
+
+
+def test_linkedin_direct_detail_fallback_reports_search_restore_failure():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _run_guarded_direct_detail_fallback,
+    )
+    from features.web_scraping.infrastructure.linkedin_url_policy import (
+        validate_linkedin_jobs_url,
+    )
+
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url=source_url,
+        matched_terms=["ai"],
+    )
+    page = MagicMock()
+    warnings = []
+
+    _run_guarded_direct_detail_fallback(
+        page,
+        candidate,
+        source_url=source_url,
+        include_description=False,
+        warnings=warnings,
+        validate_jobs_url=validate_linkedin_jobs_url,
+        validate_authenticated_page=lambda _page: None,
+        wait_for_search_results_hydration=lambda _page: "timeout",
+        enrich_job_detail=lambda _page, record, **_kwargs: record,
+        safe_error_label=lambda exc: type(exc).__name__,
+        terminal_error_types=(),
+    )
+
+    assert warnings == [
+        "direct_detail_fallback_used:111",
+        "list_not_hydrated:111",
+        "search_restore_failed:111:list_not_hydrated",
+    ]
 
 
 def test_linkedin_detail_click_cadence_is_deterministic():
@@ -1802,6 +3424,8 @@ def test_linkedin_schema_1_1_audit_payload_loads_with_new_metadata_defaults():
     assert snapshot.vacancies[0].soft_skills == []
     assert snapshot.vacancies[0].candidate_expectations == []
     assert snapshot.vacancies[0].responsibilities == []
+    assert snapshot.search_hydration_diagnostics == []
+    assert snapshot.visual_diagnostics == []
 
 
 def test_linkedin_service_classifies_invalid_max_results_without_scraping(
@@ -1830,6 +3454,165 @@ def test_linkedin_service_classifies_invalid_max_results_without_scraping(
     assert result.warnings == ["validation_error:ValidationError"]
 
 
+def test_linkedin_service_runs_bootstrap_and_retries_in_dev_on_auth_failure(
+    tmp_path,
+    monkeypatch,
+):
+    from features.web_scraping.application import linkedin_audit
+    from features.web_scraping.application import linkedin_service
+    from features.web_scraping.application.linkedin_service import (
+        run_linkedin_jobs_vertical,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        LinkedInAuthRequiredError,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LINKEDIN_AUTO_BOOTSTRAP_ON_AUTH_FAILURE", "1")
+    monkeypatch.setattr(
+        linkedin_audit,
+        "get_request_runtime_config",
+        lambda: SimpleNamespace(session_id="sess-auth", request_id="req-auth"),
+    )
+
+    scrape_results = [
+        LinkedInAuthRequiredError("login required"),
+        ([], [], [], [], []),
+    ]
+
+    def fake_scrape(_request):
+        item = scrape_results.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    store = MagicMock()
+    store.load_browser_metadata.return_value = {
+        "profile_path": str(tmp_path / "browser-profile")
+    }
+    store.resolve_profile_path.return_value = tmp_path / "browser-profile"
+    recovery_events = []
+
+    def fake_close_contexts(*, profile_path):
+        recovery_events.append(("close", profile_path))
+        return 1
+
+    def fake_run(_command, **_kwargs):
+        recovery_events.append(("run", None))
+        return SimpleNamespace(returncode=0)
+
+    with patch(
+        "features.web_scraping.application.linkedin_service.scrape_linkedin_jobs",
+        side_effect=fake_scrape,
+    ) as scrape, patch(
+        "features.web_scraping.application.linkedin_service.subprocess.run",
+        side_effect=fake_run,
+    ) as run, patch(
+        "features.web_scraping.application.linkedin_service.LinkedInSessionStore",
+        return_value=store,
+    ), patch(
+        "features.web_scraping.application.linkedin_service.close_reusable_authenticated_contexts",
+        side_effect=fake_close_contexts,
+    ) as close_contexts:
+        result = run_linkedin_jobs_vertical("Buscá vacantes LinkedIn de AI de hoy")
+
+    assert result.status == "extraction_incomplete"
+    assert "auth_refresh_bootstrap_started" in result.warnings
+    assert "auth_refresh_runtime_session_closed" in result.warnings
+    assert "auth_refresh_bootstrap_completed" in result.warnings
+    assert "auth_refresh_retry_started" in result.warnings
+    assert scrape.call_count == 2
+    assert recovery_events == [
+        ("close", tmp_path / "browser-profile"),
+        ("run", None),
+    ]
+    close_contexts.assert_called_once_with(profile_path=tmp_path / "browser-profile")
+    run.assert_called_once()
+    command = run.call_args.args[0]
+    assert command[1:] == [
+        "scripts/bootstrap_linkedin_session.py",
+        "--browser",
+        "brave",
+        "--executable-path",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "--observe-ready",
+        "--ready-timeout-seconds",
+        "300",
+    ]
+
+
+def test_linkedin_service_reports_bootstrap_when_retry_still_requires_auth(
+    tmp_path,
+    monkeypatch,
+):
+    from features.web_scraping.application import linkedin_audit
+    from features.web_scraping.application import linkedin_service
+    from features.web_scraping.application.linkedin_service import (
+        run_linkedin_jobs_vertical,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        LinkedInAuthRequiredError,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LINKEDIN_AUTO_BOOTSTRAP_ON_AUTH_FAILURE", "1")
+    monkeypatch.setattr(
+        linkedin_audit,
+        "get_request_runtime_config",
+        lambda: SimpleNamespace(session_id="sess-auth", request_id="req-auth"),
+    )
+
+    with patch(
+        "features.web_scraping.application.linkedin_service.scrape_linkedin_jobs",
+        side_effect=LinkedInAuthRequiredError("login required"),
+    ) as scrape, patch(
+        "features.web_scraping.application.linkedin_service.subprocess.run",
+        return_value=SimpleNamespace(returncode=0),
+    ):
+        result = run_linkedin_jobs_vertical("Buscá vacantes LinkedIn de AI de hoy")
+
+    assert result.status == "auth_required"
+    assert "auth_refresh_bootstrap_completed" in result.warnings
+    assert "auth_refresh_retry_started" in result.warnings
+    assert scrape.call_count == 2
+    assert "Abrí automáticamente el bootstrap" in result.user_summary
+
+
+def test_linkedin_service_does_not_retry_when_observer_exits_profile_in_use(
+    tmp_path,
+    monkeypatch,
+):
+    from features.web_scraping.application import linkedin_audit
+    from features.web_scraping.application.linkedin_service import (
+        run_linkedin_jobs_vertical,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        LinkedInAuthRequiredError,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LINKEDIN_AUTO_BOOTSTRAP_ON_AUTH_FAILURE", "1")
+    monkeypatch.setattr(
+        linkedin_audit,
+        "get_request_runtime_config",
+        lambda: SimpleNamespace(session_id="sess-exit-4", request_id="req-exit-4"),
+    )
+
+    with patch(
+        "features.web_scraping.application.linkedin_service.scrape_linkedin_jobs",
+        side_effect=LinkedInAuthRequiredError("login required"),
+    ) as scrape, patch(
+        "features.web_scraping.application.linkedin_service.subprocess.run",
+        return_value=SimpleNamespace(returncode=4),
+    ):
+        result = run_linkedin_jobs_vertical("Buscá vacantes LinkedIn de AI de hoy")
+
+    assert result.status == "auth_required"
+    assert "auth_refresh_bootstrap_failed:exit_4" in result.warnings
+    assert "auth_refresh_retry_started" not in result.warnings
+    assert scrape.call_count == 1
+
+
 def test_linkedin_tool_returns_readable_validation_error(tmp_path, monkeypatch):
     from features.web_scraping.application import linkedin_audit
     from integrations.linkedin_tools import scrape_linkedin_jobs_authenticated
@@ -1853,16 +3636,52 @@ def test_linkedin_tool_returns_readable_validation_error(tmp_path, monkeypatch):
 
 
 def test_linkedin_query_builder_enforces_date_and_sort_filters():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        minutes_to_tpr,
+    )
     from features.web_scraping.infrastructure.linkedin_scraper import (
         build_linkedin_search_queries,
     )
 
     queries = build_linkedin_search_queries("Argentina")
 
+    assert minutes_to_tpr(1440) == "r86400"
+    assert minutes_to_tpr(60) == "r3600"
+    assert minutes_to_tpr(30) == "r1800"
     assert queries
     assert all("f_TPR=r86400" in url for _, url in queries)
     assert all("sortBy=DD" in url for _, url in queries)
     assert all("location=Argentina" in url for _, url in queries)
+
+
+@pytest.mark.parametrize("invalid", [True, False, 0, -1, 1.5, "1440", None])
+def test_linkedin_minutes_to_tpr_rejects_invalid_values(invalid):
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        minutes_to_tpr,
+    )
+
+    with pytest.raises(ValueError):
+        minutes_to_tpr(invalid)
+
+
+def test_linkedin_search_url_retains_allowed_query_params():
+    from urllib.parse import parse_qs, urlparse
+
+    from features.web_scraping.infrastructure.linkedin_url_policy import (
+        canonicalize_linkedin_url,
+        validate_linkedin_jobs_url,
+    )
+
+    url = validate_linkedin_jobs_url(
+        "https://www.linkedin.com/jobs/search/?keywords=AI&location=Japan&f_TPR=r86400"
+    )
+    params = parse_qs(urlparse(url).query)
+
+    assert params["keywords"] == ["AI"]
+    assert params["location"] == ["Japan"]
+    assert params["f_TPR"] == ["r86400"]
+    with pytest.raises(ValueError, match="path_not_allowed"):
+        canonicalize_linkedin_url(url)
 
 
 def test_linkedin_query_builder_consolidates_topics_per_location():
@@ -1876,21 +3695,32 @@ def test_linkedin_query_builder_consolidates_topics_per_location():
     queries = build_linkedin_search_queries(["South Korea", "Japan"])
 
     assert len(CONSOLIDATED_QUERY_PLANS) == 2
-    assert len(queries) == 4
-    assert sum("location=Japan" in url for _, url in queries) == 2
-    assert sum("location=South+Korea" in url for _, url in queries) == 2
+    assert len(queries) == 6
+    assert sum("location=Japan" in url for _, url in queries) == 3
+    assert sum("location=South+Korea" in url for _, url in queries) == 3
     assert all("f_TPR=r86400" in url and "sortBy=DD" in url for _, url in queries)
     assert [label for label, _url in queries] == [
         "AI/ML/Data/GenAI @ South Korea",
         "AI/ML/Data/GenAI @ Japan",
         "AI Agents/Product/Architecture @ South Korea",
         "AI Agents/Product/Architecture @ Japan",
+        "Country-focused AI/Data @ South Korea",
+        "Country-focused AI/Data @ Japan",
     ]
     primary_keywords = [
         parse_qs(urlparse(url).query)["keywords"][0]
         for _, url in queries[:2]
     ]
     assert primary_keywords[0] == primary_keywords[1]
+    country_focused_keywords = [
+        parse_qs(urlparse(url).query)["keywords"][0]
+        for label, url in queries
+        if label.startswith("Country-focused")
+    ]
+    assert "South Korea" in country_focused_keywords[0]
+    assert "Japón" in country_focused_keywords[1]
+    assert "Tokyo" in country_focused_keywords[1]
+    assert "Japan" not in country_focused_keywords[1]
     keywords = " ".join(
         parse_qs(urlparse(url).query)["keywords"][0]
         for _, url in queries
@@ -1980,6 +3810,73 @@ def test_linkedin_semantic_dedupe_collapses_same_post_with_different_ids():
     assert warnings == ["semantic_duplicate_dropped:4390928986:kept:4390929954"]
 
 
+def test_linkedin_semantic_dedupe_collapses_recruiter_campaign_variants():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _dedupe_linkedin_vacancies_semantically,
+    )
+
+    shared_prefix = "\n".join(
+        [
+            "Acerca del empleo",
+            "About The Job",
+            "The client is hiring for this role. Harper is an AI career agent that works for you — the candidate.",
+            "Skip the application form: just talk to Harper, and it puts strong candidates straight in front of the client.",
+        ]
+    )
+    ai_engineer = LinkedInVacancyRecord(
+        linkedin_job_id="4435039660",
+        title="Applied AI / ML Engineer at a frontier open-source AI lab",
+        company_name="Harper",
+        location="Seúl, Corea del Sur",
+        canonical_url="https://www.linkedin.com/jobs/view/4435039660",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI&location=South+Korea",
+        description_full_text="\n".join(
+            [
+                shared_prefix,
+                "Job Title",
+                "Applied AI, Machine Learning Engineer",
+                "Company Description",
+                "One of the world's most important AI labs — European, building open-weight, open-source frontier models that go head-to-head with the best closed labs. Teams across France, the US, UK, Germany, and Singapore — now building in Seoul.",
+                "What You'll Do",
+                "Take GenAI from research into production and own customer onboarding.",
+            ]
+        ),
+        published_at=datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc),
+    )
+    research_engineer = LinkedInVacancyRecord(
+        linkedin_job_id="4435053385",
+        title="Applied Scientist / Research Engineer at an Nvidia-backed AI Lab",
+        company_name="Harper",
+        location="Seúl, Corea del Sur",
+        canonical_url="https://www.linkedin.com/jobs/view/4435053385",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI&location=South+Korea",
+        description_full_text="\n".join(
+            [
+                shared_prefix,
+                "Job Title",
+                "Senior/Staff Applied Scientist / Research Engineer",
+                "Company Description",
+                "An Nvidia-backed European AI lab, valued at ~$14B — one of the world's most important, building open-weight, open-source frontier models that go head-to-head with the best closed labs. Teams across France, the US, UK, Germany, and Singapore — now building in Seoul.",
+                "What You'll Do",
+                "Run pre-training, post-training, and deployment of SOTA models on clusters with thousands of GPUs.",
+            ]
+        ),
+        published_at=datetime(2026, 8, 2, 13, 0, tzinfo=timezone.utc),
+    )
+
+    deduped, warnings = _dedupe_linkedin_vacancies_semantically(
+        [ai_engineer, research_engineer]
+    )
+
+    assert [record.linkedin_job_id for record in deduped] == ["4435053385"]
+    assert warnings == [
+        "recruiter_campaign_duplicate_dropped:4435039660:kept:4435053385"
+    ]
+
+
 def test_linkedin_relevance_accepts_seniority_prefixes_for_data_analyst():
     from features.web_scraping.infrastructure.linkedin_scraper import (
         parse_linkedin_jobs_html,
@@ -2028,16 +3925,22 @@ def test_linkedin_query_builder_resolves_canonical_geo_ids_and_aliases():
         "AI/ML/Data/GenAI @ Japan",
         "AI Agents/Product/Architecture @ South Korea",
         "AI Agents/Product/Architecture @ Japan",
+        "Country-focused AI/Data @ South Korea",
+        "Country-focused AI/Data @ Japan",
     ]
-    assert len(queries) == 4
+    assert len(queries) == 6
     params = [parse_qs(urlparse(url).query) for _label, url in queries]
     assert [query["location"] for query in params] == [
         ["South Korea"],
         ["Japan"],
         ["South Korea"],
         ["Japan"],
+        ["South Korea"],
+        ["Japan"],
     ]
     assert [query["geoId"] for query in params] == [
+        ["105149562"],
+        ["101355337"],
         ["105149562"],
         ["101355337"],
         ["105149562"],
@@ -2770,8 +4673,8 @@ def test_linkedin_scraper_dedupes_before_applying_result_limit():
 
     assert [item.linkedin_job_id for item in records] == ["111", "222"]
     assert [item.reason for item in rejected] == [
-        "duplicate",
-        "card_click_failed",
+        "duplicate_candidate_skipped_before_detail",
+        "selector_drift/card_missing",
     ]
 
 
@@ -2887,10 +4790,778 @@ def test_linkedin_scraper_enriches_inline_once_and_never_gotos_job_detail(
         )
 
     assert [record.linkedin_job_id for record in records] == ["111"]
-    assert [item.reason for item in rejected] == ["duplicate"]
+    assert [item.reason for item in rejected] == ["duplicate_candidate_skipped_before_detail"]
     assert panel_detail.call_count == 1
     direct_detail.assert_not_called()
     assert not any("/jobs/view/" in url for url in navigations)
+
+
+def test_linkedin_direct_detail_fallback_fetches_deduped_candidate_once(
+    monkeypatch,
+):
+    from features.web_scraping.domain.linkedin_models import (
+        LinkedInJobsRequest,
+        LinkedInParseDiagnostics,
+        LinkedInVacancyRecord,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        scrape_linkedin_jobs,
+    )
+
+    monkeypatch.setenv("LINKEDIN_DIRECT_DETAIL_FALLBACK", "true")
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "3")
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "2")
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/"
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html></html>"
+
+        def is_closed(self) -> bool:
+            return False
+
+    class FakeSession:
+        page = FakePage()
+        context = SimpleNamespace(
+            request=SimpleNamespace(get=lambda *_args, **_kwargs: None)
+        )
+
+        def page_is_alive(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    class FakeStore:
+        def load_browser_metadata(self):
+            return {
+                "browser": "chromium",
+                "executable_path": "",
+                "profile_path": "/private/browser-profile",
+            }
+
+        def resolve_profile_path(self, **_kwargs):
+            return Path("/private/browser-profile")
+
+        def record_runtime_failure(self, *_args, **_kwargs) -> None:
+            raise AssertionError("unexpected runtime failure")
+
+    recent = candidate.model_copy(
+        update={
+            "company_name": "Example AI",
+            "location": "Tokyo, Japan",
+            "posted_at_text": "2 hours ago",
+            "published_at": datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+            "freshness_confidence": "medium",
+            "is_within_24_hours": True,
+        }
+    )
+
+    with (
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.open_persistent_authenticated_context",
+            return_value=FakeSession(),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._wait_for_search_results_hydration",
+            return_value="results",
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.build_linkedin_search_queries",
+            return_value=[
+                (
+                    "Primary @ Japan",
+                    "https://www.linkedin.com/jobs/search/?keywords=AI",
+                ),
+                (
+                    "Fallback @ Japan",
+                    "https://www.linkedin.com/jobs/search/?keywords=ML",
+                ),
+            ],
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._parse_linkedin_jobs_html_with_diagnostics",
+            return_value=(
+                [candidate],
+                LinkedInParseDiagnostics(parseable_candidate_count=1),
+            ),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._safe_job_card_link",
+            return_value=None,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._enrich_job_detail",
+            return_value=recent,
+        ) as direct_detail,
+    ):
+        records, rejected, _timings, warnings, _queries = scrape_linkedin_jobs(
+            LinkedInJobsRequest(
+                query="AI jobs Japan",
+                locations=["Japan"],
+                max_results=5,
+                include_description=False,
+            ),
+            session_store=FakeStore(),  # type: ignore[arg-type]
+        )
+
+    assert [record.linkedin_job_id for record in records] == ["111"]
+    assert [item.reason for item in rejected] == ["duplicate_candidate_skipped_before_detail"]
+    assert direct_detail.call_count == 1
+    assert warnings.count("direct_detail_fallback_used:111") == 1
+    assert any("selector_drift/card_missing" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize(
+    ("hydration_state", "expected_direct_calls"),
+    [("timeout", 3), ("empty", 0), ("results", 0)],
+)
+def test_linkedin_standalone_fallback_is_plural_timeout_only_and_restores_search(
+    monkeypatch,
+    hydration_state,
+    expected_direct_calls,
+):
+    from features.web_scraping.domain.linkedin_models import LinkedInJobsRequest
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        scrape_linkedin_jobs,
+    )
+
+    monkeypatch.setenv("LINKEDIN_DIRECT_DETAIL_FALLBACK", "true")
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "3")
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "1")
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    restored_source_url = "https://www.linkedin.com/jobs/search?keywords=AI"
+    standalone_html = """
+    <main>
+      <a href="/jobs/view/ai-engineer-111/?trackingId=secret"
+         aria-label="AI Engineer"></a>
+      <a href="/jobs/view/222">Machine Learning Engineer</a>
+      <a href="/jobs/view/333">Data Scientist</a>
+    </main>
+    """
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/"
+
+        def __init__(self) -> None:
+            self.navigations: list[str] = []
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+            self.navigations.append(url)
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return standalone_html
+
+        def is_closed(self) -> bool:
+            return False
+
+    page = FakePage()
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.page = page
+
+        def page_is_alive(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    class FakeStore:
+        def load_browser_metadata(self):
+            return {
+                "browser": "chromium",
+                "executable_path": "",
+                "profile_path": "/private/browser-profile",
+            }
+
+        def resolve_profile_path(self, **_kwargs):
+            return Path("/private/browser-profile")
+
+        def record_runtime_failure(self, *_args, **_kwargs) -> None:
+            raise AssertionError("unexpected runtime failure")
+
+    def enrich_direct(target_page, record, **_kwargs):
+        target_page.goto(record.canonical_url)
+        description = (
+            ""
+            if record.linkedin_job_id == "111"
+            else f"Build AI systems for job {record.linkedin_job_id}."
+        )
+        return record.model_copy(
+            update={
+                "company_name": "Example AI",
+                "location": "Tokyo, Japan",
+                "workplace_type": "hybrid",
+                "description_full_text": description,
+                "posted_at_text": "2 hours ago",
+                "published_at": datetime(
+                    2026,
+                    7,
+                    29,
+                    10,
+                    0,
+                    tzinfo=timezone.utc,
+                ),
+                "freshness_confidence": "medium",
+                "is_within_24_hours": True,
+            }
+        )
+
+    hydration_results = (
+        ["timeout", "results", "results", "results"]
+        if hydration_state == "timeout"
+        else [hydration_state]
+    )
+    card_lookup = MagicMock(return_value=None)
+    with (
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.open_persistent_authenticated_context",
+            return_value=FakeSession(),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._wait_for_search_results_hydration",
+            side_effect=hydration_results,
+        ) as wait_hydration,
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.build_linkedin_search_queries",
+            return_value=[("Primary @ Japan", source_url)],
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._safe_job_card_link",
+            side_effect=card_lookup,
+        ) as safe_card_link,
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._enrich_job_detail",
+            side_effect=enrich_direct,
+        ) as direct_detail,
+    ):
+        records, _rejected, timings, warnings, _queries = scrape_linkedin_jobs(
+            LinkedInJobsRequest(
+                query="AI jobs Japan",
+                locations=["Japan"],
+                max_results=5,
+                include_description=True,
+            ),
+            session_store=FakeStore(),  # type: ignore[arg-type]
+        )
+
+    assert direct_detail.call_count == expected_direct_calls
+    safe_card_link.assert_not_called()
+    assert wait_hydration.call_count == (4 if hydration_state == "timeout" else 1)
+    if hydration_state == "timeout":
+        assert [record.linkedin_job_id for record in records] == ["222", "333"]
+        assert [item.reason for item in _rejected] == [
+            "missing_description_full_text"
+        ]
+        assert page.url == restored_source_url
+        assert page.navigations[-1] == restored_source_url
+        assert "https://www.linkedin.com/jobs/view/ai-engineer-111" in (
+            page.navigations
+        )
+        assert warnings.count("direct_detail_fallback_used:111") == 1
+        assert warnings.count("direct_detail_fallback_used:222") == 1
+        assert warnings.count("direct_detail_fallback_used:333") == 1
+        assert timings[0].diagnostics.candidate_count == 3
+        assert timings[0].diagnostics.parseable_candidate_count == 3
+        assert timings[0].diagnostics.discard_reasons == {
+            "standalone_link_fallback": 3
+        }
+    else:
+        assert records == []
+        assert page.navigations.count(source_url) == 1
+        assert not any(
+            warning.startswith("direct_detail_fallback_used:")
+            for warning in warnings
+        )
+        assert "standalone_link_fallback" not in (
+            timings[0].diagnostics.discard_reasons
+        )
+
+
+def test_linkedin_timeout_no_signal_static_probe_recovers_unique_candidates(
+    monkeypatch,
+):
+    from features.web_scraping.domain.linkedin_models import (
+        LinkedInJobsRequest,
+        LinkedInParseDiagnostics,
+        LinkedInVacancyRecord,
+    )
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        search_hydration_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics import (
+        static_probe_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        scrape_linkedin_jobs,
+    )
+
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "0")
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "1")
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/"
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<main></main>"
+
+        def is_closed(self) -> bool:
+            return False
+
+    class FakeSession:
+        page = FakePage()
+        context = SimpleNamespace(
+            request=SimpleNamespace(get=lambda *_args, **_kwargs: None)
+        )
+
+        def page_is_alive(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    class FakeStore:
+        def load_browser_metadata(self):
+            return {
+                "browser": "chromium",
+                "executable_path": "",
+                "profile_path": "/private/browser-profile",
+            }
+
+        def resolve_profile_path(self, **_kwargs):
+            return Path("/private/browser-profile")
+
+        def record_runtime_failure(self, *_args, **_kwargs) -> None:
+            raise AssertionError("unexpected runtime failure")
+
+    def complete_static_record(job_id: str, title: str) -> LinkedInVacancyRecord:
+        return LinkedInVacancyRecord(
+            linkedin_job_id=job_id,
+            title=title,
+            company_name="Example AI",
+            location="Seoul, South Korea",
+            workplace_type="hybrid",
+            posted_at_text="1 hour ago",
+            published_at=datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+            freshness_confidence="high",
+            is_within_24_hours=True,
+            canonical_url=f"https://www.linkedin.com/jobs/view/{job_id}",
+            source_url=source_url,
+            hard_skills=["Python"],
+            foreigner_acceptance="yes",
+            matched_terms=["ai"],
+        )
+
+    static_records = [
+        complete_static_record("111", "AI Engineer"),
+        complete_static_record("222", "Machine Learning Engineer"),
+        complete_static_record("333", "Data Scientist"),
+    ]
+
+    def wait_timeout_no_signals(_page, *, query="unknown", diagnostics=None):
+        assert diagnostics is not None
+        diagnostics.record(
+            query=query,
+            elapsed_ms=6500,
+            card_count=0,
+            href_count=0,
+            empty_state_visible=False,
+            auth_checkpoint_visible=False,
+            outcome="timeout",
+        )
+        return "timeout"
+
+    def static_probe(_session, **kwargs):
+        assert kwargs["source_url"] == source_url
+        assert kwargs["allow_standalone_fallback"] is True
+        return SimpleNamespace(
+            records=static_records,
+            diagnostics=LinkedInParseDiagnostics(
+                href_count=3,
+                candidate_count=3,
+                parseable_candidate_count=3,
+                discard_reasons={"standalone_link_fallback": 3},
+            ),
+            status_code=200,
+            category="ok",
+            detail="",
+        )
+
+    with (
+        search_hydration_diagnostics_context(),
+        static_probe_diagnostics_context() as static_diagnostics,
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.open_persistent_authenticated_context",
+            return_value=FakeSession(),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._wait_for_search_results_hydration",
+            side_effect=wait_timeout_no_signals,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.build_linkedin_search_queries",
+            return_value=[("Primary @ South Korea", source_url)],
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._probe_linkedin_search_with_authenticated_request",
+            side_effect=static_probe,
+        ) as probe,
+    ):
+        records, rejected, timings, warnings, _queries = scrape_linkedin_jobs(
+            LinkedInJobsRequest(
+                query="AI jobs South Korea",
+                locations=["South Korea"],
+                max_results=5,
+                include_description=False,
+            ),
+            session_store=FakeStore(),  # type: ignore[arg-type]
+        )
+
+    assert probe.call_count == 1
+    assert [record.linkedin_job_id for record in records] == ["111", "222", "333"]
+    assert rejected == []
+    assert timings[0].diagnostics.parseable_candidate_count == 3
+    assert "search_static_probe_attempt:South Korea" in warnings
+    assert any(
+        warning.startswith(
+            "search_static_probe_result:South Korea:status_200:ok:candidates_3"
+        )
+        for warning in warnings
+    )
+    assert [
+        (event.kind, event.outcome, event.candidate_count, event.accepted_count)
+        for event in static_diagnostics.events
+    ] == [("search_static_probe", "ok", 3, 3)]
+
+
+@pytest.mark.parametrize("hydration_state", ["empty", "results"])
+def test_linkedin_static_search_probe_is_timeout_no_signal_only(
+    monkeypatch,
+    hydration_state,
+):
+    from features.web_scraping.domain.linkedin_models import LinkedInJobsRequest
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        search_hydration_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics import (
+        static_probe_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        scrape_linkedin_jobs,
+    )
+
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "0")
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "1")
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/"
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<main></main>"
+
+        def is_closed(self) -> bool:
+            return False
+
+    class FakeSession:
+        page = FakePage()
+
+        def page_is_alive(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    class FakeStore:
+        def load_browser_metadata(self):
+            return {
+                "browser": "chromium",
+                "executable_path": "",
+                "profile_path": "/private/browser-profile",
+            }
+
+        def resolve_profile_path(self, **_kwargs):
+            return Path("/private/browser-profile")
+
+        def record_runtime_failure(self, *_args, **_kwargs) -> None:
+            raise AssertionError("unexpected runtime failure")
+
+    def wait_terminal(_page, *, query="unknown", diagnostics=None):
+        assert diagnostics is not None
+        diagnostics.record(
+            query=query,
+            elapsed_ms=250,
+            card_count=1 if hydration_state == "results" else 0,
+            href_count=1 if hydration_state == "results" else 0,
+            empty_state_visible=hydration_state == "empty",
+            auth_checkpoint_visible=False,
+            outcome=hydration_state,
+        )
+        return hydration_state
+
+    with (
+        search_hydration_diagnostics_context(),
+        static_probe_diagnostics_context() as static_diagnostics,
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.open_persistent_authenticated_context",
+            return_value=FakeSession(),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._wait_for_search_results_hydration",
+            side_effect=wait_terminal,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.build_linkedin_search_queries",
+            return_value=[("Primary @ South Korea", source_url)],
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._probe_linkedin_search_with_authenticated_request",
+        ) as probe,
+    ):
+        records, _rejected, _timings, _warnings, _queries = scrape_linkedin_jobs(
+            LinkedInJobsRequest(
+                query="AI jobs South Korea",
+                locations=["South Korea"],
+                max_results=5,
+                include_description=False,
+            ),
+            session_store=FakeStore(),  # type: ignore[arg-type]
+        )
+
+    assert records == []
+    probe.assert_not_called()
+    assert static_diagnostics.events == []
+
+
+def test_linkedin_static_probe_candidate_uses_static_detail_before_direct_detail(
+    monkeypatch,
+):
+    from features.web_scraping.domain.linkedin_models import (
+        LinkedInJobsRequest,
+        LinkedInParseDiagnostics,
+        LinkedInVacancyRecord,
+    )
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        search_hydration_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics import (
+        static_probe_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        scrape_linkedin_jobs,
+    )
+
+    monkeypatch.setenv("LINKEDIN_DIRECT_DETAIL_FALLBACK", "true")
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "3")
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "1")
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url=source_url,
+        matched_terms=["ai"],
+    )
+    enriched = candidate.model_copy(
+        update={
+            "company_name": "Example AI",
+            "location": "Seoul, South Korea",
+            "workplace_type": "hybrid",
+            "description_full_text": "Build production AI systems in Korea.",
+            "description_excerpt": "Build production AI systems in Korea.",
+            "posted_at_text": "2026-07-29T10:00:00Z",
+            "published_at": datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+            "freshness_confidence": "high",
+            "is_within_24_hours": True,
+            "hard_skills": ["Python"],
+            "foreigner_acceptance": "yes",
+        }
+    )
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/"
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<main></main>"
+
+        def is_closed(self) -> bool:
+            return False
+
+    class FakeSession:
+        page = FakePage()
+        context = SimpleNamespace(
+            request=SimpleNamespace(get=lambda *_args, **_kwargs: None)
+        )
+
+        def page_is_alive(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    class FakeStore:
+        def load_browser_metadata(self):
+            return {
+                "browser": "chromium",
+                "executable_path": "",
+                "profile_path": "/private/browser-profile",
+            }
+
+        def resolve_profile_path(self, **_kwargs):
+            return Path("/private/browser-profile")
+
+        def record_runtime_failure(self, *_args, **_kwargs) -> None:
+            raise AssertionError("unexpected runtime failure")
+
+    def wait_hydration(_page, *, query="unknown", diagnostics=None):
+        assert diagnostics is not None
+        if query.startswith("restore:"):
+            diagnostics.record(
+                query=query,
+                elapsed_ms=250,
+                card_count=1,
+                href_count=1,
+                empty_state_visible=False,
+                auth_checkpoint_visible=False,
+                outcome="results",
+            )
+            return "results"
+        diagnostics.record(
+            query=query,
+            elapsed_ms=6500,
+            card_count=0,
+            href_count=0,
+            empty_state_visible=False,
+            auth_checkpoint_visible=False,
+            outcome="timeout",
+        )
+        return "timeout"
+
+    search_probe = SimpleNamespace(
+        records=[candidate],
+        diagnostics=LinkedInParseDiagnostics(
+            href_count=1,
+            candidate_count=1,
+            parseable_candidate_count=1,
+            discard_reasons={"standalone_link_fallback": 1},
+        ),
+        status_code=200,
+        category="ok",
+        detail="",
+    )
+    detail_probe = SimpleNamespace(
+        record=enriched,
+        status_code=200,
+        category="ok",
+        detail="",
+    )
+
+    with (
+        search_hydration_diagnostics_context(),
+        static_probe_diagnostics_context() as static_diagnostics,
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.open_persistent_authenticated_context",
+            return_value=FakeSession(),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._wait_for_search_results_hydration",
+            side_effect=wait_hydration,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.build_linkedin_search_queries",
+            return_value=[("Primary @ South Korea", source_url)],
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._probe_linkedin_search_with_authenticated_request",
+            return_value=search_probe,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._enrich_job_detail",
+            return_value=candidate,
+        ) as direct_detail,
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._probe_linkedin_detail_with_authenticated_request",
+            return_value=detail_probe,
+        ) as static_detail,
+    ):
+        records, rejected, _timings, warnings, _queries = scrape_linkedin_jobs(
+            LinkedInJobsRequest(
+                query="AI jobs South Korea",
+                locations=["South Korea"],
+                max_results=5,
+                include_description=True,
+            ),
+            session_store=FakeStore(),  # type: ignore[arg-type]
+        )
+
+    assert [record.linkedin_job_id for record in records] == ["111"]
+    assert records[0].description_full_text == "Build production AI systems in Korea."
+    assert rejected == []
+    assert direct_detail.call_count == 0
+    assert static_detail.call_count == 1
+    assert "detail_static_probe_attempt:111" in warnings
+    assert "detail_static_probe_result:111:status_200:ok" in warnings
+    assert [
+        (event.kind, event.outcome, event.candidate_count, event.accepted_count)
+        for event in static_diagnostics.events
+    ] == [
+        ("search_static_probe", "ok", 1, 1),
+        ("detail_static_probe", "ok", 1, 1),
+    ]
+
 
 
 def test_linkedin_discovery_enriches_by_source_before_final_round_robin(
@@ -3012,7 +5683,7 @@ def test_linkedin_discovery_enriches_by_source_before_final_round_robin(
                 "company_name": f"Company {record.linkedin_job_id}",
                 "location": (
                     "Seoul, South Korea"
-                    if record.linkedin_job_id == "101"
+                    if record.linkedin_job_id in {"101", "102"}
                     else "Tokyo, Japan"
                 ),
                 "workplace_type": "hybrid",
@@ -3079,6 +5750,65 @@ def test_linkedin_discovery_enriches_by_source_before_final_round_robin(
     ]
     assert panel_detail.call_count == 3
 
+
+
+def test_linkedin_rejected_records_dedupe_without_job_ids():
+    from features.web_scraping.domain.linkedin_models import LinkedInRejectedRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _dedupe_rejected_records,
+    )
+
+    deduped, warnings = _dedupe_rejected_records(
+        [
+            LinkedInRejectedRecord(
+                title="Data Scientist (Remote)",
+                reason="location_scope_mismatch",
+            ),
+            LinkedInRejectedRecord(
+                title="Data Scientist   (Remote)",
+                reason="stale_detail_panel",
+            ),
+            LinkedInRejectedRecord(
+                title="ML Engineer",
+                reason="low_topic_relevance",
+            ),
+        ]
+    )
+
+    assert [item.title for item in deduped] == [
+        "Data Scientist (Remote)",
+        "ML Engineer",
+    ]
+    assert warnings == [
+        "rejected_duplicate_dropped:Data Scientist   (Remote):stale_detail_panel"
+    ]
+
+
+def test_linkedin_country_scope_filter_handles_regional_remote_spillover():
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _visible_location_matches_requested_scope,
+    )
+
+    assert not _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
+        "South Korea",
+        "Build AI systems remotely for customers across APAC.",
+    )
+    assert _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
+        "South Korea",
+        "Principal Forward Deployed AI Engineer, South Korea. Based in Seoul.",
+    )
+    assert not _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
+        "Japan",
+        "Build AI systems remotely for customers across APAC.",
+    )
+    assert _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
+        "Japan",
+        "Generative AI role supporting Tokyo and Japan customers.",
+    )
 
 
 def test_linkedin_stale_detail_panel_retries_same_candidate_once(monkeypatch):
@@ -3496,7 +6226,7 @@ def test_linkedin_scraper_detail_budget_stops_queries_and_classifies_dates(
         scrape_linkedin_jobs,
     )
 
-    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "3")
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "6")
     monkeypatch.setenv("LINKEDIN_DIRECT_DETAIL_FALLBACK", "true")
     monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "2")
 
@@ -3605,12 +6335,13 @@ def test_linkedin_scraper_detail_budget_stops_queries_and_classifies_dates(
 
     assert [record.linkedin_job_id for record in records] == ["111"]
     assert [item.reason for item in rejected] == [
-        "duplicate",
-        "duplicate",
-        "duplicate",
+        "duplicate_candidate_skipped_before_detail",
         "outside_24_hours",
         "unverified_posted_date",
     ]
+    assert any(
+        warning.startswith("rejected_duplicate_dropped:") for warning in warnings
+    )
     assert len(queries) == 2
     assert len(timings) == 2
     assert parse_html.call_count == 2
@@ -4207,6 +6938,443 @@ def test_linkedin_query_retry_does_not_exceed_global_hard_cap(monkeypatch):
         "http_response_code_failure"
     ) in warnings
     assert "token=secret" not in json.dumps(warnings)
+
+
+def test_linkedin_static_detail_probe_accepts_complete_jobposting_jsonld():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _probe_linkedin_detail_with_authenticated_request,
+    )
+
+    class FakeResponse:
+        status = 200
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def __init__(self):
+            self.disposed = False
+
+        def text(self):
+            return """
+            <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "JobPosting",
+              "title": "AI Engineer",
+              "datePosted": "2026-07-29T10:00:00Z",
+              "description": "<p>Build production AI systems with Python and LLMs.</p>",
+              "hiringOrganization": {"name": "Example AI"},
+              "jobLocation": {
+                "address": {
+                  "addressLocality": "Seoul",
+                  "addressCountry": "South Korea"
+                }
+              },
+              "jobLocationType": "HYBRID"
+            }
+            </script>
+            """
+
+        def dispose(self):
+            self.disposed = True
+
+    response = FakeResponse()
+    session = SimpleNamespace(
+        context=SimpleNamespace(
+            request=SimpleNamespace(get=lambda *_args, **_kwargs: response)
+        )
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+
+    result = _probe_linkedin_detail_with_authenticated_request(
+        session,
+        record,
+        include_description=True,
+        now=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.category == "ok"
+    assert result.detail == ""
+    assert result.record.company_name == "Example AI"
+    assert result.record.location == "Seoul, South Korea"
+    assert result.record.description_full_text == (
+        "Build production AI systems with Python and LLMs."
+    )
+    assert result.record.published_at == datetime(
+        2026,
+        7,
+        29,
+        10,
+        0,
+        tzinfo=timezone.utc,
+    )
+    assert result.record.is_within_24_hours is True
+    assert response.disposed is True
+
+
+def test_linkedin_static_detail_probe_prefers_jsonld_description_without_guest():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _probe_linkedin_detail_with_authenticated_request,
+    )
+
+    class FakeResponse:
+        status = 200
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def text(self):
+            payload = json.dumps(
+                {
+                    "@context": "https://schema.org",
+                    "@type": "JobPosting",
+                    "title": "AI Engineer",
+                    "datePosted": "2026-07-29T10:00:00Z",
+                    "description": (
+                        "<p>Structured JSON-LD body for production AI work.</p>"
+                    ),
+                    "hiringOrganization": {"name": "Example AI"},
+                    "jobLocation": {
+                        "address": {
+                            "addressLocality": "Seoul",
+                            "addressCountry": "South Korea",
+                        }
+                    },
+                }
+            )
+            return (
+                f'<script type="application/ld+json">{payload}</script>'
+                '<div class="show-more-less-html__markup">'
+                "Container body should not win."
+                "</div>"
+            )
+
+        def dispose(self):
+            return None
+
+    calls: list[str] = []
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        return FakeResponse()
+
+    session = SimpleNamespace(
+        context=SimpleNamespace(request=SimpleNamespace(get=fake_get))
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+
+    result = _probe_linkedin_detail_with_authenticated_request(
+        session,
+        record,
+        include_description=True,
+        now=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.category == "ok"
+    assert result.body_source == "jsonld_description"
+    assert result.record.description_full_text == (
+        "Structured JSON-LD body for production AI work."
+    )
+    assert calls == ["https://www.linkedin.com/jobs/view/111"]
+
+
+def test_linkedin_static_detail_probe_recovers_container_without_jsonld():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _probe_linkedin_detail_with_authenticated_request,
+    )
+
+    class FakeResponse:
+        status = 200
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def text(self):
+            return """
+            <main>
+              <h1 class="top-card-layout__title">AI Engineer</h1>
+              <a class="topcard__org-name-link">Example AI</a>
+              <div class="show-more-less-html__markup">
+                <p>Build production AI systems.</p>
+                <ul><li>Own LLM services.</li></ul>
+              </div>
+            </main>
+            """
+
+        def dispose(self):
+            return None
+
+    session = SimpleNamespace(
+        context=SimpleNamespace(
+            request=SimpleNamespace(get=lambda *_args, **_kwargs: FakeResponse())
+        )
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        company_name="Example AI",
+        location="Seoul, South Korea",
+        posted_at_text="2026-07-29T10:00:00Z",
+        published_at=datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+        freshness_confidence="high",
+        is_within_24_hours=True,
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+
+    result = _probe_linkedin_detail_with_authenticated_request(
+        session,
+        record,
+        include_description=True,
+        now=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.category == "ok"
+    assert result.body_source == "static_html_container"
+    assert "Build production AI systems." in result.record.description_full_text
+    assert "Own LLM services." in result.record.description_full_text
+
+
+def test_linkedin_static_detail_probe_uses_guest_body_with_absent_company():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _probe_linkedin_detail_with_authenticated_request,
+    )
+
+    class FakeResponse:
+        def __init__(self, text: str, url: str):
+            self.status = 200
+            self.url = url
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def dispose(self):
+            return None
+
+    same_url_payload = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "JobPosting",
+            "title": "AI Engineer",
+            "datePosted": "2026-07-29T10:00:00Z",
+            "description": "",
+            "hiringOrganization": {"name": "Example AI"},
+            "jobLocation": {
+                "address": {
+                    "addressLocality": "Seoul",
+                    "addressCountry": "South Korea",
+                }
+            },
+        }
+    )
+    guest_html = """
+    <main>
+      <h1 class="top-card-layout__title">AI Engineer</h1>
+      <div class="show-more-less-html__markup">
+        <p>Recovered guest body for AI platform delivery.</p>
+      </div>
+    </main>
+    """
+    calls: list[str] = []
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        if "jobs-guest" in url:
+            return FakeResponse(guest_html, url)
+        return FakeResponse(
+            f'<script type="application/ld+json">{same_url_payload}</script>',
+            "https://www.linkedin.com/jobs/view/111",
+        )
+
+    session = SimpleNamespace(
+        context=SimpleNamespace(request=SimpleNamespace(get=fake_get)),
+        page=SimpleNamespace(wait_for_timeout=lambda *_args: None),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        company_name="Example AI",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+
+    result = _probe_linkedin_detail_with_authenticated_request(
+        session,
+        record,
+        include_description=True,
+        now=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.category == "ok"
+    assert result.body_source == "guest_html_container"
+    assert result.guest_status_code == 200
+    assert result.identity_consistent is True
+    assert result.record.description_full_text == (
+        "Recovered guest body for AI platform delivery."
+    )
+    assert calls == [
+        "https://www.linkedin.com/jobs/view/111",
+        "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/111",
+    ]
+
+
+def test_linkedin_static_detail_probe_rejects_guest_identity_contradiction():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _probe_linkedin_detail_with_authenticated_request,
+    )
+
+    class FakeResponse:
+        def __init__(self, text: str, url: str):
+            self.status = 200
+            self.url = url
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def dispose(self):
+            return None
+
+    same_url_payload = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "JobPosting",
+            "title": "AI Engineer",
+            "datePosted": "2026-07-29T10:00:00Z",
+            "description": "",
+            "hiringOrganization": {"name": "Example AI"},
+        }
+    )
+    guest_html = """
+    <main>
+      <h1 class="top-card-layout__title">Backend Engineer</h1>
+      <a class="topcard__org-name-link">Wrong Corp</a>
+      <div class="show-more-less-html__markup">
+        <p>Wrong job body that must not be attached.</p>
+      </div>
+    </main>
+    """
+
+    def fake_get(url, **_kwargs):
+        if "jobs-guest" in url:
+            return FakeResponse(guest_html, url)
+        return FakeResponse(
+            f'<script type="application/ld+json">{same_url_payload}</script>',
+            "https://www.linkedin.com/jobs/view/111",
+        )
+
+    session = SimpleNamespace(
+        context=SimpleNamespace(request=SimpleNamespace(get=fake_get)),
+        page=SimpleNamespace(wait_for_timeout=lambda *_args: None),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        company_name="Example AI",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+
+    result = _probe_linkedin_detail_with_authenticated_request(
+        session,
+        record,
+        include_description=True,
+        now=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.category == "detail_incomplete"
+    assert result.detail == "missing_description"
+    assert result.identity_consistent is False
+    assert result.record.description_full_text == ""
+
+
+@pytest.mark.parametrize(
+    ("description", "date_posted", "expected_detail"),
+    [
+        ("", "2026-07-29T10:00:00Z", "missing_description"),
+        ("About the job", "2026-07-29T10:00:00Z", "incomplete_description"),
+        ("Build AI systems.", "", "missing_date"),
+        ("Build AI systems.", "2026-07-27T10:00:00Z", "outside_24_hours"),
+    ],
+)
+def test_linkedin_static_detail_probe_rejects_incomplete_jobposting_jsonld(
+    description,
+    date_posted,
+    expected_detail,
+):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        _probe_linkedin_detail_with_authenticated_request,
+    )
+
+    class FakeResponse:
+        status = 200
+        url = "https://www.linkedin.com/jobs/view/111"
+
+        def __init__(self):
+            self.disposed = False
+
+        def text(self):
+            payload = json.dumps(
+                {
+                    "@context": "https://schema.org",
+                    "@type": "JobPosting",
+                    "title": "AI Engineer",
+                    "datePosted": date_posted,
+                    "description": description,
+                    "hiringOrganization": {"name": "Example AI"},
+                    "jobLocation": {
+                        "address": {
+                            "addressLocality": "Seoul",
+                            "addressCountry": "South Korea",
+                        }
+                    },
+                }
+            )
+            return f'<script type="application/ld+json">{payload}</script>'
+
+        def dispose(self):
+            self.disposed = True
+
+    response = FakeResponse()
+    session = SimpleNamespace(
+        context=SimpleNamespace(
+            request=SimpleNamespace(get=lambda *_args, **_kwargs: response)
+        )
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        matched_terms=["ai"],
+    )
+
+    result = _probe_linkedin_detail_with_authenticated_request(
+        session,
+        record,
+        include_description=True,
+        now=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.category == "detail_incomplete"
+    assert result.detail == expected_detail
+    assert response.disposed is True
 
 
 def test_linkedin_failed_goto_probe_recovers_candidates_once(monkeypatch):
@@ -5036,8 +8204,8 @@ def test_linkedin_error_labels_are_sanitized_and_budgets_are_hard_bounded(
     with pytest.raises(ValueError, match="entre 0 y 30"):
         configured_linkedin_detail_budget()
 
-    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "3")
-    with pytest.raises(ValueError, match="entre 1 y 2"):
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "4")
+    with pytest.raises(ValueError, match="entre 1 y 3"):
         configured_linkedin_max_queries_per_location()
 
     monkeypatch.setenv("LINKEDIN_QUERY_INTERVAL_MS", "1999")
@@ -5574,9 +8742,12 @@ def test_linkedin_audit_writes_validated_json_and_schema(tmp_path, monkeypatch):
     )
     from features.web_scraping.domain.linkedin_models import (
         LinkedInQueryTiming,
-        LinkedInRejectedRecord,
-        LinkedInVacancyRecord,
-    )
+            LinkedInRejectedRecord,
+            LinkedInSearchHydrationDiagnostic,
+            LinkedInStaticProbeDiagnostic,
+            LinkedInVacancyRecord,
+            LinkedInVisualDiagnosticArtifact,
+        )
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -5633,11 +8804,51 @@ def test_linkedin_audit_writes_validated_json_and_schema(tmp_path, monkeypatch):
             ),
         ],
         warnings=[],
+        search_hydration_diagnostics=[
+            LinkedInSearchHydrationDiagnostic(
+                query="AI Engineer @ Japan",
+                sequence=1,
+                elapsed_ms=0,
+                card_count=0,
+                href_count=0,
+                empty_state_visible=False,
+                auth_checkpoint_visible=False,
+                outcome="polling",
+            ),
+            LinkedInSearchHydrationDiagnostic(
+                query="AI Engineer @ Japan",
+                sequence=2,
+                elapsed_ms=250,
+                card_count=3,
+                href_count=2,
+                empty_state_visible=False,
+                auth_checkpoint_visible=False,
+                outcome="results",
+            ),
+        ],
+        static_probe_diagnostics=[
+            LinkedInStaticProbeDiagnostic(
+                kind="search_static_probe",
+                query="AI Engineer @ Japan",
+                sequence=1,
+                status_code=200,
+                candidate_count=3,
+                accepted_count=2,
+                outcome="ok",
+            )
+        ],
+        visual_diagnostics=[
+            LinkedInVisualDiagnosticArtifact(
+                query="AI Engineer @ Japan",
+                manifest_path="visual-diagnostics/manifest.json",
+                sensitive_local_artifact=True,
+            )
+        ],
     )
     snapshot = load_linkedin_audit_snapshot(paths.json_path)
 
     assert snapshot.meta.session_id == "sess-1"
-    assert snapshot.meta.schema_version == "1.3.0"
+    assert snapshot.meta.schema_version == "1.7.0"
     assert snapshot.meta.result_count == 1
     assert snapshot.meta.rejected_count == 2
     assert [item.reason for item in snapshot.rejected] == [
@@ -5662,12 +8873,33 @@ def test_linkedin_audit_writes_validated_json_and_schema(tmp_path, monkeypatch):
     assert snapshot.timings[0].diagnostics.discard_reasons == {
         "duplicate_wrapper": 8
     }
+    assert [event.outcome for event in snapshot.search_hydration_diagnostics] == [
+        "polling",
+        "results",
+    ]
+    assert snapshot.search_hydration_diagnostics[1].card_count == 3
+    assert snapshot.search_hydration_diagnostics[1].href_count == 2
+    assert snapshot.static_probe_diagnostics[0].kind == "search_static_probe"
+    assert snapshot.static_probe_diagnostics[0].candidate_count == 3
+    assert snapshot.static_probe_diagnostics[0].accepted_count == 2
+    assert snapshot.visual_diagnostics[0].manifest_path == (
+        "visual-diagnostics/manifest.json"
+    )
+    assert snapshot.visual_diagnostics[0].sensitive_local_artifact is True
     assert paths.schema_path.exists()
     serialized = paths.json_path.read_text(encoding="utf-8")
     assert "storage_state" not in serialized
     assert "cookies" not in serialized
     assert "<html" not in serialized.lower()
     summary = paths.summary_path.read_text(encoding="utf-8")
+    assert "Search hydration diagnostics" in summary
+    assert "Static probe diagnostics" in summary
+    assert "Visual diagnostics" in summary
+    assert "visual-diagnostics/manifest.json" in summary
+    assert "**search_static_probe** `AI Engineer @ Japan` #1: ok" in summary
+    assert "**AI Engineer @ Japan** #2: results at 250ms" in summary
+    assert "cards=3" in summary
+    assert "hrefs=2" in summary
     assert "Selector counts" in summary
     assert "Hard skills: Python, PyTorch" in summary
     assert "Soft skills: Communication" in summary
@@ -5685,6 +8917,63 @@ def test_linkedin_audit_writes_validated_json_and_schema(tmp_path, monkeypatch):
         assert field_name in vacancy_schema["properties"]
     assert vacancy_schema["properties"]["candidate_expectations"]["maxItems"] == 6
     assert vacancy_schema["properties"]["responsibilities"]["maxItems"] == 6
+
+
+def test_linkedin_service_persists_hydration_diagnostics_on_blocked_exception(
+    monkeypatch,
+    tmp_path,
+):
+    from features.web_scraping.application import linkedin_service
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        get_active_search_hydration_diagnostics,
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_scrape(_request):
+        collector = get_active_search_hydration_diagnostics()
+        assert collector is not None
+        collector.record(
+            query="AI/ML/Data/GenAI @ South Korea",
+            elapsed_ms=100,
+            card_count=0,
+            href_count=1,
+            empty_state_visible=False,
+            auth_checkpoint_visible=True,
+            outcome="auth_checkpoint",
+        )
+        raise linkedin_service.LinkedInBlockedError("checkpoint")
+
+    def fake_persist(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            job_uid="job-1",
+            json_path=tmp_path / "audit.json",
+            schema_path=tmp_path / "schema.json",
+            summary_path=tmp_path / "summary.md",
+        )
+
+    monkeypatch.delenv("LINKEDIN_AUTO_BOOTSTRAP_ON_AUTH_FAILURE", raising=False)
+    monkeypatch.setattr(linkedin_service, "scrape_linkedin_jobs", fake_scrape)
+    monkeypatch.setattr(
+        linkedin_service,
+        "persist_linkedin_audit_snapshot",
+        fake_persist,
+    )
+
+    result = linkedin_service.run_linkedin_jobs_vertical(
+        "Buscá vacantes LinkedIn de AI publicadas hoy solo en Corea del Sur"
+    )
+
+    assert result.status == "blocked"
+    assert result.records == []
+    assert any(warning.startswith("blocked:") for warning in result.warnings)
+    events = captured["search_hydration_diagnostics"]
+    assert len(events) == 1
+    assert events[0].query == "AI/ML/Data/GenAI @ South Korea"
+    assert events[0].outcome == "auth_checkpoint"
+    assert events[0].href_count == 1
+    assert events[0].auth_checkpoint_visible is True
 
 
 @pytest.mark.asyncio
@@ -6004,3 +9293,493 @@ MS or PhD degree in AI computation or system optimization with a strong computat
     assert "4+ years hands-on data science experience." in requirements
     assert any("3+ years of relevant work" in item for item in requirements)
     assert not any("Annual salary" in item for item in requirements)
+
+
+def _run_linkedin_static_detail_validation_case(
+    monkeypatch,
+    *,
+    static_record_update: dict,
+    static_detail: str,
+    static_body_source: str = "guest_html_container",
+    direct_detail_fallback: bool = False,
+    direct_record_update: dict | None = None,
+):
+    from features.web_scraping.domain.linkedin_models import (
+        LinkedInJobsRequest,
+        LinkedInParseDiagnostics,
+        LinkedInVacancyRecord,
+    )
+    from features.web_scraping.infrastructure.linkedin_detail_diagnostics import (
+        detail_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        search_hydration_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics import (
+        static_probe_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import scrape_linkedin_jobs
+
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "3")
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "1")
+    monkeypatch.setenv(
+        "LINKEDIN_DIRECT_DETAIL_FALLBACK",
+        "true" if direct_detail_fallback else "false",
+    )
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="4452375291",
+        title="AI Engineer",
+        company_name="Example AI",
+        location="Seoul, South Korea",
+        workplace_type="hybrid",
+        canonical_url="https://www.linkedin.com/jobs/view/4452375291",
+        source_url=source_url,
+        matched_terms=["ai"],
+    )
+    static_record = candidate.model_copy(update=static_record_update)
+    direct_record = candidate.model_copy(update=direct_record_update or {})
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/"
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<main></main>"
+
+        def is_closed(self) -> bool:
+            return False
+
+    class FakeSession:
+        page = FakePage()
+        context = SimpleNamespace(
+            request=SimpleNamespace(get=lambda *_args, **_kwargs: None)
+        )
+
+        def page_is_alive(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    class FakeStore:
+        def load_browser_metadata(self):
+            return {
+                "browser": "chromium",
+                "executable_path": "",
+                "profile_path": "/private/browser-profile",
+            }
+
+        def resolve_profile_path(self, **_kwargs):
+            return Path("/private/browser-profile")
+
+        def record_runtime_failure(self, *_args, **_kwargs) -> None:
+            raise AssertionError("unexpected runtime failure")
+
+    def wait_hydration(_page, *, query="unknown", diagnostics=None):
+        assert diagnostics is not None
+        outcome = "results" if query.startswith("restore:") else "timeout"
+        diagnostics.record(
+            query=query,
+            elapsed_ms=250,
+            card_count=0 if outcome == "timeout" else 1,
+            href_count=0 if outcome == "timeout" else 1,
+            empty_state_visible=False,
+            auth_checkpoint_visible=False,
+            outcome=outcome,
+        )
+        return outcome
+
+    search_probe = SimpleNamespace(
+        records=[candidate],
+        diagnostics=LinkedInParseDiagnostics(
+            href_count=1,
+            candidate_count=1,
+            parseable_candidate_count=1,
+            discard_reasons={"standalone_link_fallback": 1},
+        ),
+        status_code=200,
+        category="ok",
+        detail="",
+    )
+    detail_probe = SimpleNamespace(
+        record=static_record,
+        status_code=200,
+        category="ok" if static_detail == "" else "detail_incomplete",
+        detail=static_detail,
+        body_source=static_body_source,
+        description_length=len(static_record.description_full_text or ""),
+        guest_status_code=200 if static_body_source.startswith("guest_") else 0,
+        guest_retry_count=1 if static_body_source.startswith("guest_") else 0,
+        identity_consistent=True,
+    )
+
+    with (
+        search_hydration_diagnostics_context(),
+        static_probe_diagnostics_context() as static_diagnostics,
+        detail_diagnostics_context() as detail_diagnostics,
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.open_persistent_authenticated_context",
+            return_value=FakeSession(),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._wait_for_search_results_hydration",
+            side_effect=wait_hydration,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper.build_linkedin_search_queries",
+            return_value=[("Primary @ South Korea", source_url)],
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._parse_linkedin_jobs_html_with_diagnostics",
+            return_value=([], LinkedInParseDiagnostics()),
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._probe_linkedin_search_with_authenticated_request",
+            return_value=search_probe,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._safe_job_card_link",
+            return_value=None,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._probe_linkedin_detail_with_authenticated_request",
+            return_value=detail_probe,
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._enrich_job_detail",
+            return_value=direct_record,
+        ) as direct_detail,
+    ):
+        records, rejected, _timings, warnings, _queries = scrape_linkedin_jobs(
+            LinkedInJobsRequest(
+                query="AI jobs South Korea",
+                locations=["South Korea"],
+                max_results=5,
+                include_description=True,
+            ),
+            session_store=FakeStore(),  # type: ignore[arg-type]
+        )
+
+    return SimpleNamespace(
+        records=records,
+        rejected=rejected,
+        warnings=warnings,
+        direct_detail=direct_detail,
+        static_diagnostics=static_diagnostics,
+        detail_diagnostics=detail_diagnostics,
+    )
+
+
+def test_linkedin_static_guest_body_missing_date_rejects_unverified_date(monkeypatch):
+    result = _run_linkedin_static_detail_validation_case(
+        monkeypatch,
+        static_record_update={
+            "description_full_text": "Recovered guest body for AI platform delivery.",
+            "description_excerpt": "Recovered guest body for AI platform delivery.",
+        },
+        static_detail="missing_date",
+    )
+
+    assert result.records == []
+    assert [item.reason for item in result.rejected] == ["unverified_posted_date"]
+    assert "missing_description_full_text" not in {
+        item.reason for item in result.rejected
+    }
+
+
+def test_linkedin_static_guest_body_survives_later_direct_incomplete(monkeypatch):
+    result = _run_linkedin_static_detail_validation_case(
+        monkeypatch,
+        static_record_update={
+            "description_full_text": "Recovered guest body for AI platform delivery.",
+            "description_excerpt": "Recovered guest body for AI platform delivery.",
+        },
+        static_detail="missing_date",
+        direct_detail_fallback=True,
+        direct_record_update={"description_full_text": "", "description_excerpt": ""},
+    )
+
+    assert result.direct_detail.call_count == 1
+    assert [item.reason for item in result.rejected] == ["unverified_posted_date"]
+    validation_events = [
+        event
+        for event in result.detail_diagnostics.events
+        if event.phase == "validation"
+    ]
+    assert validation_events[-1].description_ready is True
+    assert validation_events[-1].rejection == "missing_date"
+
+
+def test_linkedin_static_guest_body_verified_recent_korea_is_accepted(monkeypatch):
+    result = _run_linkedin_static_detail_validation_case(
+        monkeypatch,
+        static_record_update={
+            "description_full_text": "Build production AI systems for Korean customers.",
+            "description_excerpt": "Build production AI systems for Korean customers.",
+            "posted_at_text": "2026-07-29T10:00:00Z",
+            "published_at": datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+            "freshness_confidence": "high",
+            "is_within_24_hours": True,
+            "hard_skills": ["Python"],
+            "foreigner_acceptance": "yes",
+        },
+        static_detail="",
+    )
+
+    assert [record.linkedin_job_id for record in result.records] == ["4452375291"]
+    assert result.rejected == []
+
+
+def test_linkedin_static_detail_without_plausible_body_rejects_missing_description(
+    monkeypatch,
+):
+    result = _run_linkedin_static_detail_validation_case(
+        monkeypatch,
+        static_record_update={
+            "description_full_text": "",
+            "posted_at_text": "2026-07-29T10:00:00Z",
+            "published_at": datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+            "freshness_confidence": "high",
+            "is_within_24_hours": True,
+        },
+        static_detail="missing_description",
+        static_body_source="",
+    )
+
+    assert result.records == []
+    assert [item.reason for item in result.rejected] == [
+        "missing_description_full_text"
+    ]
+
+
+def test_linkedin_static_guest_body_old_date_rejects_outside_24_hours(monkeypatch):
+    result = _run_linkedin_static_detail_validation_case(
+        monkeypatch,
+        static_record_update={
+            "description_full_text": "Build production AI systems for Korean customers.",
+            "description_excerpt": "Build production AI systems for Korean customers.",
+            "posted_at_text": "2026-07-27T10:00:00Z",
+            "published_at": datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc),
+            "freshness_confidence": "high",
+            "is_within_24_hours": False,
+        },
+        static_detail="outside_24_hours",
+    )
+
+    assert result.records == []
+    assert [item.reason for item in result.rejected] == ["outside_24_hours"]
+
+
+def test_linkedin_audit_regression_guest_body_missing_date_final_rejection(
+    monkeypatch,
+):
+    result = _run_linkedin_static_detail_validation_case(
+        monkeypatch,
+        static_record_update={
+            "description_full_text": "Recovered guest body for AI platform delivery.",
+            "description_excerpt": "Recovered guest body for AI platform delivery.",
+        },
+        static_detail="missing_date",
+        static_body_source="guest_html_container",
+    )
+
+    detail_static_events = [
+        event
+        for event in result.static_diagnostics.events
+        if event.kind == "detail_static_probe"
+    ]
+    assert detail_static_events[-1].outcome == "missing_date"
+    assert detail_static_events[-1].body_source == "guest_html_container"
+    assert detail_static_events[-1].description_length > 0
+    assert [item.reason for item in result.rejected] == ["unverified_posted_date"]
+    assert [
+        event.rejection
+        for event in result.detail_diagnostics.events
+        if event.phase == "validation"
+    ] == ["missing_date"]
+
+
+
+def test_linkedin_parser_accepts_provisional_job_id_without_title():
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        _parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+    html = """
+    <ul class="jobs-search-results-list">
+      <li role="listitem" data-job-id="123">
+        <a href="/jobs/view/123" aria-label=""></a>
+      </li>
+    </ul>
+    """
+
+    records, diagnostics = _parse_linkedin_jobs_html_with_diagnostics(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+
+    assert [record.linkedin_job_id for record in records] == ["123"]
+    assert records[0].title == ""
+    assert records[0].candidate_metadata_incomplete is True
+    assert diagnostics.unique_candidate_count == 1
+    assert diagnostics.raw_signal_count >= 1
+
+
+def test_linkedin_parser_merges_card_href_urn_sources_for_one_job():
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        _parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+    html = """
+    <div class="job-card-container" data-job-id="123" data-entity-urn="urn:li:jobPosting:123">
+      <a class="job-card-list__title--link" href="/jobs/view/ai-engineer-123">
+        <span class="job-card-list__title">AI Engineer</span>
+      </a>
+      <span class="job-card-container__primary-description">Example AI</span>
+      <span class="job-card-container__metadata-item">Tokyo, Japan</span>
+    </div>
+    """
+
+    records, diagnostics = _parse_linkedin_jobs_html_with_diagnostics(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+
+    assert [record.linkedin_job_id for record in records] == ["123"]
+    assert records[0].discovery_sources == ["card", "job_href", "urn"]
+    assert diagnostics.raw_signal_count >= 3
+    assert diagnostics.unique_candidate_count == 1
+    assert diagnostics.duplicate_candidate_count == 0
+
+
+def test_linkedin_parser_recovers_multiple_job_hrefs_without_cards():
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        _parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+    links = "".join(
+        f'<li role="listitem"><a href="/jobs/view/{job_id}">AI Engineer {job_id}</a></li>'
+        for job_id in range(100, 106)
+    )
+    html = f'<ul class="jobs-search-results-list">{links}</ul>'
+
+    records, diagnostics = _parse_linkedin_jobs_html_with_diagnostics(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+
+    assert [record.linkedin_job_id for record in records] == [str(job_id) for job_id in range(100, 106)]
+    assert diagnostics.selector_counts[".job-card-container"] == 0
+    assert diagnostics.job_href_signal_count == 6
+    assert diagnostics.unique_candidate_count == 6
+
+
+def test_linkedin_pipeline_dedupes_same_run_before_detail_and_marks_retained(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import (
+        LinkedInJobsRequest,
+        LinkedInParseDiagnostics,
+        LinkedInVacancyRecord,
+    )
+    from features.web_scraping.infrastructure.linkedin_scraper import scrape_linkedin_jobs
+
+    monkeypatch.setenv("LINKEDIN_DETAIL_BUDGET", "2")
+    monkeypatch.setenv("LINKEDIN_DIRECT_DETAIL_FALLBACK", "true")
+    monkeypatch.setenv("LINKEDIN_MAX_QUERIES_PER_LOCATION", "2")
+    source_a = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    source_b = "https://www.linkedin.com/jobs/search/?keywords=ML"
+    candidate_a = LinkedInVacancyRecord(
+        linkedin_job_id="123",
+        title="",
+        canonical_url="https://www.linkedin.com/jobs/view/123",
+        source_url=source_a,
+        matched_terms=[],
+        candidate_metadata_incomplete=True,
+        discovery_sources=["job_href"],
+    )
+    candidate_b = candidate_a.model_copy(
+        update={"source_url": source_b, "discovery_sources": ["card", "urn"]}
+    )
+    enriched = candidate_a.model_copy(
+        update={
+            "title": "AI Engineer",
+            "company_name": "Example AI",
+            "location": "Tokyo, Japan",
+            "workplace_type": "hybrid",
+            "posted_at_text": "1 hour ago",
+            "published_at": datetime(2026, 7, 29, 10, 0, tzinfo=timezone.utc),
+            "freshness_confidence": "medium",
+            "is_within_24_hours": True,
+            "candidate_metadata_incomplete": False,
+        }
+    )
+
+    class FakePage:
+        url = "https://www.linkedin.com/jobs/"
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+        def content(self) -> str:
+            return "<html></html>"
+        def is_closed(self) -> bool:
+            return False
+
+    class FakeSession:
+        page = FakePage()
+        def page_is_alive(self) -> bool:
+            return True
+        def close(self) -> None:
+            return None
+
+    class FakeStore:
+        def load_browser_metadata(self):
+            return {"browser": "chromium", "executable_path": "", "profile_path": "/private/browser-profile"}
+        def resolve_profile_path(self, **_kwargs):
+            return Path("/private/browser-profile")
+        def record_runtime_failure(self, *_args, **_kwargs) -> None:
+            raise AssertionError("unexpected runtime failure")
+
+    with (
+        patch("features.web_scraping.infrastructure.linkedin_scraper.open_persistent_authenticated_context", return_value=FakeSession()),
+        patch("features.web_scraping.infrastructure.linkedin_scraper._validate_authenticated_page"),
+        patch("features.web_scraping.infrastructure.linkedin_scraper._wait_for_search_results_hydration", side_effect=["results", "timeout"]),
+        patch("features.web_scraping.infrastructure.linkedin_scraper.build_linkedin_search_queries", return_value=[("A @ Japan", source_a), ("B @ Japan", source_b)]),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._parse_linkedin_jobs_html_with_diagnostics",
+            side_effect=[
+                ([candidate_a], LinkedInParseDiagnostics(raw_signal_count=1, unique_candidate_count=1, candidate_count=1)),
+                ([candidate_b], LinkedInParseDiagnostics(raw_signal_count=2, unique_candidate_count=1, candidate_count=1, discard_reasons={"standalone_link_fallback": 1})),
+            ],
+        ),
+        patch(
+            "features.web_scraping.infrastructure.linkedin_scraper._ensure_search_source_with_single_retry",
+            side_effect=lambda _session, page, **_kwargs: (page, False, False),
+        ),
+        patch("features.web_scraping.infrastructure.linkedin_scraper._safe_job_card_link", return_value=MagicMock()),
+        patch("features.web_scraping.infrastructure.linkedin_scraper._enrich_job_detail_via_panel", return_value=enriched) as detail,
+    ):
+        records, rejected, timings, warnings, _queries = scrape_linkedin_jobs(
+            LinkedInJobsRequest(query="AI jobs Japan", locations=["Japan"], max_results=5, include_description=False),
+            session_store=FakeStore(),  # type: ignore[arg-type]
+        )
+
+    assert [record.linkedin_job_id for record in records] == ["123"]
+    assert records[0].title == "AI Engineer"
+    assert records[0].candidate_metadata_incomplete is False
+    assert detail.call_count == 1
+    assert [timing.retained_count for timing in timings] == [1, 0]
+    assert timings[0].diagnostics.new_candidate_count == 1
+    assert timings[0].diagnostics.duplicate_candidate_count == 0
+    assert timings[1].diagnostics.new_candidate_count == 0
+    assert timings[1].diagnostics.duplicate_candidate_count == 1
+    assert [item.reason for item in rejected] == ["duplicate_candidate_skipped_before_detail"]
+    assert "duplicate_candidate_skipped_before_detail:123" in warnings

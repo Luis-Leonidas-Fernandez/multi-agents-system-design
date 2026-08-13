@@ -89,16 +89,29 @@ def detect_linkedin_jobs_intent(message: str) -> bool:
     return has_job_intent and (has_linkedin or has_target) and (has_target or recent_hint)
 
 
+_NEGATED_LOCATION_PREFIX_RE = re.compile(
+    r"(?:no\s+(?:incluyas|incluya|incluir|busques|buscar|traigas|traer)|"
+    r"exclui|excluir|excluye|excluyan|descarta|descartar|descartes|"
+    r"descarten|sin)\s+(?:resultados\s+de\s+|vacantes\s+de\s+)?$"
+)
+
+
+def _is_negated_location_match(normalized: str, start: int) -> bool:
+    window = normalized[max(0, start - 48) : start]
+    return bool(_NEGATED_LOCATION_PREFIX_RE.search(window))
+
+
 def extract_linkedin_locations(message: str) -> tuple[str, ...]:
     """Extrae ubicaciones conocidas preservando el orden en que aparecen."""
     normalized = normalize_linkedin_intent_text(message)
     matches: list[tuple[int, str]] = []
     for canonical_name, aliases in _LOCATION_ALIASES:
-        positions = [
-            match.start()
-            for alias in aliases
-            if (match := re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", normalized))
-        ]
+        positions = []
+        for alias in aliases:
+            for match in re.finditer(rf"(?<!\w){re.escape(alias)}(?!\w)", normalized):
+                if _is_negated_location_match(normalized, match.start()):
+                    continue
+                positions.append(match.start())
         if positions:
             matches.append((min(positions), canonical_name))
     return tuple(name for _, name in sorted(matches))

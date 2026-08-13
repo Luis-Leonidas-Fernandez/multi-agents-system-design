@@ -45,7 +45,7 @@ def configured_linkedin_detail_budget() -> int:
 def configured_linkedin_max_queries_per_location() -> int:
     return _configured_bounded_int(
         "LINKEDIN_MAX_QUERIES_PER_LOCATION",
-        default=2,
+        default=3,
         minimum=1,
         maximum=_HARD_MAX_QUERIES_PER_LOCATION,
     )
@@ -69,15 +69,18 @@ def configured_linkedin_detail_click_interval_ms() -> int:
     )
 
 
-def configured_linkedin_direct_detail_fallback() -> bool:
-    raw = (os.getenv("LINKEDIN_DIRECT_DETAIL_FALLBACK") or "false").strip().lower()
+def _configured_bool(env_name: str, *, default: bool = False) -> bool:
+    raw_default = "true" if default else "false"
+    raw = (os.getenv(env_name) or raw_default).strip().lower()
     if raw in {"1", "true", "yes", "on"}:
         return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    raise ValueError(
-        "LINKEDIN_DIRECT_DETAIL_FALLBACK debe ser true o false."
-    )
+    raise ValueError(f"{env_name} debe ser true o false.")
+
+
+def configured_linkedin_direct_detail_fallback() -> bool:
+    return _configured_bool("LINKEDIN_DIRECT_DETAIL_FALLBACK")
 
 
 def configured_linkedin_max_results() -> int:

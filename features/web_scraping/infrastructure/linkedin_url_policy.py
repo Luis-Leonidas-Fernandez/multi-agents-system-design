@@ -8,15 +8,22 @@ from core.helpers.url_helpers import _validate_public_http_url
 
 
 _ALLOWED_HOSTS = {"linkedin.com", "www.linkedin.com"}
-_JOB_PATH_RE = re.compile(r"^/jobs/(?:$|search/?$|view/(?:\d+|[^/?#]+)/?$)")
+_JOB_PATH_RE = re.compile(
+    r"^/jobs/(?:$|search(?:-results)?/?$|view/(?:\d+|[^/?#]+)/?$)"
+)
+_LINKEDIN_ENTITY_PATH_RE = re.compile(
+    r"^(?:/jobs/view/(?:\d+|[^/?#]+)/?|/company/[^/?#]+/?|/jobs/apply(?:/[^/?#]+)*/?)$"
+)
 _ALLOWED_SEARCH_QUERY_KEYS = {
     "currentJobId",
     "f_TPR",
     "geoId",
+    "infoNotice",
     "keywords",
     "location",
     "origin",
     "refresh",
+    "skipRedirect",
     "sortBy",
     "start",
 }
@@ -45,7 +52,10 @@ def validate_linkedin_jobs_url(url: str) -> str:
         raise ValueError("URL LinkedIn rechazada: path_not_allowed")
     if parsed.username or parsed.password:
         raise ValueError("URL LinkedIn rechazada: credentials_not_allowed")
-    if (parsed.path or "").rstrip("/") == "/jobs/search":
+    if (parsed.path or "").rstrip("/") in {
+        "/jobs/search",
+        "/jobs/search-results",
+    }:
         query_keys = {
             key
             for key, _value in parse_qsl(parsed.query, keep_blank_values=True)
@@ -55,25 +65,44 @@ def validate_linkedin_jobs_url(url: str) -> str:
     return normalized
 
 
+def canonicalize_linkedin_url(url: str) -> str:
+    """Canonicalize a LinkedIn entity URL by dropping query and fragment data."""
+    normalized, reason = _validate_public_http_url(url)
+    if not normalized:
+        raise ValueError(f"URL LinkedIn rechazada: {reason or 'invalid_url'}")
+    parsed = urlparse(normalized)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("URL LinkedIn rechazada: scheme_not_allowed")
+    host = (parsed.hostname or "").lower()
+    if host not in _ALLOWED_HOSTS:
+        raise ValueError("URL LinkedIn rechazada: host_not_allowed")
+    if parsed.username or parsed.password:
+        raise ValueError("URL LinkedIn rechazada: credentials_not_allowed")
+    path = parsed.path.rstrip("/")
+    if not path or not _LINKEDIN_ENTITY_PATH_RE.match(path):
+        raise ValueError("URL LinkedIn rechazada: path_not_allowed")
+    return urlunparse((parsed.scheme.lower(), host, path, "", "", ""))
+
+
 def canonicalize_linkedin_job_url(url: str) -> str:
     normalized = validate_linkedin_jobs_url(url)
     parsed = urlparse(normalized)
     path = parsed.path.rstrip("/") or "/jobs"
     if path.startswith("/jobs/view/"):
-        query = ""
-    else:
-        query_pairs = [
-            (key, value)
-            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-            if key.lower() not in _TRACKING_QUERY_KEYS
-        ]
-        query = urlencode(query_pairs)
+        entity = urlparse(canonicalize_linkedin_url(normalized))
+        return urlunparse(("https", "www.linkedin.com", entity.path, "", "", ""))
+    query_pairs = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in _TRACKING_QUERY_KEYS
+    ]
+    query = urlencode(query_pairs)
     return urlunparse(("https", "www.linkedin.com", path, "", query, ""))
 
 
 def linkedin_job_id_from_url(url: str) -> str:
     try:
-        path = urlparse(canonicalize_linkedin_job_url(url)).path
+        path = urlparse(canonicalize_linkedin_url(url)).path
     except ValueError:
         return ""
     match = re.search(r"/jobs/view/(?:[^/?#]*-)?(\d+)$", path)
@@ -90,6 +119,7 @@ def is_linkedin_auth_checkpoint(url: str) -> bool:
 
 
 __all__ = [
+    "canonicalize_linkedin_url",
     "canonicalize_linkedin_job_url",
     "is_linkedin_auth_checkpoint",
     "linkedin_job_id_from_url",

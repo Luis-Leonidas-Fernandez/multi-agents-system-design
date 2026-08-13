@@ -23,7 +23,12 @@ from features.web_scraping.infrastructure.linkedin_metadata import (
     _infer_visa_status,
     _sanitize_description,
 )
+from features.web_scraping.infrastructure.linkedin_detail_diagnostics import (
+    LinkedInDetailDiagnosticsCollector,
+    get_active_detail_diagnostics,
+)
 from features.web_scraping.infrastructure.linkedin_detail_panel import (
+    _AuthenticatedDetailProbeResult,
     _enrich_job_detail as _detail_panel_enrich_job_detail,
     _enrich_job_detail_via_panel as _detail_panel_enrich_job_detail_via_panel,
     _extract_detail_posted_date,
@@ -34,6 +39,7 @@ from features.web_scraping.infrastructure.linkedin_detail_panel import (
     _normalize_detail_location,
     _normalize_transient_description,
     _normalize_workplace_type,
+    _probe_linkedin_detail_with_authenticated_request as _detail_panel_probe_detail_with_authenticated_request,
     _respect_detail_click_cadence,
     _safe_job_card_link,
     _wait_for_detail_hydration,
@@ -118,12 +124,16 @@ def _extract_job_detail_from_current_page(
     *,
     include_description: bool,
     now: datetime | None = None,
+    diagnostics: LinkedInDetailDiagnosticsCollector | None = None,
+    diagnostic_mode: str = "none",
 ) -> LinkedInVacancyRecord:
     return _detail_panel_extract_job_detail_from_current_page(
         page,
         record,
         include_description=include_description,
         now=now,
+        diagnostics=diagnostics,
+        diagnostic_mode=diagnostic_mode,
     )
 
 
@@ -133,18 +143,42 @@ def _enrich_job_detail(
     *,
     include_description: bool,
     now: datetime | None = None,
+    diagnostics: LinkedInDetailDiagnosticsCollector | None = None,
 ) -> LinkedInVacancyRecord:
+    diagnostics = diagnostics or get_active_detail_diagnostics()
+    if diagnostics:
+        diagnostics.record(
+            record,
+            phase="start",
+            mode="direct",
+            outcome="started",
+            include_description=include_description,
+            date_ready=record.published_at is not None,
+        )
     page.goto(record.canonical_url, wait_until="domcontentloaded", timeout=30000)
     _validate_authenticated_page(page)
-    _wait_for_detail_hydration(
+    hydration_state = _wait_for_detail_hydration(
         page,
         require_date=record.published_at is None,
+        require_description=include_description,
     )
+    if diagnostics:
+        diagnostics.record(
+            record,
+            phase="wait_terminal",
+            mode="direct",
+            outcome=hydration_state,
+            include_description=include_description,
+            description_ready=include_description and hydration_state == "ready",
+            date_ready=record.published_at is not None or hydration_state == "ready",
+        )
     return _extract_job_detail_from_current_page(
         page,
         record,
         include_description=include_description,
         now=now,
+        diagnostics=diagnostics,
+        diagnostic_mode="direct",
     )
 
 
@@ -155,6 +189,7 @@ def _enrich_job_detail_via_panel(
     card_link,
     include_description: bool,
     now: datetime | None = None,
+    diagnostics: LinkedInDetailDiagnosticsCollector | None = None,
 ) -> LinkedInVacancyRecord:
     return _detail_panel_enrich_job_detail_via_panel(
         page,
@@ -162,6 +197,7 @@ def _enrich_job_detail_via_panel(
         card_link=card_link,
         include_description=include_description,
         now=now,
+        diagnostics=diagnostics or get_active_detail_diagnostics(),
     )
 
 
@@ -199,6 +235,7 @@ def _probe_linkedin_search_with_authenticated_request(
     *,
     source_url: str,
     now: datetime | None = None,
+    allow_standalone_fallback: bool = False,
 ) -> _AuthenticatedSearchProbeResult:
     from features.web_scraping.infrastructure.linkedin_query_navigation import (
         _probe_linkedin_search_with_authenticated_request as _query_navigation_probe_search,
@@ -208,7 +245,23 @@ def _probe_linkedin_search_with_authenticated_request(
         session,
         source_url=source_url,
         now=now,
+        allow_standalone_fallback=allow_standalone_fallback,
         parse_jobs_html_with_diagnostics=_parse_linkedin_jobs_html_with_diagnostics,
+    )
+
+
+def _probe_linkedin_detail_with_authenticated_request(
+    session,
+    record: LinkedInVacancyRecord,
+    *,
+    include_description: bool,
+    now: datetime | None = None,
+) -> _AuthenticatedDetailProbeResult:
+    return _detail_panel_probe_detail_with_authenticated_request(
+        session,
+        record,
+        include_description=include_description,
+        now=now,
     )
 
 
@@ -311,6 +364,8 @@ def _wait_for_search_results_hydration(
     page,
     *,
     max_wait_ms: int = _SEARCH_HYDRATION_MAX_MS,
+    query: str = "unknown",
+    diagnostics=None,
 ) -> str:
     from features.web_scraping.infrastructure.linkedin_query_navigation import (
         _wait_for_search_results_hydration as _query_navigation_wait_for_search_results_hydration,
@@ -319,6 +374,8 @@ def _wait_for_search_results_hydration(
     return _query_navigation_wait_for_search_results_hydration(
         page,
         max_wait_ms=max_wait_ms,
+        query=query,
+        diagnostics=diagnostics,
     )
 
 

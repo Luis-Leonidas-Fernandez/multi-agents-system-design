@@ -3,17 +3,36 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import ValidationError
 
-from features.web_scraping.application.linkedin_audit import persist_linkedin_audit_snapshot
+from features.web_scraping.application.linkedin_audit import (
+    current_linkedin_audit_dir,
+    persist_linkedin_audit_snapshot,
+)
 from features.web_scraping.application.linkedin_intent import (
     extract_linkedin_locations,
 )
 from features.web_scraping.domain.linkedin_models import LinkedInJobsRequest, LinkedInJobsResult
+from features.web_scraping.infrastructure.linkedin_detail_diagnostics import (
+    detail_diagnostics_context,
+)
+from features.web_scraping.infrastructure.linkedin_query_navigation import (
+    search_hydration_diagnostics_context,
+)
+from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics import (
+    static_probe_diagnostics_context,
+)
+from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+    visual_diagnostics_context,
+)
 from features.web_scraping.infrastructure.authenticated_browser import (
     BrowserProfileInUseError,
+    close_reusable_authenticated_contexts,
 )
 from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
     scrape_linkedin_jobs,
@@ -23,6 +42,54 @@ from features.web_scraping.infrastructure.linkedin_scraper import (
     LinkedInBlockedError,
     configured_linkedin_max_results,
 )
+from features.web_scraping.infrastructure.linkedin_session_store import (
+    LinkedInSessionStore,
+)
+
+
+ROOT = Path(__file__).resolve().parents[3]
+_LINKEDIN_DEV_AUTO_BOOTSTRAP_ENV = "LINKEDIN_AUTO_BOOTSTRAP_ON_AUTH_FAILURE"
+_LINKEDIN_BOOTSTRAP_CMD = [
+    sys.executable,
+    "scripts/bootstrap_linkedin_session.py",
+    "--browser",
+    "brave",
+    "--executable-path",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "--observe-ready",
+    "--ready-timeout-seconds",
+    "300",
+]
+
+
+def _run_linkedin_bootstrap_for_retry(warnings: list[str]) -> bool:
+    if os.getenv(_LINKEDIN_DEV_AUTO_BOOTSTRAP_ENV) != "1":
+        return False
+
+    warnings.append("auth_refresh_bootstrap_started")
+    try:
+        store = LinkedInSessionStore()
+        metadata = store.load_browser_metadata()
+        if metadata is not None:
+            profile_path = store.resolve_profile_path(
+                persisted_profile_path=metadata.get("profile_path"),
+                create=False,
+            )
+            if close_reusable_authenticated_contexts(profile_path=profile_path):
+                warnings.append("auth_refresh_runtime_session_closed")
+        completed = subprocess.run(_LINKEDIN_BOOTSTRAP_CMD, cwd=ROOT, check=False)
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        warnings.append(f"auth_refresh_bootstrap_failed:{type(exc).__name__}")
+        return False
+
+    if completed.returncode != 0:
+        warnings.append(f"auth_refresh_bootstrap_failed:exit_{completed.returncode}")
+        return False
+
+    warnings.append("auth_refresh_bootstrap_completed")
+    return True
 
 
 def _split_location_fallback(value: str) -> tuple[str, ...]:
@@ -178,17 +245,33 @@ def _render_user_summary(result: LinkedInJobsResult) -> str:
             "`max_results` debe ser un número entre 1 y 50."
         )
     if result.status == "auth_required":
+        suffix = (
+            " Abrí automáticamente el bootstrap de LinkedIn en modo dev; completá "
+            "el login manual en la ventana de Brave. El observador continuará cuando "
+            "LinkedIn Jobs esté listo."
+            if "auth_refresh_bootstrap_started" in result.warnings
+            else ""
+        )
         return (
             "LinkedIn no pudo validar o abrir el perfil persistente dedicado. El perfil "
             "y el snapshot storage_state se conservaron; no se expusieron cookies. "
             "Cerrá cualquier bootstrap/búsqueda LinkedIn todavía abierta y reintentá. "
             "Si persiste, ejecutá `python scripts/bootstrap_linkedin_session.py` y "
             "completá el login manual en el mismo perfil dedicado."
+            f"{suffix}"
         )
     if result.status == "blocked":
+        suffix = (
+            " Abrí automáticamente el bootstrap de LinkedIn en modo dev; completá "
+            "la verificación manual en la ventana de Brave. El observador continuará "
+            "cuando LinkedIn Jobs esté listo."
+            if "auth_refresh_bootstrap_started" in result.warnings
+            else ""
+        )
         return (
             "LinkedIn solicitó una verificación, checkpoint o redirigió fuera del área "
             "permitida. El scraper read-only se detuvo sin intentar evadir el control."
+            f"{suffix}"
         )
     if result.status == "error":
         return (
@@ -196,6 +279,15 @@ def _render_user_summary(result: LinkedInJobsResult) -> str:
             "El error quedó registrado sin exponer cookies ni datos de sesión."
         )
     if result.status == "extraction_incomplete":
+        if any(
+            warning.startswith("extraction_incomplete:linkedin_hydration_unusable")
+            for warning in result.warnings
+        ):
+            return (
+                "LinkedIn no hidrató la lista ni entregó detalles verificables aun "
+                "después de los probes read-only autenticados. La extracción quedó "
+                "indeterminada; revisá el audit seguro del job."
+            )
         if any(
             warning.startswith("extraction_incomplete:query_rate_limited")
             for warning in result.warnings
@@ -279,6 +371,182 @@ def _render_user_summary(result: LinkedInJobsResult) -> str:
     return _render_grouped_records(result)
 
 
+def _classify_linkedin_scrape_result(records, rejected, timings, warnings: list[str]) -> str:
+    status = "ok"
+    parseable_candidates = sum(
+        max(
+            timing.discovered_count,
+            timing.diagnostics.parseable_candidate_count,
+        )
+        for timing in timings
+    )
+    if not records and parseable_candidates == 0:
+        hydration_unusable = "linkedin_hydration_unusable" in warnings
+        hydration_timed_out = any(
+            warning.startswith("query_hydration_timeout:")
+            for warning in warnings
+        )
+        explicit_empty_queries = {
+            warning.split(":", 1)[1]
+            for warning in warnings
+            if warning.startswith("query_empty_results_explicit:")
+        }
+        successful_timings = [timing for timing in timings if not timing.error]
+        all_successful_queries_explicitly_empty = bool(successful_timings) and all(
+            timing.query in explicit_empty_queries
+            for timing in successful_timings
+        )
+        has_query_failures = any(timing.error for timing in timings)
+        failure_priority = (
+            "query_rate_limited",
+            "query_access_rejected",
+            "query_upstream_failure",
+            "query_navigation_failure",
+        )
+        query_failure_category = next(
+            (
+                category
+                for category in failure_priority
+                if any(
+                    category in warning
+                    for warning in warnings
+                    if warning.startswith("query_probe_result:")
+                )
+                or any(timing.error.endswith(category) for timing in timings)
+            ),
+            "",
+        )
+        no_query_dom = bool(timings) and all(
+            timing.diagnostics.href_count == 0
+            and timing.diagnostics.candidate_count == 0
+            and not timing.diagnostics.selector_counts
+            for timing in timings
+        )
+        if hydration_unusable:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:linkedin_hydration_unusable")
+        elif query_failure_category:
+            status = "extraction_incomplete"
+            warnings.append(f"extraction_incomplete:{query_failure_category}")
+        elif has_query_failures and no_query_dom:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:query_navigation_failure")
+        elif hydration_timed_out:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:query_hydration_timeout")
+        elif all_successful_queries_explicitly_empty and not has_query_failures:
+            status = "ok"
+        else:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:no_parseable_candidates")
+    elif not records:
+        rejection_reasons = {item.reason for item in rejected}
+        hydration_unusable = "linkedin_hydration_unusable" in warnings
+        has_detail_network_failure = "detail_network_failure" in rejection_reasons
+        has_detail_fetch_failure = "detail_fetch_failed" in rejection_reasons
+        has_unverified_dates = bool(
+            rejection_reasons & {"unverified_posted_date", "detail_budget_exhausted"}
+        )
+        has_verified_outside = "outside_24_hours" in rejection_reasons
+        if hydration_unusable:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:linkedin_hydration_unusable")
+        elif has_detail_network_failure:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:detail_network_failure")
+        elif has_detail_fetch_failure:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:detail_fetch_failure")
+        elif has_unverified_dates and not has_verified_outside:
+            status = "extraction_incomplete"
+            warnings.append("extraction_incomplete:posted_date_unverified")
+    return status
+
+
+class _LinkedInScrapeExecutionError(Exception):
+    """Carries bounded diagnostics captured before a scrape exception escaped."""
+
+    def __init__(
+        self,
+        original: Exception,
+        *,
+        detail_diagnostics,
+        search_hydration_diagnostics,
+        static_probe_diagnostics,
+        visual_diagnostics,
+    ) -> None:
+        super().__init__(str(original))
+        self.original = original
+        self.detail_diagnostics = list(detail_diagnostics)
+        self.search_hydration_diagnostics = list(search_hydration_diagnostics)
+        self.static_probe_diagnostics = list(static_probe_diagnostics)
+        self.visual_diagnostics = list(visual_diagnostics)
+
+
+def _execute_linkedin_scrape(request: LinkedInJobsRequest):
+    with (
+        detail_diagnostics_context() as detail_diagnostics,
+        search_hydration_diagnostics_context() as search_hydration_diagnostics,
+        static_probe_diagnostics_context() as static_probe_diagnostics,
+        visual_diagnostics_context(current_linkedin_audit_dir()) as visual_diagnostics,
+    ):
+        try:
+            records, rejected, timings, warnings, queries = scrape_linkedin_jobs(request)
+        except Exception as exc:
+            raise _LinkedInScrapeExecutionError(
+                exc,
+                detail_diagnostics=detail_diagnostics.events,
+                search_hydration_diagnostics=search_hydration_diagnostics.events,
+                static_probe_diagnostics=static_probe_diagnostics.events,
+                visual_diagnostics=visual_diagnostics.events,
+            ) from exc
+    status = _classify_linkedin_scrape_result(records, rejected, timings, warnings)
+    return (
+        status,
+        records,
+        rejected,
+        timings,
+        warnings,
+        queries,
+        detail_diagnostics.events,
+        search_hydration_diagnostics.events,
+        static_probe_diagnostics.events,
+        visual_diagnostics.events,
+    )
+
+
+def _apply_linkedin_execution_error(
+    exc: _LinkedInScrapeExecutionError,
+    *,
+    detail_diagnostics: list,
+    search_hydration_diagnostics: list,
+    static_probe_diagnostics: list,
+    visual_diagnostics: list,
+    warnings: list[str],
+) -> str:
+    detail_diagnostics.extend(exc.detail_diagnostics)
+    search_hydration_diagnostics.extend(exc.search_hydration_diagnostics)
+    static_probe_diagnostics.extend(exc.static_probe_diagnostics)
+    visual_diagnostics.extend(exc.visual_diagnostics)
+    original = exc.original
+    if isinstance(
+        original,
+        (
+            FileNotFoundError,
+            ValueError,
+            BrowserProfileInUseError,
+            LinkedInAuthRequiredError,
+        ),
+    ):
+        warnings.append(f"auth_required:{type(original).__name__}")
+        return "auth_required"
+    if isinstance(original, LinkedInBlockedError):
+        warnings.append(f"blocked:{type(original).__name__}")
+        return "blocked"
+    warnings.append(f"runtime_error:{type(original).__name__}")
+    return "error"
+
+
 def run_linkedin_jobs_vertical(
     original_query: str,
     *,
@@ -291,6 +559,10 @@ def run_linkedin_jobs_vertical(
     timings = []
     warnings: list[str] = []
     queries: list[str] = []
+    detail_diagnostics = []
+    search_hydration_diagnostics = []
+    static_probe_diagnostics = []
+    visual_diagnostics = []
     try:
         prompt_locations = extract_linkedin_locations(original_query)
         fallback_locations = _split_location_fallback(
@@ -312,113 +584,27 @@ def run_linkedin_jobs_vertical(
         warnings.append(f"validation_error:{type(exc).__name__}")
     else:
         try:
-            records, rejected, timings, warnings, queries = scrape_linkedin_jobs(request)
-            parseable_candidates = sum(
-                max(
-                    timing.discovered_count,
-                    timing.diagnostics.parseable_candidate_count,
-                )
-                for timing in timings
+            (
+                status,
+                records,
+                rejected,
+                timings,
+                warnings,
+                queries,
+                detail_diagnostics,
+                search_hydration_diagnostics,
+                static_probe_diagnostics,
+                visual_diagnostics,
+            ) = _execute_linkedin_scrape(request)
+        except _LinkedInScrapeExecutionError as exc:
+            status = _apply_linkedin_execution_error(
+                exc,
+                detail_diagnostics=detail_diagnostics,
+                search_hydration_diagnostics=search_hydration_diagnostics,
+                static_probe_diagnostics=static_probe_diagnostics,
+                visual_diagnostics=visual_diagnostics,
+                warnings=warnings,
             )
-            if not records and parseable_candidates == 0:
-                hydration_timed_out = any(
-                    warning.startswith("query_hydration_timeout:")
-                    for warning in warnings
-                )
-                explicit_empty_queries = {
-                    warning.split(":", 1)[1]
-                    for warning in warnings
-                    if warning.startswith("query_empty_results_explicit:")
-                }
-                successful_timings = [
-                    timing for timing in timings if not timing.error
-                ]
-                all_successful_queries_explicitly_empty = bool(
-                    successful_timings
-                ) and all(
-                    timing.query in explicit_empty_queries
-                    for timing in successful_timings
-                )
-                has_query_failures = any(timing.error for timing in timings)
-                failure_priority = (
-                    "query_rate_limited",
-                    "query_access_rejected",
-                    "query_upstream_failure",
-                    "query_navigation_failure",
-                )
-                query_failure_category = next(
-                    (
-                        category
-                        for category in failure_priority
-                        if any(
-                            category in warning
-                            for warning in warnings
-                            if warning.startswith("query_probe_result:")
-                        )
-                        or any(
-                            timing.error.endswith(category)
-                            for timing in timings
-                        )
-                    ),
-                    "",
-                )
-                no_query_dom = bool(timings) and all(
-                    timing.diagnostics.href_count == 0
-                    and timing.diagnostics.candidate_count == 0
-                    and not timing.diagnostics.selector_counts
-                    for timing in timings
-                )
-                if query_failure_category:
-                    status = "extraction_incomplete"
-                    warnings.append(
-                        f"extraction_incomplete:{query_failure_category}"
-                    )
-                elif has_query_failures and no_query_dom:
-                    status = "extraction_incomplete"
-                    warnings.append(
-                        "extraction_incomplete:query_navigation_failure"
-                    )
-                elif hydration_timed_out:
-                    status = "extraction_incomplete"
-                    warnings.append(
-                        "extraction_incomplete:query_hydration_timeout"
-                    )
-                elif (
-                    all_successful_queries_explicitly_empty
-                    and not has_query_failures
-                ):
-                    status = "ok"
-                else:
-                    status = "extraction_incomplete"
-                    warnings.append(
-                        "extraction_incomplete:no_parseable_candidates"
-                    )
-            elif not records:
-                rejection_reasons = {item.reason for item in rejected}
-                has_detail_network_failure = (
-                    "detail_network_failure" in rejection_reasons
-                )
-                has_detail_fetch_failure = (
-                    "detail_fetch_failed" in rejection_reasons
-                )
-                has_unverified_dates = bool(
-                    rejection_reasons
-                    & {"unverified_posted_date", "detail_budget_exhausted"}
-                )
-                has_verified_outside = "outside_24_hours" in rejection_reasons
-                if has_detail_network_failure:
-                    status = "extraction_incomplete"
-                    warnings.append(
-                        "extraction_incomplete:detail_network_failure"
-                    )
-                elif has_detail_fetch_failure:
-                    status = "extraction_incomplete"
-                    warnings.append(
-                        "extraction_incomplete:detail_fetch_failure"
-                    )
-                elif has_unverified_dates and not has_verified_outside:
-                    status = "extraction_incomplete"
-                    warnings.append("extraction_incomplete:posted_date_unverified")
         except (
             FileNotFoundError,
             ValueError,
@@ -434,6 +620,53 @@ def run_linkedin_jobs_vertical(
             status = "error"
             warnings.append(f"runtime_error:{type(exc).__name__}")
 
+        if status in {"auth_required", "blocked"} and _run_linkedin_bootstrap_for_retry(warnings):
+            retry_warnings = ["auth_refresh_retry_started"]
+            try:
+                (
+                    status,
+                    records,
+                    rejected,
+                    timings,
+                    scrape_warnings,
+                    queries,
+                    retry_detail_diagnostics,
+                    retry_search_hydration_diagnostics,
+                    retry_static_probe_diagnostics,
+                    retry_visual_diagnostics,
+                ) = _execute_linkedin_scrape(request)
+                detail_diagnostics.extend(retry_detail_diagnostics)
+                search_hydration_diagnostics.extend(
+                    retry_search_hydration_diagnostics
+                )
+                static_probe_diagnostics.extend(retry_static_probe_diagnostics)
+                visual_diagnostics.extend(retry_visual_diagnostics)
+                retry_warnings.extend(scrape_warnings)
+            except _LinkedInScrapeExecutionError as exc:
+                status = _apply_linkedin_execution_error(
+                    exc,
+                    detail_diagnostics=detail_diagnostics,
+                    search_hydration_diagnostics=search_hydration_diagnostics,
+                    static_probe_diagnostics=static_probe_diagnostics,
+                    visual_diagnostics=visual_diagnostics,
+                    warnings=retry_warnings,
+                )
+            except (
+                FileNotFoundError,
+                ValueError,
+                BrowserProfileInUseError,
+                LinkedInAuthRequiredError,
+            ) as exc:
+                status = "auth_required"
+                retry_warnings.append(f"auth_required:{type(exc).__name__}")
+            except LinkedInBlockedError as exc:
+                status = "blocked"
+                retry_warnings.append(f"blocked:{type(exc).__name__}")
+            except Exception as exc:
+                status = "error"
+                retry_warnings.append(f"runtime_error:{type(exc).__name__}")
+            warnings.extend(retry_warnings)
+
     paths = persist_linkedin_audit_snapshot(
         original_query=original_query.strip() or "(empty query)",
         queries=queries,
@@ -441,6 +674,10 @@ def run_linkedin_jobs_vertical(
         vacancies=records,
         rejected=rejected,
         warnings=warnings,
+        detail_diagnostics=detail_diagnostics,
+        search_hydration_diagnostics=search_hydration_diagnostics,
+        static_probe_diagnostics=static_probe_diagnostics,
+        visual_diagnostics=visual_diagnostics,
     )
     result = LinkedInJobsResult(
         status=status,

@@ -12,9 +12,13 @@ from application.services.request_runtime import get_request_runtime_config
 from features.web_scraping.domain.linkedin_models import (
     LinkedInAuditMeta,
     LinkedInAuditSnapshot,
+    LinkedInDetailDiagnostic,
     LinkedInQueryTiming,
     LinkedInRejectedRecord,
+    LinkedInSearchHydrationDiagnostic,
+    LinkedInStaticProbeDiagnostic,
     LinkedInVacancyRecord,
+    LinkedInVisualDiagnosticArtifact,
 )
 
 
@@ -65,6 +69,20 @@ def _audit_paths(job_uid: str, session_id: str, request_id: str) -> LinkedInAudi
     )
 
 
+def current_linkedin_audit_dir() -> Path:
+    runtime = get_request_runtime_config()
+    audit_dir = (
+        Path("data")
+        / "sessions"
+        / _slug(str(runtime.session_id or "local"))
+        / "linkedin"
+        / _slug(str(runtime.request_id or "manual"))
+        / "audit"
+    )
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    return audit_dir
+
+
 def _render_summary(snapshot: LinkedInAuditSnapshot) -> str:
     lines = [
         "# LinkedIn Jobs Audit Summary",
@@ -84,11 +102,99 @@ def _render_summary(snapshot: LinkedInAuditSnapshot) -> str:
                 f"- **{timing.query}**",
                 f"  - Selector counts: `{diagnostics.selector_counts}`",
                 f"  - Job hrefs: **{diagnostics.href_count}**",
-                f"  - Candidates: **{diagnostics.candidate_count}**",
+                f"  - Signals: raw=**{diagnostics.raw_signal_count}**, "
+                f"card=**{diagnostics.card_signal_count}**, "
+                f"href=**{diagnostics.job_href_signal_count}**, "
+                f"urn=**{diagnostics.urn_signal_count}**, "
+                f"list_item=**{diagnostics.list_item_signal_count}**",
+                f"  - Candidates: unique=**{diagnostics.unique_candidate_count}**, "
+                f"new=**{diagnostics.new_candidate_count}**, "
+                f"duplicate=**{diagnostics.duplicate_candidate_count}**, "
+                f"queued=**{timing.retained_count}**",
+                f"  - Discovery: mode=`{diagnostics.discovery_mode}`, "
+                f"degraded=**{diagnostics.discovery_degraded}**",
                 f"  - Parseable: **{diagnostics.parseable_candidate_count}**",
                 f"  - Discard reasons: `{diagnostics.discard_reasons}`",
             ]
         )
+    lines.extend(["", "## Search hydration diagnostics", ""])
+    if snapshot.search_hydration_diagnostics:
+        for diagnostic in snapshot.search_hydration_diagnostics:
+            lines.append(
+                "- "
+                f"**{diagnostic.query}** "
+                f"#{diagnostic.sequence}: {diagnostic.outcome} "
+                f"at {diagnostic.elapsed_ms}ms "
+                f"(cards={diagnostic.card_count}, "
+                f"hrefs={diagnostic.href_count}, "
+                f"raw_signals={diagnostic.raw_signal_count}, "
+                f"unique_candidates={diagnostic.unique_candidate_count}, "
+                "scroll_progress="
+                f"{diagnostic.candidate_count_before_scroll}"
+                f"→{diagnostic.candidate_count_after_scroll_1}"
+                f"→{diagnostic.candidate_count_after_scroll_2}"
+                f"→{diagnostic.candidate_count_after_scroll_3}, "
+                f"scroll_container={diagnostic.selected_scroll_container}, "
+                f"scroll_top={diagnostic.scroll_top_before}"
+                f"→{diagnostic.scroll_top_after}, "
+                f"scroll_size={diagnostic.client_height}"
+                f"/{diagnostic.scroll_height}, "
+                f"anchors={diagnostic.all_anchor_count}, "
+                f"jobs_view={diagnostic.jobs_view_href_count}, "
+                f"urn={diagnostic.job_urn_count}, "
+                f"data_job_id={diagnostic.data_job_id_count}, "
+                f"data_occludable={diagnostic.data_occludable_job_id_count}, "
+                f"scrollables={diagnostic.scrollable_container_count}, "
+                f"frames={diagnostic.frame_count}, "
+                f"empty={diagnostic.empty_state_visible}, "
+                f"auth_checkpoint={diagnostic.auth_checkpoint_visible})"
+            )
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Static probe diagnostics", ""])
+    if snapshot.static_probe_diagnostics:
+        for diagnostic in snapshot.static_probe_diagnostics:
+            label = diagnostic.query or diagnostic.job_id or "unknown"
+            lines.append(
+                "- "
+                f"**{diagnostic.kind}** `{label}` "
+                f"#{diagnostic.sequence}: {diagnostic.outcome} "
+                f"(status={diagnostic.status_code}, "
+                f"candidates={diagnostic.candidate_count}, "
+                f"accepted={diagnostic.accepted_count}, "
+                f"body_source={diagnostic.body_source or 'none'}, "
+                f"description_len={diagnostic.description_length}, "
+                f"guest_status={diagnostic.guest_status_code}, "
+                f"guest_retries={diagnostic.guest_retry_count}, "
+                f"identity={diagnostic.identity_consistent})"
+            )
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Visual diagnostics", ""])
+    if snapshot.visual_diagnostics:
+        for diagnostic in snapshot.visual_diagnostics:
+            lines.append(
+                "- "
+                f"`{diagnostic.manifest_path}` "
+                f"for **{diagnostic.query}** "
+                f"(sensitive_local_artifact={diagnostic.sensitive_local_artifact})"
+            )
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Detail diagnostics", ""])
+    if snapshot.detail_diagnostics:
+        for diagnostic in snapshot.detail_diagnostics:
+            lines.append(
+                "- "
+                f"Job `{diagnostic.job_id or 'unknown'}`: "
+                f"{diagnostic.mode}/{diagnostic.phase}/{diagnostic.outcome} "
+                f"(sequence={diagnostic.sequence}, "
+                f"description_ready={diagnostic.description_ready}, "
+                f"date_ready={diagnostic.date_ready}, "
+                f"rejection={diagnostic.rejection})"
+            )
+    else:
+        lines.append("- None")
     lines.extend(
         [
         "",
@@ -135,6 +241,12 @@ def persist_linkedin_audit_snapshot(
     vacancies: list[LinkedInVacancyRecord],
     rejected: list[LinkedInRejectedRecord],
     warnings: list[str],
+    detail_diagnostics: list[LinkedInDetailDiagnostic] | None = None,
+    search_hydration_diagnostics: (
+        list[LinkedInSearchHydrationDiagnostic] | None
+    ) = None,
+    static_probe_diagnostics: list[LinkedInStaticProbeDiagnostic] | None = None,
+    visual_diagnostics: list[LinkedInVisualDiagnosticArtifact] | None = None,
 ) -> LinkedInAuditPaths:
     runtime = get_request_runtime_config()
     session_id = str(runtime.session_id or "local")
@@ -155,6 +267,10 @@ def persist_linkedin_audit_snapshot(
         timings=list(timings),
         vacancies=list(vacancies),
         rejected=list(rejected),
+        detail_diagnostics=list(detail_diagnostics or []),
+        search_hydration_diagnostics=list(search_hydration_diagnostics or []),
+        static_probe_diagnostics=list(static_probe_diagnostics or []),
+        visual_diagnostics=list(visual_diagnostics or []),
         warnings=list(warnings),
     )
     payload: dict[str, Any] = snapshot.model_dump(mode="json")
@@ -178,6 +294,7 @@ def load_linkedin_audit_snapshot(path: str | Path) -> LinkedInAuditSnapshot:
 
 __all__ = [
     "LinkedInAuditPaths",
+    "current_linkedin_audit_dir",
     "load_linkedin_audit_snapshot",
     "persist_linkedin_audit_snapshot",
 ]

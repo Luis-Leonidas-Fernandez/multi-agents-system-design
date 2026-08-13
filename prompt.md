@@ -1,4 +1,4 @@
-Buscá en LinkedIn vacantes publicadas durante las últimas 24 horas en Corea del Sur y Japón para los siguientes perfiles:
+Buscá en LinkedIn vacantes publicadas durante las últimas 24 horas en Corea del Sur para los siguientes perfiles:
 
 - AI Engineer / AI Engineering
 - Data Scientist / Data Science
@@ -23,4 +23,4 @@ Para cada vacante mostrámela con:
 - Soporte de relocation
 - URL directa de LinkedIn
 
-Separá los resultados entre Corea del Sur y Japón. No incluyas vacantes con más de 24 horas ni resultados sin fecha verificable. No publiques, no guardes y no realices postulaciones.
+No incluyas vacantes con más de 24 horas ni resultados sin fecha verificable. No publiques, no guardes y no realices postulaciones.

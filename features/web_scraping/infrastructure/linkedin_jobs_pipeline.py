@@ -3,8 +3,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import inspect
+import re
 import time
 from typing import TYPE_CHECKING, Any, Callable
+
+from features.web_scraping.infrastructure.linkedin_detail_diagnostics import (
+    LinkedInDetailDiagnosticsCollector,
+    get_active_detail_diagnostics,
+)
+from features.web_scraping.infrastructure.linkedin_query_navigation import (
+    LinkedInSearchHydrationDiagnosticsCollector,
+    get_active_search_hydration_diagnostics,
+)
+from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics import (
+    LinkedInStaticProbeDiagnosticsCollector,
+    get_active_static_probe_diagnostics,
+)
+from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+    get_active_visual_diagnostics,
+)
 
 if TYPE_CHECKING:
     from features.web_scraping.domain.linkedin_models import (
@@ -16,6 +34,530 @@ if TYPE_CHECKING:
     from features.web_scraping.infrastructure.linkedin_session_store import (
         LinkedInSessionStore,
     )
+
+
+_KOREA_LOCATION_MARKERS = (
+    "south korea",
+    "corea del sur",
+    "korea, republic of",
+    "republic of korea",
+    "seoul",
+    "대한민국",
+    "서울",
+)
+_JAPAN_LOCATION_MARKERS = (
+    "japan",
+    "japón",
+    "tokyo",
+    "日本",
+    "東京",
+)
+_REGIONAL_REMOTE_LOCATION_MARKERS = (
+    "asia-pacific",
+    "asia pacific",
+    "asia-pacífico",
+    "asia pacífico",
+    "apac",
+    "remote",
+    "remoto",
+)
+
+
+
+_LINKEDIN_MATCH_TERMS = (
+    "ai",
+    "artificial intelligence",
+    "inteligencia artificial",
+    "machine learning",
+    "deep learning",
+    "llm",
+    "generative ai",
+    "genai",
+    "data science",
+    "data scientist",
+    "data analyst",
+    "ai mentor",
+    "pytorch",
+    "tensorflow",
+    "rag",
+    "mlops",
+    "ai product",
+)
+
+
+def _safe_candidate_identity(record: Any) -> str:
+    job_id = _normalized_numeric_job_id(getattr(record, "linkedin_job_id", ""))
+    if job_id:
+        return job_id
+    source_url = str(getattr(record, "canonical_url", "") or "")
+    match = re.search(r"/jobs/view/(?:[^/?#]*-)?(\d+)/?(?:[?#]|$)", source_url)
+    if not match:
+        return ""
+    return match.group(1).lstrip("0") or "0"
+
+
+def _candidate_metadata_complete(record: Any) -> bool:
+    return bool(
+        str(getattr(record, "title", "") or "").strip()
+        and str(getattr(record, "company_name", "") or "").strip()
+        and str(getattr(record, "location", "") or "").strip()
+    )
+
+
+def _refresh_candidate_discovery_state(record: Any) -> Any:
+    updates: dict[str, Any] = {}
+    if getattr(record, "candidate_metadata_incomplete", False) and _candidate_metadata_complete(record):
+        updates["candidate_metadata_incomplete"] = False
+    if not getattr(record, "matched_terms", None):
+        blob = " ".join(
+            str(getattr(record, field, "") or "")
+            for field in (
+                "title",
+                "company_name",
+                "description_excerpt",
+                "description_full_text",
+            )
+        ).casefold()
+        matched = sorted({term for term in _LINKEDIN_MATCH_TERMS if term in blob})
+        if matched:
+            updates["matched_terms"] = matched
+    return record.model_copy(update=updates) if updates else record
+
+
+def _mark_diagnostics_after_query_dedupe(diagnostics: Any, *, new_count: int) -> Any:
+    unique_count = int(
+        getattr(diagnostics, "unique_candidate_count", 0)
+        or getattr(diagnostics, "candidate_count", 0)
+        or 0
+    )
+    return diagnostics.model_copy(
+        update={
+            "unique_candidate_count": unique_count,
+            "new_candidate_count": new_count,
+            "duplicate_candidate_count": max(0, unique_count - new_count),
+        }
+    )
+
+def _has_any_marker(value: str, markers: tuple[str, ...]) -> bool:
+    normalized = (value or "").casefold()
+    return any(marker in normalized for marker in markers)
+
+
+def _record_country_signal_text(record: Any) -> str:
+    return "\n".join(
+        str(value or "")
+        for value in (
+            getattr(record, "title", ""),
+            getattr(record, "company_name", ""),
+            getattr(record, "description_excerpt", ""),
+            getattr(record, "description_full_text", ""),
+        )
+    )
+
+
+def _rejected_record_identity(record: Any) -> str:
+    title = " ".join(
+        str(getattr(record, "title", "") or "").casefold().split()
+    )
+    if title and any(marker in title for marker in ("remote", "remoto")):
+        return f"title:{title}"
+    source_url = str(getattr(record, "source_url", "") or "").strip().casefold()
+    if "/jobs/view/" in source_url:
+        return f"url:{source_url}"
+    if title:
+        return f"title:{title}"
+    return ""
+
+
+def _rejection_reason_rank(record: Any) -> int:
+    reason = str(getattr(record, "reason", "") or "").casefold()
+    return 0 if reason in {"duplicate", "duplicate_candidate_skipped_before_detail"} else 1
+
+
+def _dedupe_rejected_records(
+    rejected: list[Any],
+) -> tuple[list[Any], list[str]]:
+    deduped: list[Any] = []
+    warnings: list[str] = []
+    seen: dict[str, int] = {}
+    for record in rejected:
+        identity = _rejected_record_identity(record)
+        if identity and identity in seen:
+            existing_index = seen[identity]
+            existing = deduped[existing_index]
+            if _rejection_reason_rank(record) > _rejection_reason_rank(existing):
+                deduped[existing_index] = record
+                dropped = existing
+            else:
+                dropped = record
+            warnings.append(
+                "rejected_duplicate_dropped:"
+                f"{str(getattr(dropped, 'title', '') or 'unknown')}:"
+                f"{str(getattr(dropped, 'reason', '') or 'unknown')}"
+            )
+            continue
+        if identity:
+            seen[identity] = len(deduped)
+        deduped.append(record)
+    return deduped, warnings
+
+
+def _visible_location_matches_requested_scope(
+    visible_location: str,
+    requested_location: str,
+    country_signal_text: str = "",
+) -> bool:
+    """Reject regional/remote spillover unless the job content names the country."""
+    requested = (requested_location or "").casefold()
+    visible = (visible_location or "").casefold()
+    if not requested or not visible:
+        return True
+
+    if _has_any_marker(requested, _KOREA_LOCATION_MARKERS):
+        if _has_any_marker(visible, _KOREA_LOCATION_MARKERS):
+            return True
+        if _has_any_marker(visible, _JAPAN_LOCATION_MARKERS):
+            return False
+        if _has_any_marker(visible, _REGIONAL_REMOTE_LOCATION_MARKERS):
+            return _has_any_marker(country_signal_text, _KOREA_LOCATION_MARKERS)
+        return True
+
+    if _has_any_marker(requested, _JAPAN_LOCATION_MARKERS):
+        if _has_any_marker(visible, _JAPAN_LOCATION_MARKERS):
+            return True
+        if _has_any_marker(visible, _KOREA_LOCATION_MARKERS):
+            return False
+        if _has_any_marker(visible, _REGIONAL_REMOTE_LOCATION_MARKERS):
+            return _has_any_marker(country_signal_text, _JAPAN_LOCATION_MARKERS)
+        return True
+
+    return True
+
+
+def _normalized_numeric_job_id(value: str) -> str:
+    match = re.search(r"(\d+)\s*$", str(value or "").strip())
+    if not match:
+        return ""
+    return match.group(1).lstrip("0") or "0"
+
+
+def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> bool:
+    try:
+        parameters = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (
+            parameter.name == keyword
+            and parameter.kind
+            in {
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        )
+        for parameter in parameters
+    )
+
+
+def _wait_for_search_results_hydration_with_diagnostics(
+    callback: Callable[..., str],
+    page: Any,
+    *,
+    query: str,
+    diagnostics: LinkedInSearchHydrationDiagnosticsCollector | None,
+) -> str:
+    kwargs: dict[str, Any] = {}
+    if _callable_accepts_keyword(callback, "query"):
+        kwargs["query"] = query
+    if diagnostics and _callable_accepts_keyword(callback, "diagnostics"):
+        kwargs["diagnostics"] = diagnostics
+    return callback(page, **kwargs)
+
+
+def _latest_search_hydration_event(
+    diagnostics: LinkedInSearchHydrationDiagnosticsCollector | None,
+    *,
+    query: str,
+) -> Any | None:
+    if diagnostics is None:
+        return None
+    for event in reversed(diagnostics.events):
+        if getattr(event, "query", "") == query:
+            return event
+    return None
+
+
+def _is_timeout_without_search_signals(
+    hydration_state: str,
+    diagnostics: LinkedInSearchHydrationDiagnosticsCollector | None,
+    *,
+    query: str,
+) -> bool:
+    if hydration_state != "timeout":
+        return False
+    event = _latest_search_hydration_event(diagnostics, query=query)
+    if event is None:
+        return False
+    return (
+        getattr(event, "outcome", "") == "timeout"
+        and int(getattr(event, "card_count", 0) or 0) == 0
+        and int(getattr(event, "href_count", 0) or 0) == 0
+        and not bool(getattr(event, "empty_state_visible", False))
+        and not bool(getattr(event, "auth_checkpoint_visible", False))
+    )
+
+
+def _static_search_probe_outcome(probe: Any) -> str:
+    if getattr(probe, "records", None):
+        return "ok"
+    detail = str(getattr(probe, "detail", "") or "")
+    category = str(getattr(probe, "category", "") or "")
+    if detail == "final_url_rejected":
+        return "invalid_url"
+    if category in {"query_access_rejected", "query_rate_limited"}:
+        return "failed"
+    return "no_candidates"
+
+
+def _record_search_static_probe(
+    diagnostics: LinkedInStaticProbeDiagnosticsCollector | None,
+    *,
+    query: str,
+    probe: Any,
+    accepted_count: int,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics.record(
+        kind="search_static_probe",
+        query=query,
+        status_code=int(getattr(probe, "status_code", 0) or 0),
+        candidate_count=len(getattr(probe, "records", []) or []),
+        accepted_count=accepted_count,
+        outcome=_static_search_probe_outcome(probe),
+    )
+
+
+def _static_detail_probe_outcome(probe: Any) -> str:
+    category = str(getattr(probe, "category", "") or "")
+    detail = str(getattr(probe, "detail", "") or "")
+    if category == "ok":
+        return "ok"
+    return {
+        "missing_description": "missing_description",
+        "incomplete_description": "incomplete_description",
+        "missing_date": "missing_date",
+        "outside_24_hours": "outside_24_hours",
+        "final_url_rejected": "invalid_url",
+        "job_id_mismatch": "invalid_url",
+        "auth_checkpoint": "auth_checkpoint",
+    }.get(detail, "failed")
+
+
+def _record_detail_static_probe(
+    diagnostics: LinkedInStaticProbeDiagnosticsCollector | None,
+    *,
+    probe: Any,
+    record: Any,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics.record(
+        kind="detail_static_probe",
+        job_id=getattr(record, "linkedin_job_id", ""),
+        status_code=int(getattr(probe, "status_code", 0) or 0),
+        candidate_count=1,
+        accepted_count=1 if getattr(probe, "category", "") == "ok" else 0,
+        outcome=_static_detail_probe_outcome(probe),
+        body_source=str(getattr(probe, "body_source", "") or ""),
+        description_length=int(getattr(probe, "description_length", 0) or 0),
+        guest_status_code=int(getattr(probe, "guest_status_code", 0) or 0),
+        guest_retry_count=int(getattr(probe, "guest_retry_count", 0) or 0),
+        identity_consistent=bool(getattr(probe, "identity_consistent", True)),
+    )
+
+
+def _needs_static_detail_probe(
+    record: Any,
+    *,
+    include_description: bool,
+    is_incomplete_detail_body: Callable[[str], bool],
+) -> bool:
+    description = str(getattr(record, "description_full_text", "") or "")
+    if include_description and not description.strip():
+        return True
+    if include_description and is_incomplete_detail_body(description):
+        return True
+    return getattr(record, "published_at", None) is None
+
+
+def _has_plausible_detail_body(
+    record: Any,
+    *,
+    include_description: bool,
+    is_incomplete_detail_body: Callable[[str], bool],
+) -> bool:
+    if not include_description:
+        return True
+    description = str(getattr(record, "description_full_text", "") or "")
+    return bool(description.strip()) and not is_incomplete_detail_body(description)
+
+
+def _merge_detail_evidence(
+    current: Any,
+    incoming: Any,
+    *,
+    include_description: bool,
+    is_incomplete_detail_body: Callable[[str], bool],
+) -> Any:
+    """Preserve safe detail evidence when a later attempt is less complete."""
+
+    if incoming is current:
+        return current
+    if not include_description:
+        return incoming
+    if not _has_plausible_detail_body(
+        current,
+        include_description=include_description,
+        is_incomplete_detail_body=is_incomplete_detail_body,
+    ):
+        return incoming
+    if _has_plausible_detail_body(
+        incoming,
+        include_description=include_description,
+        is_incomplete_detail_body=is_incomplete_detail_body,
+    ):
+        return incoming
+
+    preserved: dict[str, str] = {
+        "description_full_text": str(
+            getattr(current, "description_full_text", "") or ""
+        )
+    }
+    incoming_excerpt = str(getattr(incoming, "description_excerpt", "") or "")
+    current_excerpt = str(getattr(current, "description_excerpt", "") or "")
+    if current_excerpt and not incoming_excerpt:
+        preserved["description_excerpt"] = current_excerpt
+    return incoming.model_copy(update=preserved)
+
+
+def _static_detail_probe_preserves_body_but_misses_date(probe: Any, record: Any) -> bool:
+    return (
+        str(getattr(probe, "category", "") or "") == "detail_incomplete"
+        and str(getattr(probe, "detail", "") or "") == "missing_date"
+        and bool(str(getattr(record, "description_full_text", "") or "").strip())
+        and getattr(record, "published_at", None) is None
+    )
+
+
+def _session_has_authenticated_request(session: Any) -> bool:
+    context = getattr(session, "context", None)
+    request = getattr(context, "request", None)
+    return callable(getattr(request, "get", None))
+
+
+def _run_guarded_direct_detail_fallback(
+    page,
+    candidate: Any,
+    *,
+    source_url: str,
+    include_description: bool,
+    warnings: list[str],
+    validate_jobs_url: Callable[[str], str],
+    validate_authenticated_page: Callable[[object], None],
+    wait_for_search_results_hydration: Callable[..., str],
+    enrich_job_detail: Callable[..., Any],
+    safe_error_label: Callable[[Exception], str],
+    terminal_error_types: tuple[type[Exception], ...],
+    diagnostics: LinkedInDetailDiagnosticsCollector | None = None,
+) -> Any:
+    """Open one exact detail URL and restore the original hydrated search route."""
+
+    job_id = _normalized_numeric_job_id(
+        getattr(candidate, "linkedin_job_id", "")
+    )
+    if not job_id:
+        raise ValueError("direct_detail_job_id_missing")
+    original_search_url = validate_jobs_url(source_url)
+    candidate_url = str(getattr(candidate, "canonical_url", "") or "").strip()
+    direct_url = validate_jobs_url(
+        candidate_url or f"https://www.linkedin.com/jobs/view/{job_id}"
+    )
+    direct_url_match = re.search(
+        r"/jobs/view/(?:[^/?#]*-)?(\d+)/?(?:[?#]|$)",
+        direct_url,
+    )
+    direct_url_job_id = (
+        direct_url_match.group(1).lstrip("0") or "0"
+        if direct_url_match
+        else ""
+    )
+    if direct_url_job_id != job_id:
+        raise ValueError("direct_detail_job_id_mismatch")
+    direct_candidate = candidate.model_copy(
+        update={
+            "linkedin_job_id": job_id,
+            "canonical_url": direct_url,
+        }
+    )
+    warnings.append(f"direct_detail_fallback_used:{job_id}")
+    if diagnostics:
+        diagnostics.record(
+            direct_candidate,
+            phase="fallback",
+            mode="direct",
+            outcome="started",
+            include_description=include_description,
+            date_ready=direct_candidate.published_at is not None,
+        )
+    try:
+        enrichment_kwargs: dict[str, Any] = {
+            "include_description": include_description,
+            "now": datetime.now(timezone.utc),
+        }
+        if diagnostics and _callable_accepts_keyword(enrich_job_detail, "diagnostics"):
+            enrichment_kwargs["diagnostics"] = diagnostics
+        return enrich_job_detail(page, direct_candidate, **enrichment_kwargs)
+    except Exception:
+        if diagnostics:
+            diagnostics.record(
+                direct_candidate,
+                phase="fallback",
+                mode="direct",
+                outcome="failed",
+                include_description=include_description,
+                date_ready=direct_candidate.published_at is not None,
+            )
+        raise
+    finally:
+        try:
+            page.goto(
+                original_search_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            validate_authenticated_page(page)
+            hydration_state = (
+                _wait_for_search_results_hydration_with_diagnostics(
+                    wait_for_search_results_hydration,
+                    page,
+                    query=f"restore:{job_id}",
+                    diagnostics=get_active_search_hydration_diagnostics(),
+                )
+            )
+            if hydration_state != "results":
+                warnings.append(f"list_not_hydrated:{job_id}")
+                warnings.append(
+                    f"search_restore_failed:{job_id}:list_not_hydrated"
+                )
+        except terminal_error_types:
+            warnings.append(f"search_restore_failed:{job_id}:auth_or_blocked")
+            raise
+        except Exception as exc:
+            warnings.append(
+                f"search_restore_failed:{job_id}:{safe_error_label(exc)}"
+            )
 
 
 @dataclass(frozen=True)
@@ -47,6 +589,7 @@ class LinkedInJobsPipelineDeps:
     safe_error_label: Callable[[Exception], str]
     is_http_response_code_failure: Callable[[str], bool]
     probe_search_with_authenticated_request: Callable[..., Any]
+    probe_detail_with_authenticated_request: Callable[..., Any]
     error_category: Callable[[str], str]
     is_page_recoverable_error: Callable[[str], bool]
     query_page_recovery_threshold: int
@@ -99,6 +642,7 @@ class LinkedInJobsPipelineDeps:
             safe_error_label=module._safe_error_label,
             is_http_response_code_failure=module._is_http_response_code_failure,
             probe_search_with_authenticated_request=module._probe_linkedin_search_with_authenticated_request,
+            probe_detail_with_authenticated_request=module._probe_linkedin_detail_with_authenticated_request,
             error_category=module._error_category,
             is_page_recoverable_error=module._is_page_recoverable_error,
             query_page_recovery_threshold=module._QUERY_PAGE_RECOVERY_THRESHOLD,
@@ -167,6 +711,7 @@ def scrape_linkedin_jobs_impl(
     _safe_error_label = deps.safe_error_label
     _is_http_response_code_failure = deps.is_http_response_code_failure
     _probe_linkedin_search_with_authenticated_request = deps.probe_search_with_authenticated_request
+    _probe_linkedin_detail_with_authenticated_request = deps.probe_detail_with_authenticated_request
     _error_category = deps.error_category
     _is_page_recoverable_error = deps.is_page_recoverable_error
     _QUERY_PAGE_RECOVERY_THRESHOLD = deps.query_page_recovery_threshold
@@ -188,6 +733,10 @@ def scrape_linkedin_jobs_impl(
     _round_robin_candidates_by_location = deps.round_robin_candidates_by_location
     _dedupe_linkedin_vacancies_semantically = deps.dedupe_vacancies_semantically
     _safe_auth_diagnostic = deps.safe_auth_diagnostic
+    detail_diagnostics = get_active_detail_diagnostics()
+    search_hydration_diagnostics = get_active_search_hydration_diagnostics()
+    static_probe_diagnostics = get_active_static_probe_diagnostics()
+    visual_diagnostics = get_active_visual_diagnostics()
 
     store = session_store or LinkedInSessionStore()
     metadata = store.load_browser_metadata()
@@ -219,10 +768,13 @@ def scrape_linkedin_jobs_impl(
     records: list["LinkedInVacancyRecord"] = []
     candidates: list["LinkedInVacancyRecord"] = []
     seen_candidate_keys: set[str] = set()
+    standalone_candidate_keys: set[str] = set()
+    static_probe_candidate_keys: set[str] = set()
     rejected: list["LinkedInRejectedRecord"] = []
     timings: list["LinkedInQueryTiming"] = []
     warnings: list[str] = []
     query_urls: list[str] = []
+    queued_for_detail_by_source: dict[str, int] = {}
     try:
         page = session.page
         page.goto("https://www.linkedin.com/jobs/", wait_until="domcontentloaded", timeout=30000)
@@ -291,6 +843,11 @@ def scrape_linkedin_jobs_impl(
                 global_query_attempts += 1
                 navigation_attempt += 1
                 search_navigation_state.invalidate_source()
+                visual_run = (
+                    visual_diagnostics.start_run(page, query=role)
+                    if visual_diagnostics is not None
+                    else None
+                )
                 try:
                     page.goto(
                         search_url,
@@ -298,43 +855,168 @@ def scrape_linkedin_jobs_impl(
                         timeout=30000,
                     )
                     _validate_authenticated_page(page)
-                    hydration_state = _wait_for_search_results_hydration(page)
+                    if visual_run is not None:
+                        visual_run.capture_before(page)
+                    hydration_state = (
+                        _wait_for_search_results_hydration_with_diagnostics(
+                            _wait_for_search_results_hydration,
+                            page,
+                            query=role,
+                            diagnostics=search_hydration_diagnostics,
+                        )
+                    )
+                    if visual_run is not None:
+                        visual_run.capture_after(page)
                     if hydration_state == "empty":
                         warnings.append(f"query_empty_results_explicit:{role}")
                     elif hydration_state == "timeout":
+                        warnings.append(f"list_not_hydrated:{role}")
                         warnings.append(
                             f"query_hydration_timeout:no_terminal_signal:{role}"
                         )
+                    parser_kwargs: dict[str, Any] = {
+                        "source_url": search_url,
+                        "now": datetime.now(timezone.utc),
+                    }
+                    if hydration_state == "timeout" and _callable_accepts_keyword(
+                        _parse_linkedin_jobs_html_with_diagnostics,
+                        "allow_standalone_fallback",
+                    ):
+                        parser_kwargs["allow_standalone_fallback"] = True
                     discovered, diagnostics = (
                         _parse_linkedin_jobs_html_with_diagnostics(
                             page.content(),
-                            source_url=search_url,
-                            now=datetime.now(timezone.utc),
+                            **parser_kwargs,
                         )
                     )
+                    timeout_without_search_signals = (
+                        _is_timeout_without_search_signals(
+                            hydration_state,
+                            search_hydration_diagnostics,
+                            query=role,
+                        )
+                    )
+                    static_search_probe = None
+                    static_probe_keys_for_query: set[str] = set()
+                    accepted_from_static_probe = 0
+                    if timeout_without_search_signals:
+                        warnings.append(
+                            "search_static_probe_attempt:"
+                            f"{query_location or 'unspecified'}"
+                        )
+                        static_probe_kwargs: dict[str, Any] = {
+                            "source_url": search_url,
+                            "now": datetime.now(timezone.utc),
+                        }
+                        if _callable_accepts_keyword(
+                            _probe_linkedin_search_with_authenticated_request,
+                            "allow_standalone_fallback",
+                        ):
+                            static_probe_kwargs[
+                                "allow_standalone_fallback"
+                            ] = True
+                        static_search_probe = (
+                            _probe_linkedin_search_with_authenticated_request(
+                                session,
+                                **static_probe_kwargs,
+                            )
+                        )
+                        static_records = list(
+                            getattr(static_search_probe, "records", []) or []
+                        )
+                        static_warning = (
+                            "search_static_probe_result:"
+                            f"{query_location or 'unspecified'}:"
+                            f"status_{getattr(static_search_probe, 'status_code', 0)}:"
+                            f"{getattr(static_search_probe, 'category', 'unknown')}:"
+                            f"candidates_{len(static_records)}"
+                        )
+                        if getattr(static_search_probe, "detail", ""):
+                            static_warning += (
+                                f":{getattr(static_search_probe, 'detail')}"
+                            )
+                        warnings.append(static_warning)
+                        if static_records:
+                            diagnostics = static_search_probe.diagnostics
+                            for record in static_records:
+                                static_probe_keys_for_query.add(_record_key(record))
+                            discovered.extend(static_records)
                     search_navigation_state.active_source_url = search_url
                     discovered_count = len(discovered)
+                    standalone_fallback_count = (
+                        diagnostics.discard_reasons.get(
+                            "standalone_link_fallback",
+                            0,
+                        )
+                    )
+                    discovered_from_standalone_fallback = (
+                        hydration_state == "timeout"
+                        and standalone_fallback_count > 0
+                    )
+                    queued_from_query = 0
                     for record in discovered:
+                        identity = _safe_candidate_identity(record)
+                        if not identity:
+                            rejected.append(
+                                LinkedInRejectedRecord(
+                                    source_url=getattr(record, "canonical_url", ""),
+                                    title=getattr(record, "title", ""),
+                                    reason="missing_job_identity",
+                                )
+                            )
+                            continue
+                        record = record.model_copy(
+                            update={"linkedin_job_id": identity}
+                        )
                         dedupe_key = _record_key(record)
                         if dedupe_key in seen_candidate_keys:
                             rejected.append(
                                 LinkedInRejectedRecord(
                                     source_url=record.canonical_url,
                                     title=record.title,
-                                    reason="duplicate",
+                                    reason="duplicate_candidate_skipped_before_detail",
                                 )
+                            )
+                            warnings.append(
+                                "duplicate_candidate_skipped_before_detail:"
+                                f"{identity}"
                             )
                             continue
                         seen_candidate_keys.add(dedupe_key)
+                        queued_from_query += 1
+                        if discovered_from_standalone_fallback:
+                            standalone_candidate_keys.add(dedupe_key)
+                        if dedupe_key in static_probe_keys_for_query:
+                            static_probe_candidate_keys.add(dedupe_key)
+                            accepted_from_static_probe += 1
                         candidate_locations[dedupe_key] = query_location
                         candidates.append(record)
+                    queued_for_detail_by_source[search_url] = (
+                        queued_for_detail_by_source.get(search_url, 0)
+                        + queued_from_query
+                    )
+                    diagnostics = _mark_diagnostics_after_query_dedupe(
+                        diagnostics,
+                        new_count=queued_from_query,
+                    )
+                    if static_search_probe is not None:
+                        _record_search_static_probe(
+                            static_probe_diagnostics,
+                            query=role,
+                            probe=static_search_probe,
+                            accepted_count=accepted_from_static_probe,
+                        )
                     consecutive_query_errors_by_location[query_location] = 0
                     recoverable_query_errors_by_location[query_location] = 0
                     error = ""
                     break
                 except (LinkedInAuthRequiredError, LinkedInBlockedError):
+                    if visual_run is not None:
+                        visual_run.capture_after(page)
                     raise
                 except Exception as exc:
+                    if visual_run is not None:
+                        visual_run.capture_after(page)
                     attempt_error = _safe_error_label(exc)
                     can_retry_degraded_page = (
                         navigation_attempt == 1
@@ -396,22 +1078,49 @@ def scrape_linkedin_jobs_impl(
                         warnings.append(probe_warning)
                         if probe.records:
                             discovered_count = len(probe.records)
+                            queued_from_query = 0
                             for record in probe.records:
+                                identity = _safe_candidate_identity(record)
+                                if not identity:
+                                    rejected.append(
+                                        LinkedInRejectedRecord(
+                                            source_url=getattr(record, "canonical_url", ""),
+                                            title=getattr(record, "title", ""),
+                                            reason="missing_job_identity",
+                                        )
+                                    )
+                                    continue
+                                record = record.model_copy(
+                                    update={"linkedin_job_id": identity}
+                                )
                                 dedupe_key = _record_key(record)
                                 if dedupe_key in seen_candidate_keys:
                                     rejected.append(
                                         LinkedInRejectedRecord(
                                             source_url=record.canonical_url,
                                             title=record.title,
-                                            reason="duplicate",
+                                            reason="duplicate_candidate_skipped_before_detail",
                                         )
+                                    )
+                                    warnings.append(
+                                        "duplicate_candidate_skipped_before_detail:"
+                                        f"{identity}"
                                     )
                                     continue
                                 seen_candidate_keys.add(dedupe_key)
+                                queued_from_query += 1
                                 candidate_locations[dedupe_key] = (
                                     query_location
                                 )
                                 candidates.append(record)
+                            queued_for_detail_by_source[search_url] = (
+                                queued_for_detail_by_source.get(search_url, 0)
+                                + queued_from_query
+                            )
+                            diagnostics = _mark_diagnostics_after_query_dedupe(
+                                diagnostics,
+                                new_count=queued_from_query,
+                            )
                             consecutive_query_errors_by_location[
                                 query_location
                             ] = 0
@@ -454,6 +1163,9 @@ def scrape_linkedin_jobs_impl(
                         recoverable_query_errors_by_location[query_location] = 0
                     break
                 finally:
+                    if visual_run is not None:
+                        visual_run.stop_trace(page)
+                        visual_run.finalize()
                     search_navigation_state.completed_at = time.monotonic()
             completed = datetime.now(timezone.utc)
             timings.append(
@@ -463,7 +1175,7 @@ def scrape_linkedin_jobs_impl(
                     completed_at=completed,
                     elapsed_ms=int((time.monotonic() - started_monotonic) * 1000),
                     discovered_count=discovered_count,
-                    retained_count=0,
+                    retained_count=queued_for_detail_by_source.get(search_url, 0),
                     error=error,
                     diagnostics=diagnostics,
                 )
@@ -566,7 +1278,10 @@ def scrape_linkedin_jobs_impl(
 
         relevant_candidates: list["LinkedInVacancyRecord"] = []
         for candidate in candidates:
-            if not candidate.matched_terms:
+            if (
+                not candidate.matched_terms
+                and not getattr(candidate, "candidate_metadata_incomplete", False)
+            ):
                 rejected.append(
                     LinkedInRejectedRecord(
                         source_url=candidate.canonical_url,
@@ -598,6 +1313,8 @@ def scrape_linkedin_jobs_impl(
         detail_attempts_by_location: dict[str, int] = {}
         detail_network_circuit_locations: set[str] = set()
         direct_detail_fallback_disabled_locations: set[str] = set()
+        direct_detail_fallback_attempted_candidates: set[str] = set()
+        static_detail_probe_attempted_candidates: set[str] = set()
         consecutive_detail_network_failures_by_location: dict[str, int] = {}
         if not _session_page_is_alive(session):
             warnings.append(
@@ -608,12 +1325,115 @@ def scrape_linkedin_jobs_impl(
         enriched_records: list["LinkedInVacancyRecord"] = []
         should_balance_locations = len([location for location in normalized_locations if location]) > 1
 
+        def record_detail_rejection(record: Any, reason: str, mode: str) -> None:
+            if not detail_diagnostics:
+                return
+            rejection = {
+                "missing_description_full_text": "missing_description",
+                "detail_incomplete_body": "incomplete_description",
+                "unverified_posted_date": "missing_date",
+                "outside_24_hours": "outside_24_hours",
+                "location_scope_mismatch": "location_mismatch",
+            }.get(reason, "detail_failure")
+            detail_diagnostics.record(
+                record,
+                phase="validation",
+                mode=mode,
+                outcome="rejected",
+                include_description=request.include_description,
+                description_ready=bool(getattr(record, "description_full_text", "")),
+                date_ready=getattr(record, "published_at", None) is not None,
+                rejection=rejection,
+            )
+
         for candidate in shortlist:
             candidate_key = _record_key(candidate)
             candidate_location = candidate_locations.get(candidate_key, "")
             verified = candidate
             needs_enrichment = _needs_detail_enrichment(candidate)
             detail_reason = ""
+            detail_mode = "none"
+            source_url = candidate.source_url
+            is_standalone_candidate = candidate_key in standalone_candidate_keys
+            is_static_probe_candidate = candidate_key in static_probe_candidate_keys
+            is_direct_url_candidate = (
+                is_standalone_candidate or is_static_probe_candidate
+            )
+
+            if (
+                needs_enrichment
+                and _session_has_authenticated_request(session)
+                and candidate_key not in static_detail_probe_attempted_candidates
+                and _needs_static_detail_probe(
+                    verified,
+                    include_description=request.include_description,
+                    is_incomplete_detail_body=_is_incomplete_detail_body,
+                )
+                and detail_attempts < detail_budget
+                and detail_attempts_by_location.get(candidate_location, 0)
+                < detail_quota_per_location
+            ):
+                static_detail_probe_attempted_candidates.add(candidate_key)
+                detail_attempts += 1
+                detail_attempts_by_location[candidate_location] = (
+                    detail_attempts_by_location.get(candidate_location, 0) + 1
+                )
+                job_id = verified.linkedin_job_id or "unknown"
+                warnings.append(f"detail_static_probe_attempt:{job_id}")
+                try:
+                    static_detail_probe = (
+                        _probe_linkedin_detail_with_authenticated_request(
+                            session,
+                            verified,
+                            include_description=request.include_description,
+                            now=datetime.now(timezone.utc),
+                        )
+                    )
+                except (LinkedInAuthRequiredError, LinkedInBlockedError):
+                    raise
+                except Exception as exc:
+                    warnings.append(
+                        "detail_static_probe_failed:"
+                        f"{job_id}:{_safe_error_label(exc)}"
+                    )
+                else:
+                    _record_detail_static_probe(
+                        static_probe_diagnostics,
+                        probe=static_detail_probe,
+                        record=verified,
+                    )
+                    static_detail_warning = (
+                        "detail_static_probe_result:"
+                        f"{job_id}:"
+                        f"status_{getattr(static_detail_probe, 'status_code', 0)}:"
+                        f"{getattr(static_detail_probe, 'category', 'unknown')}"
+                    )
+                    if getattr(static_detail_probe, "detail", ""):
+                        static_detail_warning += (
+                            f":{getattr(static_detail_probe, 'detail')}"
+                        )
+                    warnings.append(static_detail_warning)
+                    probe_record = getattr(static_detail_probe, "record", verified)
+                    verified = _merge_detail_evidence(
+                        verified,
+                        probe_record,
+                        include_description=request.include_description,
+                        is_incomplete_detail_body=_is_incomplete_detail_body,
+                    )
+                    if _static_detail_probe_preserves_body_but_misses_date(
+                        static_detail_probe,
+                        verified,
+                    ):
+                        detail_reason = "unverified_posted_date"
+                    if getattr(static_detail_probe, "category", "") == "ok":
+                        verified = _merge_detail_evidence(
+                            verified,
+                            probe_record,
+                            include_description=request.include_description,
+                            is_incomplete_detail_body=_is_incomplete_detail_body,
+                        )
+                        needs_enrichment = False
+                        detail_reason = ""
 
             if needs_enrichment:
                 location_detail_attempts = detail_attempts_by_location.get(
@@ -627,6 +1447,94 @@ def scrape_linkedin_jobs_impl(
                     or location_detail_attempts >= detail_quota_per_location
                 ):
                     detail_reason = "detail_budget_exhausted"
+                elif is_direct_url_candidate:
+                    if not direct_detail_fallback:
+                        warning_prefix = (
+                            "standalone_direct_detail_fallback_disabled"
+                            if is_standalone_candidate
+                            else "static_probe_direct_detail_fallback_disabled"
+                        )
+                        warnings.append(
+                            f"{warning_prefix}:"
+                            f"{candidate.linkedin_job_id or 'unknown'}"
+                        )
+                    else:
+                        direct_detail_fallback_attempted_candidates.add(
+                            candidate_key
+                        )
+                        detail_attempts += 1
+                        detail_attempts_by_location[candidate_location] = (
+                            location_detail_attempts + 1
+                        )
+                        try:
+                            search_navigation_state.invalidate_source()
+                            detail_mode = "direct"
+                            direct_record = _run_guarded_direct_detail_fallback(
+                                page,
+                                candidate,
+                                source_url=source_url,
+                                include_description=request.include_description,
+                                warnings=warnings,
+                                validate_jobs_url=validate_linkedin_jobs_url,
+                                validate_authenticated_page=_validate_authenticated_page,
+                                wait_for_search_results_hydration=_wait_for_search_results_hydration,
+                                enrich_job_detail=_enrich_job_detail,
+                                safe_error_label=_safe_error_label,
+                                terminal_error_types=(
+                                    LinkedInAuthRequiredError,
+                                    LinkedInBlockedError,
+                                ),
+                                diagnostics=detail_diagnostics,
+                            )
+                            verified = _merge_detail_evidence(
+                                verified,
+                                direct_record,
+                                include_description=request.include_description,
+                                is_incomplete_detail_body=_is_incomplete_detail_body,
+                            )
+                            detail_reason = ""
+                        except (LinkedInAuthRequiredError, LinkedInBlockedError):
+                            raise
+                        except Exception as exc:
+                            detail_error = _safe_error_label(exc)
+                            detail_reason = (
+                                "detail_network_failure"
+                                if _is_page_recoverable_error(detail_error)
+                                else "detail_fetch_failed"
+                            )
+                            warnings.append(
+                                f"detail_fallback_failed:"
+                                f"{candidate.linkedin_job_id or 'unknown'}:"
+                                f"{detail_error}"
+                            )
+                            if detail_reason == "detail_network_failure":
+                                failures = (
+                                    consecutive_detail_network_failures_by_location.get(
+                                        candidate_location,
+                                        0,
+                                    )
+                                    + 1
+                                )
+                                consecutive_detail_network_failures_by_location[
+                                    candidate_location
+                                ] = failures
+                                if (
+                                    _is_http_response_code_failure(detail_error)
+                                    or failures >= _DETAIL_NETWORK_CIRCUIT_THRESHOLD
+                                ):
+                                    direct_detail_fallback_disabled_locations.add(
+                                        candidate_location
+                                    )
+                                    detail_network_circuit_locations.add(
+                                        candidate_location
+                                    )
+                                    warnings.append(
+                                        "detail_location_circuit_open:"
+                                        f"{candidate_location or 'unspecified'}:"
+                                        f"{_error_category(detail_error)}"
+                                    )
+                        finally:
+                            last_detail_click_at = time.monotonic()
                 else:
                     if not _session_page_is_alive(session):
                         try:
@@ -694,19 +1602,27 @@ def scrape_linkedin_jobs_impl(
                             card_link = _safe_job_card_link(page, candidate)
                             if card_link is None:
                                 raise LinkedInDetailPanelError(
-                                    "card_click_failed"
+                                    "selector_drift/card_missing"
                                 )
                             _respect_detail_click_cadence(
                                 page,
                                 last_detail_click_at=last_detail_click_at,
                                 interval_ms=detail_click_interval_ms,
                             )
-                            verified = _enrich_job_detail_via_panel(
+                            detail_mode = "panel"
+                            panel_record = _enrich_job_detail_via_panel(
                                 page,
                                 candidate,
                                 card_link=card_link,
                                 include_description=request.include_description,
                                 now=datetime.now(timezone.utc),
+                                diagnostics=detail_diagnostics,
+                            )
+                            verified = _merge_detail_evidence(
+                                verified,
+                                panel_record,
+                                include_description=request.include_description,
+                                is_incomplete_detail_body=_is_incomplete_detail_body,
                             )
                             consecutive_detail_network_failures_by_location[
                                 candidate_location
@@ -769,19 +1685,27 @@ def scrape_linkedin_jobs_impl(
                                     )
                                     if retry_card_link is None:
                                         raise LinkedInDetailPanelError(
-                                            "card_click_failed"
+                                            "selector_drift/card_missing"
                                         )
                                     _respect_detail_click_cadence(
                                         page,
                                         last_detail_click_at=last_detail_click_at,
                                         interval_ms=detail_click_interval_ms,
                                     )
-                                    verified = _enrich_job_detail_via_panel(
+                                    detail_mode = "panel"
+                                    retry_panel_record = _enrich_job_detail_via_panel(
                                         page,
                                         candidate,
                                         card_link=retry_card_link,
                                         include_description=request.include_description,
                                         now=datetime.now(timezone.utc),
+                                        diagnostics=detail_diagnostics,
+                                    )
+                                    verified = _merge_detail_evidence(
+                                        verified,
+                                        retry_panel_record,
+                                        include_description=request.include_description,
+                                        is_incomplete_detail_body=_is_incomplete_detail_body,
                                     )
                                     detail_reason = ""
                                     consecutive_detail_network_failures_by_location[
@@ -868,8 +1792,16 @@ def scrape_linkedin_jobs_impl(
                         fallback_allowed = (
                             bool(detail_reason)
                             and direct_detail_fallback
+                            and candidate_key
+                            not in direct_detail_fallback_attempted_candidates
                             and candidate_location
                             not in direct_detail_fallback_disabled_locations
+                            and detail_attempts < detail_budget
+                            and detail_attempts_by_location.get(
+                                candidate_location,
+                                0,
+                            )
+                            < detail_quota_per_location
                             and detail_reason
                             not in {
                                 "detail_budget_exhausted",
@@ -877,13 +1809,42 @@ def scrape_linkedin_jobs_impl(
                             }
                         )
                         if fallback_allowed:
+                            direct_detail_fallback_attempted_candidates.add(
+                                candidate_key
+                            )
+                            detail_attempts += 1
+                            detail_attempts_by_location[candidate_location] = (
+                                detail_attempts_by_location.get(
+                                    candidate_location,
+                                    0,
+                                )
+                                + 1
+                            )
                             try:
                                 search_navigation_state.invalidate_source()
-                                verified = _enrich_job_detail(
+                                detail_mode = "direct"
+                                direct_record = _run_guarded_direct_detail_fallback(
                                     page,
                                     candidate,
+                                    source_url=source_url,
                                     include_description=request.include_description,
-                                    now=datetime.now(timezone.utc),
+                                    warnings=warnings,
+                                    validate_jobs_url=validate_linkedin_jobs_url,
+                                    validate_authenticated_page=_validate_authenticated_page,
+                                    wait_for_search_results_hydration=_wait_for_search_results_hydration,
+                                    enrich_job_detail=_enrich_job_detail,
+                                    safe_error_label=_safe_error_label,
+                                    terminal_error_types=(
+                                        LinkedInAuthRequiredError,
+                                        LinkedInBlockedError,
+                                    ),
+                                    diagnostics=detail_diagnostics,
+                                )
+                                verified = _merge_detail_evidence(
+                                    verified,
+                                    direct_record,
+                                    include_description=request.include_description,
+                                    is_incomplete_detail_body=_is_incomplete_detail_body,
                                 )
                                 detail_reason = ""
                             except (LinkedInAuthRequiredError, LinkedInBlockedError):
@@ -902,6 +1863,110 @@ def scrape_linkedin_jobs_impl(
                                     f"{_safe_error_label(exc)}"
                                 )
 
+            if (
+                not detail_reason
+                and _session_has_authenticated_request(session)
+                and candidate_key not in static_detail_probe_attempted_candidates
+                and _needs_static_detail_probe(
+                    verified,
+                    include_description=request.include_description,
+                    is_incomplete_detail_body=_is_incomplete_detail_body,
+                )
+                and detail_attempts < detail_budget
+                and detail_attempts_by_location.get(candidate_location, 0)
+                < detail_quota_per_location
+            ):
+                static_detail_probe_attempted_candidates.add(candidate_key)
+                detail_attempts += 1
+                detail_attempts_by_location[candidate_location] = (
+                    detail_attempts_by_location.get(candidate_location, 0) + 1
+                )
+                job_id = verified.linkedin_job_id or "unknown"
+                warnings.append(f"detail_static_probe_attempt:{job_id}")
+                try:
+                    static_detail_probe = (
+                        _probe_linkedin_detail_with_authenticated_request(
+                            session,
+                            verified,
+                            include_description=request.include_description,
+                            now=datetime.now(timezone.utc),
+                        )
+                    )
+                except (LinkedInAuthRequiredError, LinkedInBlockedError):
+                    raise
+                except Exception as exc:
+                    if not detail_reason:
+                        detail_reason = (
+                            "detail_network_failure"
+                            if _is_page_recoverable_error(_safe_error_label(exc))
+                            else "detail_fetch_failed"
+                        )
+                    warnings.append(
+                        "detail_static_probe_failed:"
+                        f"{job_id}:{_safe_error_label(exc)}"
+                    )
+                else:
+                    _record_detail_static_probe(
+                        static_probe_diagnostics,
+                        probe=static_detail_probe,
+                        record=verified,
+                    )
+                    static_detail_warning = (
+                        "detail_static_probe_result:"
+                        f"{job_id}:"
+                        f"status_{getattr(static_detail_probe, 'status_code', 0)}:"
+                        f"{getattr(static_detail_probe, 'category', 'unknown')}"
+                    )
+                    if getattr(static_detail_probe, "detail", ""):
+                        static_detail_warning += (
+                            f":{getattr(static_detail_probe, 'detail')}"
+                        )
+                    warnings.append(static_detail_warning)
+                    probe_record = getattr(static_detail_probe, "record", verified)
+                    verified = _merge_detail_evidence(
+                        verified,
+                        probe_record,
+                        include_description=request.include_description,
+                        is_incomplete_detail_body=_is_incomplete_detail_body,
+                    )
+                    if _static_detail_probe_preserves_body_but_misses_date(
+                        static_detail_probe,
+                        verified,
+                    ):
+                        detail_reason = "unverified_posted_date"
+                    if getattr(static_detail_probe, "category", "") == "ok":
+                        verified = _merge_detail_evidence(
+                            verified,
+                            probe_record,
+                            include_description=request.include_description,
+                            is_incomplete_detail_body=_is_incomplete_detail_body,
+                        )
+                        detail_reason = ""
+                    elif getattr(
+                        static_detail_probe,
+                        "category",
+                        "",
+                    ) in {
+                        "detail_navigation_failure",
+                        "detail_access_rejected",
+                        "detail_rate_limited",
+                        "detail_upstream_failure",
+                    }:
+                        detail_reason = "detail_fetch_failed"
+
+            verified = _refresh_candidate_discovery_state(verified)
+
+            if not verified.matched_terms:
+                rejected.append(
+                    LinkedInRejectedRecord(
+                        source_url=verified.canonical_url,
+                        title=verified.title,
+                        reason="low_topic_relevance",
+                    )
+                )
+                record_detail_rejection(verified, "low_topic_relevance", detail_mode)
+                continue
+
             if request.include_description and not (
                 verified.description_full_text or ""
             ).strip():
@@ -912,10 +1977,12 @@ def scrape_linkedin_jobs_impl(
                         reason=detail_reason or "missing_description_full_text",
                     )
                 )
+                rejection_reason = detail_reason or "missing_description_full_text"
+                record_detail_rejection(verified, rejection_reason, detail_mode)
                 warnings.append(
                     "metadata_enrichment_incomplete:"
                     f"{verified.linkedin_job_id or 'unknown'}:"
-                    f"{detail_reason or 'missing_description_full_text'}"
+                    f"{rejection_reason}"
                 )
                 continue
 
@@ -931,6 +1998,7 @@ def scrape_linkedin_jobs_impl(
                         reason="detail_incomplete_body",
                     )
                 )
+                record_detail_rejection(verified, "detail_incomplete_body", detail_mode)
                 warnings.append(
                     "metadata_enrichment_incomplete:"
                     f"{verified.linkedin_job_id or 'unknown'}:detail_incomplete_body"
@@ -945,6 +2013,11 @@ def scrape_linkedin_jobs_impl(
                         reason=detail_reason or "unverified_posted_date",
                     )
                 )
+                record_detail_rejection(
+                    verified,
+                    detail_reason or "unverified_posted_date",
+                    detail_mode,
+                )
                 continue
             if not verified.is_within_24_hours:
                 rejected.append(
@@ -953,6 +2026,27 @@ def scrape_linkedin_jobs_impl(
                         title=verified.title,
                         reason="outside_24_hours",
                     )
+                )
+                record_detail_rejection(verified, "outside_24_hours", detail_mode)
+                continue
+            if not _visible_location_matches_requested_scope(
+                verified.location,
+                candidate_location,
+                _record_country_signal_text(verified),
+            ):
+                rejected.append(
+                    LinkedInRejectedRecord(
+                        source_url=verified.canonical_url,
+                        title=verified.title,
+                        reason="location_scope_mismatch",
+                    )
+                )
+                record_detail_rejection(verified, "location_scope_mismatch", detail_mode)
+                warnings.append(
+                    "location_scope_mismatch:"
+                    f"{verified.linkedin_job_id or 'unknown'}:"
+                    f"requested={candidate_location or 'unspecified'}:"
+                    f"visible={verified.location or 'unspecified'}"
                 )
                 continue
             if detail_reason:
@@ -1008,6 +2102,35 @@ def scrape_linkedin_jobs_impl(
         )
         warnings.extend(semantic_duplicate_warnings)
         records = ordered_records[: request.max_results]
+        rejected, rejected_duplicate_warnings = _dedupe_rejected_records(rejected)
+        warnings.extend(rejected_duplicate_warnings)
+        if (
+            not records
+            and any(
+                warning.startswith("query_hydration_timeout:")
+                for warning in warnings
+            )
+            and any(
+                warning.startswith(
+                    ("search_static_probe_result:", "detail_static_probe_result:")
+                )
+                for warning in warnings
+            )
+            and any(
+                item.reason
+                in {
+                    "missing_description_full_text",
+                    "detail_incomplete_body",
+                    "unverified_posted_date",
+                    "detail_fetch_failed",
+                    "detail_network_failure",
+                    "detail_budget_exhausted",
+                }
+                for item in rejected
+            )
+            and "linkedin_hydration_unusable" not in warnings
+        ):
+            warnings.append("linkedin_hydration_unusable")
 
         for record in records:
             record_id = record.linkedin_job_id or "unknown"
@@ -1044,14 +2167,9 @@ def scrape_linkedin_jobs_impl(
                     f"metadata_structured_missing:{record_id}"
                 )
 
-        retained_by_source: dict[str, int] = {}
-        for record in records:
-            retained_by_source[record.source_url] = (
-                retained_by_source.get(record.source_url, 0) + 1
-            )
         timings = [
             timing.model_copy(
-                update={"retained_count": retained_by_source.get(query_url, 0)}
+                update={"retained_count": queued_for_detail_by_source.get(query_url, 0)}
             )
             for timing, query_url in zip(timings, query_urls)
         ]
