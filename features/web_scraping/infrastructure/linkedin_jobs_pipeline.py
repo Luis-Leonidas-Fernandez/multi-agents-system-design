@@ -14,6 +14,10 @@ from features.web_scraping.infrastructure.linkedin_detail_diagnostics import (
 )
 from features.web_scraping.infrastructure.linkedin_query_navigation import (
     LinkedInSearchHydrationDiagnosticsCollector,
+    MIN_EXPECTED_DISCOVERY_CANDIDATES,
+    discovery_mode_for_sources,
+    discover_job_rows_via_activation,
+    merge_row_activation_records,
     get_active_search_hydration_diagnostics,
 )
 from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics import (
@@ -259,6 +263,11 @@ def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> boo
         for parameter in parameters
     )
 
+
+
+def _search_hydration_outcome_for_row_activation(outcome: str) -> str:
+    """Map row activation diagnostics to valid search hydration outcomes."""
+    return "results" if outcome == "row_activation_success" else "failed"
 
 def _wait_for_search_results_hydration_with_diagnostics(
     callback: Callable[..., str],
@@ -855,8 +864,6 @@ def scrape_linkedin_jobs_impl(
                         timeout=30000,
                     )
                     _validate_authenticated_page(page)
-                    if visual_run is not None:
-                        visual_run.capture_before(page)
                     hydration_state = (
                         _wait_for_search_results_hydration_with_diagnostics(
                             _wait_for_search_results_hydration,
@@ -866,7 +873,10 @@ def scrape_linkedin_jobs_impl(
                         )
                     )
                     if visual_run is not None:
-                        visual_run.capture_after(page)
+                        if hasattr(visual_run, "capture_after_hydration"):
+                            visual_run.capture_after_hydration(page)
+                        else:
+                            visual_run.capture_before(page)
                     if hydration_state == "empty":
                         warnings.append(f"query_empty_results_explicit:{role}")
                     elif hydration_state == "timeout":
@@ -889,6 +899,7 @@ def scrape_linkedin_jobs_impl(
                             **parser_kwargs,
                         )
                     )
+                    normal_dom_records = list(discovered)
                     timeout_without_search_signals = (
                         _is_timeout_without_search_signals(
                             hydration_state,
@@ -941,6 +952,177 @@ def scrape_linkedin_jobs_impl(
                             for record in static_records:
                                 static_probe_keys_for_query.add(_record_key(record))
                             discovered.extend(static_records)
+                    row_discovery = None
+                    dom_records_before_rows = list(discovered)
+                    if visual_run is not None and hasattr(
+                        visual_run, "capture_before_scroll"
+                    ):
+                        visual_run.capture_before_scroll(page)
+                    dom_job_ids = {
+                        _safe_candidate_identity(record)
+                        for record in normal_dom_records
+                        if _safe_candidate_identity(record)
+                    }
+                    if len(dom_job_ids) < MIN_EXPECTED_DISCOVERY_CANDIDATES:
+                        try:
+                            row_activation_kwargs: dict[str, Any] = {
+                                "source_url": search_url,
+                                "existing_job_ids": set(dom_job_ids)
+                                | {
+                                    _safe_candidate_identity(record)
+                                    for record in candidates
+                                    if _safe_candidate_identity(record)
+                                },
+                            }
+                            if (
+                                visual_run is not None
+                                and not hasattr(visual_run, "capture_detail")
+                                and _callable_accepts_keyword(
+                                discover_job_rows_via_activation,
+                                "diagnostic_capture",
+                                )
+                            ):
+                                row_activation_kwargs["diagnostic_capture"] = (
+                                    visual_run.capture_activation
+                                )
+                            if visual_run is not None and _callable_accepts_keyword(
+                                discover_job_rows_via_activation,
+                                "diagnostic_detail_capture",
+                            ):
+                                row_activation_kwargs["diagnostic_detail_capture"] = (
+                                    visual_run.capture_detail
+                                )
+                            if visual_run is not None and _callable_accepts_keyword(
+                                discover_job_rows_via_activation,
+                                "diagnostic_scroll",
+                            ):
+                                row_activation_kwargs["diagnostic_scroll"] = (
+                                    visual_run.capture_after_scroll
+                                )
+                            row_discovery = discover_job_rows_via_activation(
+                                page,
+                                **row_activation_kwargs,
+                            )
+                        except Exception as row_exc:
+                            warnings.append(
+                                "row_activation_failed:"
+                                f"{query_location or 'unspecified'}:"
+                                f"{_safe_error_label(row_exc)}"
+                            )
+                        else:
+                            valid_dom_records = [
+                                record
+                                for record in dom_records_before_rows
+                                if _safe_candidate_identity(record)
+                            ]
+                            discovered, dom_contributed, row_contributed = (
+                                merge_row_activation_records(
+                                    valid_dom_records,
+                                    row_discovery.records,
+                                )
+                            )
+                            discovered.extend(
+                                record
+                                for record in dom_records_before_rows
+                                if not _safe_candidate_identity(record)
+                            )
+                            if row_contributed or row_discovery.structural_rows_found > 0:
+                                diagnostics = diagnostics.model_copy(
+                                    update={
+                                        "discovery_mode": discovery_mode_for_sources(
+                                            dom_contributed=dom_contributed,
+                                            row_contributed=row_contributed,
+                                            structural_rows_found=(
+                                                row_discovery.structural_rows_found > 0
+                                            ),
+                                            row_job_ids_resolved=row_discovery.job_ids_resolved,
+                                        ),
+                                        "discovery_degraded": True,
+                                    }
+                                )
+                            diagnostics = diagnostics.model_copy(
+                                update={
+                                    "row_activation_count": row_discovery.activation_count,
+                                    "row_activation_success_count": row_discovery.success_count,
+                                    "row_activation_no_change_count": row_discovery.no_change_count,
+                                    "row_activation_no_job_id_count": row_discovery.no_job_id_count,
+                                    "row_activation_duplicate_count": row_discovery.duplicate_count,
+                                    "row_activation_scroll_count": row_discovery.scroll_count,
+                                    "selected_row_container_score": row_discovery.selected_row_container_score,
+                                    "row_candidate_count": row_discovery.structural_rows_found,
+                                    "row_interactive_count": row_discovery.row_interactive_count,
+                                    "row_job_ids_resolved": row_discovery.job_ids_resolved,
+                                    "row_activation_stop_reason": row_discovery.stop_reason,
+                                    "candidate_count": len({
+                                        _safe_candidate_identity(record)
+                                        for record in discovered
+                                        if _safe_candidate_identity(record)
+                                    }),
+                                    "unique_candidate_count": len({
+                                        _safe_candidate_identity(record)
+                                        for record in discovered
+                                        if _safe_candidate_identity(record)
+                                    }),
+                                }
+                            )
+                            for outcome in row_discovery.outcomes:
+                                if search_hydration_diagnostics is not None:
+                                    search_hydration_diagnostics.record(
+                                        query=role,
+                                        elapsed_ms=0,
+                                        row_activation_count=1,
+                                        row_activation_success_count=(
+                                            1
+                                            if outcome.outcome
+                                            == "row_activation_success"
+                                            else 0
+                                        ),
+                                        row_activation_no_change_count=(
+                                            1
+                                            if outcome.outcome
+                                            == "row_activation_no_change"
+                                            else 0
+                                        ),
+                                        row_activation_no_job_id_count=(
+                                            1
+                                            if outcome.outcome
+                                            == "row_activation_no_job_id"
+                                            else 0
+                                        ),
+                                        row_activation_duplicate_count=(
+                                            1
+                                            if outcome.outcome
+                                            == "row_activation_duplicate"
+                                            else 0
+                                        ),
+                                        row_activation_scroll_count=(
+                                            row_discovery.scroll_count
+                                        ),
+                                        selected_row_container_score=(
+                                            row_discovery.selected_row_container_score
+                                        ),
+                                        row_candidate_count=(
+                                            row_discovery.structural_rows_found
+                                        ),
+                                        row_interactive_count=(
+                                            row_discovery.row_interactive_count
+                                        ),
+                                        row_job_ids_resolved=(
+                                            row_discovery.job_ids_resolved
+                                        ),
+                                        row_activation_stop_reason=(
+                                            row_discovery.stop_reason
+                                        ),
+                                        outcome=_search_hydration_outcome_for_row_activation(
+                                            outcome.outcome
+                                        ),
+                                    )
+                                if outcome.outcome != "row_activation_success":
+                                    warnings.append(outcome.outcome)
+                    if visual_run is not None:
+                        # Capture after bounded row discovery so the panel snapshot
+                        # includes the post-scroll virtualized state.
+                        visual_run.capture_after(page)
                     search_navigation_state.active_source_url = search_url
                     discovered_count = len(discovered)
                     standalone_fallback_count = (

@@ -9783,3 +9783,711 @@ def test_linkedin_pipeline_dedupes_same_run_before_detail_and_marks_retained(mon
     assert timings[1].diagnostics.duplicate_candidate_count == 1
     assert [item.reason for item in rejected] == ["duplicate_candidate_skipped_before_detail"]
     assert "duplicate_candidate_skipped_before_detail:123" in warnings
+
+
+
+
+def test_linkedin_row_activation_outcomes_map_to_valid_search_hydration_outcomes():
+    from features.web_scraping.domain.linkedin_models import LinkedInSearchHydrationDiagnostic
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _search_hydration_outcome_for_row_activation,
+    )
+
+    success = _search_hydration_outcome_for_row_activation("row_activation_success")
+    failure = _search_hydration_outcome_for_row_activation("row_activation_no_job_id")
+
+    assert success == "results"
+    assert failure == "failed"
+    LinkedInSearchHydrationDiagnostic(query="AI", sequence=1, elapsed_ms=0, outcome=success)
+    LinkedInSearchHydrationDiagnostic(query="AI", sequence=2, elapsed_ms=0, outcome=failure)
+
+def test_linkedin_row_identity_change_is_detected_without_url_change():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        LinkedInDetailIdentity,
+        _detail_identity_changed,
+    )
+
+    before = LinkedInDetailIdentity(
+        job_id="111",
+        canonical_detail_href="https://www.linkedin.com/jobs/view/111",
+        allowlisted_attributes=(("data-job-id", "111"),),
+    )
+    after = LinkedInDetailIdentity(
+        job_id="222",
+        canonical_detail_href="https://www.linkedin.com/jobs/view/111",
+        allowlisted_attributes=(("data-job-id", "222"),),
+    )
+
+    assert _detail_identity_changed(before, after) is True
+
+
+def test_linkedin_detail_identity_falls_back_to_visible_right_panel_job_link():
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class LinkCollection:
+        def __init__(self, links):
+            self.links = links
+
+        def count(self):
+            return len(self.links)
+
+        def nth(self, index):
+            return self.links[index]
+
+    class EmptyCollection:
+        def count(self):
+            return 0
+
+        def nth(self, _index):
+            raise IndexError
+
+    class Link:
+        def __init__(self, href, box):
+            self.href = href
+            self.box = box
+
+        def get_attribute(self, name):
+            return self.href if name == "href" else None
+
+        def bounding_box(self):
+            return self.box
+
+    class Page:
+        url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+
+        def evaluate(self, _script):
+            return 1366
+
+        def locator(self, selector):
+            if selector == "a[href*='/jobs/view/']":
+                return LinkCollection([
+                    Link("/jobs/view/111", {"x": 190, "y": 220, "width": 280, "height": 24}),
+                    Link("/jobs/view/222", {"x": 594, "y": 267, "width": 613, "height": 30}),
+                    Link("/jobs/view/333/apply/", {"x": 594, "y": 426, "width": 245, "height": 32}),
+                ])
+            return EmptyCollection()
+
+    identity = navigation._detail_identity_from_page(Page())
+
+    assert identity.job_id == "222"
+    assert identity.canonical_detail_href == "https://www.linkedin.com/jobs/view/222"
+
+
+def test_linkedin_row_activation_preserves_visible_row_posted_date(monkeypatch):
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class Row:
+        def evaluate(self, _script):
+            return "Visto · Adelántate a solicitar el empleo · hace 3 horas"
+
+        def click(self, **_kwargs):
+            return None
+
+    signature = (4, "job", (("data-job-id", "111"),))
+    monkeypatch.setattr(navigation, "_enumerate_visible_job_rows", lambda _page: [("rows", 0, signature)])
+    monkeypatch.setattr(navigation, "_resolve_row_locator", lambda _page, _signature: Row())
+    monkeypatch.setattr(navigation, "_detail_identity_from_page", lambda _page: navigation.LinkedInDetailIdentity(job_id="111", canonical_detail_href="https://www.linkedin.com/jobs/view/111"))
+    monkeypatch.setattr(navigation, "_wait_for_changed_detail_identity", lambda *_args, **_kwargs: (navigation.LinkedInDetailIdentity(job_id="222", canonical_detail_href="https://www.linkedin.com/jobs/view/222"), True))
+    monkeypatch.setattr(navigation, "_scroll_results_panel_for_rows", lambda _page: False)
+
+    result = navigation.discover_job_rows_via_activation(
+        object(),
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        max_activations=1,
+    )
+
+    assert result.success_count == 1
+    assert result.records[0].posted_at_text == "hace 3 horas"
+    assert result.records[0].published_at is not None
+    assert result.records[0].freshness_confidence == "medium"
+    assert result.records[0].is_within_24_hours is True
+
+
+@pytest.mark.parametrize(
+    ("changed", "after", "expected"),
+    [
+        (True, SimpleNamespace(job_id="", canonical_detail_href="", allowlisted_attributes=(("data-job-id", "x"),)), "row_activation_no_job_id"),
+        (False, SimpleNamespace(job_id="111", canonical_detail_href="https://www.linkedin.com/jobs/view/111", allowlisted_attributes=()), "row_activation_no_change"),
+    ],
+)
+
+
+def test_linkedin_row_activation_emits_distinct_identity_failures(
+    monkeypatch,
+    changed,
+    after,
+    expected,
+):
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class Row:
+        def click(self, **_kwargs):
+            return None
+
+    signature = (4, "job", (("data-job-id", "111"),))
+    monkeypatch.setattr(navigation, "_enumerate_visible_job_rows", lambda _page: [("rows", 0, signature)])
+    monkeypatch.setattr(navigation, "_resolve_row_locator", lambda _page, _signature: Row())
+    monkeypatch.setattr(navigation, "_detail_identity_from_page", lambda _page: navigation.LinkedInDetailIdentity(job_id="111", canonical_detail_href="https://www.linkedin.com/jobs/view/111"))
+    monkeypatch.setattr(navigation, "_wait_for_changed_detail_identity", lambda *_args, **_kwargs: (after, changed))
+    monkeypatch.setattr(navigation, "_scroll_results_panel_for_rows", lambda _page: False)
+
+    result = navigation.discover_job_rows_via_activation(
+        object(),
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        max_activations=1,
+    )
+
+    assert result.outcomes[0].outcome == expected
+    assert result.records == []
+
+
+def test_linkedin_row_activation_has_hard_cap_and_reenumerates_virtualized_rows(monkeypatch):
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class Row:
+        def click(self, **_kwargs):
+            return None
+
+    rows = [("rows", index, (index, f"job-{index}", ())) for index in range(25)]
+    monkeypatch.setattr(navigation, "_enumerate_visible_job_rows", lambda _page: rows)
+    monkeypatch.setattr(navigation, "_resolve_row_locator", lambda _page, _signature: Row())
+    monkeypatch.setattr(navigation, "_detail_identity_from_page", lambda _page: navigation.LinkedInDetailIdentity())
+    counter = {"value": 0}
+
+    def changed_identity(*_args, **_kwargs):
+        counter["value"] += 1
+        job_id = str(counter["value"])
+        return navigation.LinkedInDetailIdentity(
+            job_id=job_id,
+            canonical_detail_href=f"https://www.linkedin.com/jobs/view/{job_id}",
+        ), True
+
+    monkeypatch.setattr(navigation, "_wait_for_changed_detail_identity", changed_identity)
+    monkeypatch.setattr(navigation, "_scroll_results_panel_for_rows", lambda _page: False)
+
+    result = navigation.discover_job_rows_via_activation(
+        object(),
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+
+    assert result.activation_count == navigation.MAX_ROW_ACTIVATIONS_PER_QUERY == 20
+    assert result.success_count == 20
+
+
+def test_linkedin_row_signature_changes_with_virtualized_content_not_visual_index():
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class Link:
+        def __init__(self, href):
+            self.href = href
+
+        @property
+        def first(self):
+            return self
+
+        def get_attribute(self, name):
+            return self.href if name == "href" else None
+
+    class Row:
+        def __init__(self, href, job_id):
+            self.href = href
+            self.job_id = job_id
+
+        def evaluate(self, _script):
+            return 12
+
+        def locator(self, _selector):
+            return Link(self.href)
+
+        def get_attribute(self, name):
+            return self.job_id if name == "data-job-id" else None
+
+    first = navigation._row_signature(Row("/jobs/view/111", "111"))
+    second = navigation._row_signature(Row("/jobs/view/222", "222"))
+
+    assert first[0] == second[0] == 12
+    assert first != second
+    assert first[1] == "111"
+    assert second[1] == "222"
+
+
+def test_linkedin_row_ids_merge_before_detail_and_mark_duplicate_source():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        merge_row_activation_records,
+    )
+
+    dom = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="AI Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        discovery_sources=["card"],
+    )
+    row = dom.model_copy(update={"discovery_sources": ["row_activation"]})
+
+    merged, dom_contributed, row_contributed = merge_row_activation_records([dom], [row])
+
+    assert len(merged) == 1
+    assert merged[0].discovery_sources == ["card", "row_activation"]
+    assert dom_contributed is True
+    assert row_contributed is True
+
+
+def test_linkedin_discovery_modes_are_explicit():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        discovery_mode_for_sources,
+    )
+
+    assert discovery_mode_for_sources(dom_contributed=True, row_contributed=True) == "multi_source_with_row_activation"
+    assert discovery_mode_for_sources(dom_contributed=False, row_contributed=True) == "row_activation"
+    assert discovery_mode_for_sources(dom_contributed=True, row_contributed=False) == "standard"
+
+
+def test_linkedin_visual_manifest_omits_missing_before_main_capture(tmp_path):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        LinkedInVisualDiagnosticsCollector,
+        _VisualSearchRun,
+    )
+
+    collector = LinkedInVisualDiagnosticsCollector(tmp_path)
+    collector.base_dir.mkdir(parents=True, exist_ok=True)
+    run = _VisualSearchRun(collector, query="AI")
+    run.before_main_capture = False
+    (tmp_path / "visual-diagnostics" / "after-main.png").write_text("image", encoding="utf-8")
+    run.after_main_capture = True
+    run.finalize()
+
+    manifest = json.loads((tmp_path / "visual-diagnostics" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["artifacts"]["before_main"] is None
+    assert manifest["artifacts"]["after_main"] == "after-main.png"
+
+
+def test_linkedin_html_diagnostics_sanitize_text_and_sensitive_attributes():
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        sanitize_linkedin_html,
+    )
+
+    sanitized, report = sanitize_linkedin_html(
+        """
+        <main class="results private-token" aria-label="Sensitive name">
+          <div class="job-card" data-job-id="1234" data-private-token="secret"
+               aria-selected="true">
+            Candidate name, prompt injection, and cookie=secret
+            <script>window.localStorage.secret = 'token'</script>
+          </div>
+        </main>
+        """
+    )
+
+    assert "Candidate name" not in sanitized
+    assert "cookie=secret" not in sanitized
+    assert "localStorage" not in sanitized
+    assert "aria-label" not in sanitized
+    assert "data-private-token" not in sanitized
+    assert 'data-job-id="1234"' in sanitized
+    assert 'aria-selected="true"' in sanitized
+    assert "private-token" in sanitized
+    assert report["removed_text"] is True
+    assert report["removed_attributes"] >= 2
+    assert report["status"] == "ok"
+
+
+def test_linkedin_html_diagnostics_are_bounded_and_manifest_is_local_only(
+    tmp_path,
+    monkeypatch,
+):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        MAX_ACTIVATION_HTML_CAPTURES,
+        visual_diagnostics_context,
+    )
+
+    monkeypatch.setenv("LINKEDIN_SEARCH_VISUAL_DIAGNOSTICS", "true")
+
+    class FakeTracing:
+        def start(self, **_kwargs):
+            return None
+
+        def start_chunk(self, **_kwargs):
+            return None
+
+        def stop_chunk(self, **kwargs):
+            Path(kwargs["path"]).write_text("trace", encoding="utf-8")
+
+        def stop(self, **_kwargs):
+            return None
+
+    class FakePage:
+        context = SimpleNamespace(tracing=FakeTracing())
+
+        def screenshot(self, *, path, full_page):
+            assert full_page is True
+            Path(path).write_text("image", encoding="utf-8")
+
+        def locator(self, _selector):
+            return SimpleNamespace(first=SimpleNamespace(count=lambda: 0))
+
+        def evaluate(self, _script):
+            return {"schema_version": "1.0"}
+
+        def content(self):
+            return "<main class='panel'><div aria-label='private'>secret text</div></main>"
+
+    audit_dir = tmp_path / "audit"
+    with visual_diagnostics_context(audit_dir) as collector:
+        run = collector.start_run(FakePage(), query="AI Korea")
+        assert run is not None
+        run.capture_before(FakePage())
+        run.capture_after(FakePage())
+        for outcome in range(MAX_ACTIVATION_HTML_CAPTURES + 4):
+            run.capture_activation(FakePage(), "row_activation_success")
+        run.finalize()
+
+    visual_dir = audit_dir / "visual-diagnostics"
+    manifest = json.loads((visual_dir / "manifest.json").read_text(encoding="utf-8"))
+    activation_files = list(visual_dir.glob("activation-*.html"))
+    assert len(activation_files) == MAX_ACTIVATION_HTML_CAPTURES
+    assert len(manifest["html"]["sanitization_reports"]) == 2 + MAX_ACTIVATION_HTML_CAPTURES
+    assert manifest["artifacts"]["panel_before"] == "panel-before.html"
+    assert manifest["artifacts"]["panel_after"] == "panel-after.html"
+    assert all("/Users/" not in json.dumps(item) for item in manifest.values())
+    assert "secret text" not in (visual_dir / "panel-before.html").read_text(encoding="utf-8")
+    assert "aria-label" not in (visual_dir / "panel-before.html").read_text(encoding="utf-8")
+
+
+def test_linkedin_public_snapshot_model_has_no_html_diagnostic_payload():
+    from features.web_scraping.domain.linkedin_models import LinkedInAuditSnapshot
+
+    payload = LinkedInAuditSnapshot.model_json_schema()
+    assert "html" not in json.dumps(payload)
+
+
+def test_linkedin_structural_panel_scoring_prefers_left_repeated_rows_over_navigation():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        _choose_structural_results_panel,
+    )
+
+    navigation = {
+        "container_index": 1,
+        "x": 460,
+        "width": 700,
+        "row_candidate_count": 20,
+        "row_repetition": 1,
+        "visible_row_count": 20,
+        "interactive_count": 40,
+        "scrollHeight": 1200,
+        "clientHeight": 500,
+    }
+    left_panel = {
+        "container_index": 2,
+        "x": 24,
+        "width": 390,
+        "row_candidate_count": 8,
+        "row_repetition": 8,
+        "visible_row_count": 8,
+        "interactive_count": 8,
+        "scrollHeight": 1800,
+        "clientHeight": 500,
+    }
+
+    selected, _score = _choose_structural_results_panel(
+        [navigation, left_panel], viewport_width=1280
+    )
+    assert selected["container_index"] == 2
+
+
+
+
+def test_linkedin_structural_activation_filters_global_nav_and_detail_column():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        _descriptor_is_safe_activation_row,
+    )
+
+    assert not _descriptor_is_safe_activation_row(
+        {
+            "x": 650,
+            "y": 10,
+            "width": 90,
+            "height": 52,
+            "href_fragment": "",
+            "has_descendant_anchor": True,
+        },
+        viewport_width=1366,
+    )
+    assert not _descriptor_is_safe_activation_row(
+        {
+            "x": 594,
+            "y": 267,
+            "width": 613,
+            "height": 30,
+            "href_fragment": "4453249078",
+            "has_descendant_anchor": True,
+        },
+        viewport_width=1366,
+    )
+    assert _descriptor_is_safe_activation_row(
+        {
+            "x": 24,
+            "y": 180,
+            "width": 390,
+            "height": 92,
+            "href_fragment": "",
+            "role_button": True,
+        },
+        viewport_width=1366,
+    )
+
+def test_linkedin_structural_rows_include_divs_with_role_tabindex_or_cursor():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        _dedupe_structural_rows,
+    )
+
+    rows = _dedupe_structural_rows(
+        [
+            {
+                "container_index": 5,
+                "x": 20,
+                "y": 100,
+                "width": 360,
+                "height": 72,
+                "row_candidate": True,
+                "role_button": True,
+                "href_fragment": "",
+                "structural_path": ["div:0", "div:2"],
+            }
+        ]
+    )
+    assert len(rows) == 1
+    assert rows[0]["role_button"] is True
+
+
+def test_linkedin_structural_row_dedupe_prefers_smallest_compatible_ancestor():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        _dedupe_structural_rows,
+    )
+
+    rows = _dedupe_structural_rows(
+        [
+            {
+                "container_index": 1,
+                "x": 20,
+                "y": 100,
+                "width": 390,
+                "height": 90,
+                "row_candidate": True,
+                "href_fragment": "1234",
+                "structural_path": ["div:0"],
+            },
+            {
+                "container_index": 2,
+                "x": 25,
+                "y": 105,
+                "width": 370,
+                "height": 70,
+                "row_candidate": True,
+                "href_fragment": "1234",
+                "structural_path": ["div:0", "div:0"],
+            },
+        ]
+    )
+    assert [row["container_index"] for row in rows] == [2]
+
+
+def test_linkedin_row_signature_ignores_tiny_bbox_microchanges():
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class Link:
+        first = None
+
+        def get_attribute(self, name):
+            return "/jobs/view/1234" if name == "href" else None
+
+    Link.first = Link()
+
+    class Row:
+        def __init__(self, box):
+            self.box = box
+
+        def locator(self, _selector):
+            return Link()
+
+        def get_attribute(self, name):
+            return "1234" if name == "data-job-id" else None
+
+        def bounding_box(self):
+            return self.box
+
+        def evaluate(self, _script):
+            return ["div:0", "div:1"]
+
+    first = navigation._row_signature(
+        Row({"x": 20.1, "y": 100.2, "width": 360.1, "height": 72.2})
+    )
+    second = navigation._row_signature(
+        Row({"x": 24.9, "y": 104.8, "width": 364.9, "height": 74.8})
+    )
+    assert navigation._row_identity_key(first) == navigation._row_identity_key(second)
+
+
+def test_linkedin_structural_rows_without_ids_report_unresolved(monkeypatch):
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    rows = [("body *", index, (index, "", (), (20, index * 80, 360, 70), (f"div:{index}",))) for index in range(10)]
+    monkeypatch.setattr(navigation, "_enumerate_visible_job_rows", lambda _page: rows)
+    monkeypatch.setattr(navigation, "_resolve_row_locator", lambda _page, _signature: SimpleNamespace(click=lambda **_kwargs: None))
+    monkeypatch.setattr(navigation, "_detail_identity_from_page", lambda _page: navigation.LinkedInDetailIdentity())
+    monkeypatch.setattr(navigation, "_wait_for_changed_detail_identity", lambda *_args, **_kwargs: (navigation.LinkedInDetailIdentity(), False))
+    monkeypatch.setattr(navigation, "_scroll_results_panel_for_rows", lambda _page: False)
+
+    result = navigation.discover_job_rows_via_activation(
+        object(), source_url="https://www.linkedin.com/jobs/search/?keywords=AI"
+    )
+    assert result.structural_rows_found == 10
+    assert navigation.discovery_mode_for_sources(
+        dom_contributed=False,
+        row_contributed=False,
+        structural_rows_found=True,
+        row_job_ids_resolved=result.job_ids_resolved,
+    ) == "structural_rows_found_but_unresolved"
+
+
+def test_linkedin_row_activation_stops_after_two_moving_scrolls_without_new_ids(monkeypatch):
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    signature = (1, "", (), (20, 100, 360, 70), ("div:0",))
+    monkeypatch.setattr(navigation, "_enumerate_visible_job_rows", lambda _page: [("body *", 1, signature)])
+    monkeypatch.setattr(navigation, "_resolve_row_locator", lambda _page, _signature: SimpleNamespace(click=lambda **_kwargs: None))
+    monkeypatch.setattr(navigation, "_detail_identity_from_page", lambda _page: navigation.LinkedInDetailIdentity())
+    monkeypatch.setattr(navigation, "_wait_for_changed_detail_identity", lambda *_args, **_kwargs: (navigation.LinkedInDetailIdentity(), False))
+    monkeypatch.setattr(navigation, "_scroll_results_panel_for_rows", lambda _page: True)
+
+    result = navigation.discover_job_rows_via_activation(
+        object(), source_url="https://www.linkedin.com/jobs/search/?keywords=AI"
+    )
+    assert result.scroll_count == 2
+    assert result.stop_reason == "two_scrolls_without_new_job_ids"
+
+
+def test_linkedin_row_ids_merge_one_dom_and_five_row_ids_into_five_unique_candidates():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_query_navigation import merge_row_activation_records
+
+    source = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    dom = [LinkedInVacancyRecord(linkedin_job_id="1", canonical_url="https://www.linkedin.com/jobs/view/1", source_url=source)]
+    rows = [
+        LinkedInVacancyRecord(linkedin_job_id=str(index), canonical_url=f"https://www.linkedin.com/jobs/view/{index}", source_url=source, discovery_sources=["row_activation"])
+        for index in range(1, 6)
+    ]
+    merged, _dom, _rows = merge_row_activation_records(dom, rows)
+    assert len(merged) == 5
+
+
+def test_linkedin_html_diagnostics_new_bundle_is_local_bounded_and_manifest_safe(tmp_path, monkeypatch):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        MAX_HTML_DIAGNOSTIC_ACTIVATIONS,
+        visual_diagnostics_context,
+    )
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        MAX_ROW_ACTIVATIONS_PER_QUERY,
+    )
+
+    monkeypatch.setenv("LINKEDIN_HTML_DIAGNOSTICS", "true")
+    assert MAX_HTML_DIAGNOSTIC_ACTIVATIONS == 3
+    assert MAX_ROW_ACTIVATIONS_PER_QUERY == 20
+
+    class Page:
+        def __init__(self):
+            self.capture = 0
+
+        def content(self):
+            return (
+                '<main class="row ' + "x" * 120 + '" aria-label="secret" '
+                'onclick="leak()"><a href="/jobs/view/123?trk=secret#x" '
+                'data-job-id="123">private text</a><script>token</script>'
+                '<style>secret</style></main>'
+            )
+
+        def evaluate(self, _script):
+            self.capture += 1
+            row_index = 1 if self.capture == 1 else 2
+            return {
+                "row_count": row_index,
+                "viewport": {"width": 1280, "height": 720},
+                "rows": [{
+                    "index": row_index,
+                    "tag": "li",
+                    "class_tokens": ["x" * 120],
+                    "role": "listitem",
+                    "tabindex": "0",
+                    "aria_selected": "true",
+                    "allowlisted_attrs": {"data-job-id": "123"},
+                    "href": "/jobs/view/123",
+                    "bounds": {"x": 1, "y": 2, "width": 300, "height": 80},
+                    "vertical_band": 0,
+                    "structural_path": ["li:0"],
+                    "visible": True,
+                    "row_candidate": True,
+                }],
+            }
+
+        def screenshot(self, *, path, full_page):
+            assert full_page is True
+            Path(path).write_bytes(b"png")
+
+    page = Page()
+    root = tmp_path / "diagnostics"
+    with visual_diagnostics_context(root, job_uid="job-123", diagnostics_root=root) as collector:
+        run = collector.start_run(page, query="one query")
+        assert run is not None
+        run.capture_after_hydration(page)
+        run.capture_before_scroll(page)
+        run.capture_after_scroll(page, 1)
+        run.capture_after_scroll(page, 2)
+        run.capture_detail(page, "before_click")
+        for _ in range(8):
+            run.capture_detail(page, "after_click")
+        run.capture_after(page)
+        run.finalize()
+
+    bundle = root / "job-123"
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert len(list(bundle.glob("results-panel-after-scroll-*.html"))) == 1
+    assert len(list(bundle.glob("detail-after-click-*.html"))) == 2
+    assert all((bundle / value).is_file() for value in manifest["artifacts"].values())
+    assert all("secret" not in path.read_text(encoding="utf-8") for path in bundle.glob("*.html"))
+    assert manifest["sanitization_report"]["scripts_removed"] > 0
+    assert manifest["sanitization_report"]["query_strings_removed"] > 0
+    assert "aria-label" not in (bundle / "search-after-hydration.html").read_text(encoding="utf-8")
+
+
+def test_linkedin_html_diagnostics_sanitize_failure_writes_no_html(tmp_path, monkeypatch):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        visual_diagnostics_context,
+    )
+
+    monkeypatch.setenv("LINKEDIN_HTML_DIAGNOSTICS", "true")
+
+    class Page:
+        def content(self):
+            raise RuntimeError("content unavailable")
+
+    with visual_diagnostics_context(tmp_path, job_uid="job-failure", diagnostics_root=tmp_path) as collector:
+        run = collector.start_run(Page(), query="one")
+        run.capture_after_hydration(Page())
+        run.finalize()
+
+    bundle = tmp_path / "job-failure"
+    assert not (bundle / "search-after-hydration.html").exists()
+    assert (bundle / "manifest.json").exists()
+
+
+def test_linkedin_html_diagnostics_gitignored_without_creating_test_file():
+    import subprocess
+
+    result = subprocess.run(
+        ["/usr/bin/git", "check-ignore", "data/private/linkedin/diagnostics/test/file.html"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0

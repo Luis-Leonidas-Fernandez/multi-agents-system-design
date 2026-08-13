@@ -10,7 +10,7 @@ import re
 import time
 import unicodedata
 from typing import Callable, Iterator
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from features.web_scraping.domain.linkedin_models import (
     LinkedInParseDiagnostics,
@@ -32,7 +32,9 @@ from features.web_scraping.infrastructure.linkedin_navigation import (
     _validate_authenticated_page,
 )
 from features.web_scraping.infrastructure.linkedin_parser import (
+    _clean_posted_at_text,
     _parse_linkedin_jobs_html_with_diagnostics,
+    parse_linkedin_relative_time,
 )
 from features.web_scraping.infrastructure.linkedin_url_policy import (
     canonicalize_linkedin_job_url,
@@ -241,7 +243,10 @@ _EMPTY_RESULTS_SELECTORS = (
 _SEARCH_HYDRATION_MAX_MS = 6500
 MIN_EXPECTED_DISCOVERY_CANDIDATES = 2
 MAX_DISCOVERY_SCROLLS = 3
+MAX_ROW_ACTIVATIONS_PER_QUERY = 20
 DISCOVERY_SCROLL_WAIT_MS = 300
+ROW_ACTIVATION_WAIT_MS = 1200
+ROW_ACTIVATION_POLL_MS = 100
 _SEARCH_HYDRATION_MAX_SCROLLS = MAX_DISCOVERY_SCROLLS
 _QUERY_BACKOFF_BASE_MS = 1000
 _QUERY_BACKOFF_MAX_MS = 3000
@@ -254,8 +259,25 @@ _HARD_MAX_QUERIES_PER_LOCATION = len(CONSOLIDATED_QUERY_PLANS) + 1
 _MAX_SEARCH_HYDRATION_EVENTS_PER_QUERY = 40
 _MAX_SEARCH_HYDRATION_COUNT = 10000
 _MAX_SEARCH_TEXT_LENGTH = 2_000_000
-_JOB_ID_PATTERN = re.compile(r"\b(\d{4,20})\b")
+_JOB_ID_PATTERN = re.compile(r"\b(\d{1,20})\b")
 _JOB_POSTING_URN_PATTERN = re.compile(r"jobPosting:(\d{4,20})")
+_ROW_ALLOWLISTED_ATTRIBUTES = (
+    "data-job-id",
+    "data-occludable-job-id",
+    "data-entity-urn",
+)
+_ROW_SELECTORS = tuple(
+    f"{area} {wrapper}"
+    for area in _SEARCH_LIST_AREA_SELECTORS
+    for wrapper in _SEMANTIC_RESULT_WRAPPER_SELECTORS
+)
+_DETAIL_IDENTITY_SELECTORS = (
+    "#job-details",
+    ".jobs-search__job-details--container",
+    ".jobs-details",
+    ".job-details-jobs-unified-top-card",
+    ".jobs-unified-top-card",
+)
 _BROAD_JOB_SIGNAL_SELECTORS = (
     "a[href*='/jobs/view/']",
     "[data-entity-urn*='jobPosting']",
@@ -267,6 +289,139 @@ _RESULTS_PANEL_SCROLL_SELECTORS = (
     ".scaffold-layout__list",
     "[role='listbox']",
 )
+_STRUCTURAL_DISCOVERY_SCRIPT = r"""
+() => {
+  const viewportWidth = Math.max(0, Math.trunc(window.innerWidth || 0));
+  const viewportHeight = Math.max(0, Math.trunc(window.innerHeight || 0));
+  const nodes = Array.from(document.querySelectorAll("body *")).slice(0, 2500);
+  const jobHref = "a[href*='/jobs/view/']";
+  const jobSignal = "a[href*='/jobs/view/'], [data-entity-urn*='jobPosting'], [data-job-id], [data-occludable-job-id]";
+  const interactive = "a, button, [role='button'], [tabindex], input, select, textarea";
+  const boundedPath = (node) => {
+    const parts = [];
+    let current = node;
+    while (current && current !== document.body && parts.length < 6) {
+      const parent = current.parentElement;
+      if (!parent) break;
+      const sameTag = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
+      parts.unshift(`${String(current.tagName || '').toLowerCase()}:${Math.max(0, sameTag.indexOf(current))}`);
+      current = parent;
+    }
+    return parts;
+  };
+  const safeAttributes = (node) => {
+    const values = {};
+    for (const name of ["data-job-id", "data-occludable-job-id", "data-entity-urn"]) {
+      if (node.hasAttribute && node.hasAttribute(name)) values[name] = String(node.getAttribute(name) || '').slice(0, 120);
+    }
+    return values;
+  };
+  const safeHrefFragment = (node) => {
+    const link = node.querySelector && node.querySelector(jobHref);
+    const href = link ? String(link.getAttribute('href') || '') : String(node.getAttribute && node.getAttribute('href') || '');
+    const match = href.match(/\/jobs\/view\/([^/?#]+)/);
+    return match ? match[1].replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80) : '';
+  };
+  const visible = (rect) => rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.right >= 0 && rect.top <= viewportHeight && rect.left <= viewportWidth;
+  const structuralRow = (candidate) => {
+    const candidateRect = candidate.getBoundingClientRect();
+    if (!visible(candidateRect)) return false;
+    const candidateStyle = window.getComputedStyle(candidate);
+    const candidateRole = String(candidate.getAttribute && candidate.getAttribute('role') || '').toLowerCase();
+    const candidateTabindex = candidate.hasAttribute && candidate.hasAttribute('tabindex') ? Number(candidate.getAttribute('tabindex')) : -1;
+    const descendantAnchor = Boolean(candidate.querySelector && candidate.querySelector('a'));
+    const pointer = candidateStyle && candidateStyle.cursor === 'pointer';
+    const cardGeometry = candidateRect.width >= 180 && candidateRect.height >= 36 && candidateRect.height <= 360;
+    return descendantAnchor || candidateRole === 'button' || (Number.isFinite(candidateTabindex) && candidateTabindex >= 0) || pointer || (cardGeometry && candidate.querySelectorAll && candidate.querySelectorAll(interactive).length > 0);
+  };
+  const descriptor = (node, index) => {
+    const rect = node.getBoundingClientRect();
+    const scrollHeight = Math.max(0, Math.trunc(node.scrollHeight || 0));
+    const clientHeight = Math.max(0, Math.trunc(node.clientHeight || 0));
+    const scrollTop = Math.max(0, Math.trunc(node.scrollTop || 0));
+    const anchors = node.querySelectorAll ? node.querySelectorAll('a').length : 0;
+    const jobLinks = node.querySelectorAll ? node.querySelectorAll(jobHref).length : 0;
+    const interactiveCount = node.querySelectorAll ? Array.from(node.querySelectorAll(interactive)).filter((item) => visible(item.getBoundingClientRect())).length : 0;
+    const structuralRows = node.querySelectorAll ? Array.from(node.querySelectorAll('*')).filter(structuralRow).length : 0;
+    const rowCandidates = Math.max(node.querySelectorAll ? node.querySelectorAll(jobSignal).length : 0, structuralRows);
+    const rows = Array.from(node.querySelectorAll ? node.querySelectorAll('*') : []).slice(0, 300)
+      .filter((candidate) => candidate !== node)
+      .map((candidate) => candidate.getBoundingClientRect())
+      .filter((candidateRect) => candidateRect.width > 0 && candidateRect.height > 0 && candidateRect.height <= 360);
+    const yBands = rows.map((item) => Math.round(item.top / 10)).sort((left, right) => left - right);
+    let regularVerticalRepetition = 0;
+    for (let position = 1; position < yBands.length; position += 1) {
+      if (Math.abs(yBands[position] - yBands[position - 1]) >= 2) regularVerticalRepetition += 1;
+    }
+    const containsMain = Boolean(node.querySelector && node.querySelector('main, [role="main"]'));
+    const isMain = Boolean(node.matches && node.matches('main, [role="main"]')) || containsMain;
+    const fullPageContainer = rect.left <= 5 && rect.width >= viewportWidth * 0.9 && rect.height >= viewportHeight * 0.8;
+    const isGlobal = Boolean(node.matches && node.matches('html, body, header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]')) || fullPageContainer;
+    return {
+      container_index: index,
+      x: Math.max(-100000, Math.trunc(rect.left)),
+      y: Math.max(-100000, Math.trunc(rect.top)),
+      width: Math.max(0, Math.trunc(rect.width)),
+      height: Math.max(0, Math.trunc(rect.height)),
+      scrollHeight,
+      clientHeight,
+      scrollTop,
+      row_candidate_count: Math.min(10000, Math.max(0, rowCandidates)),
+      row_repetition: Math.min(10000, Math.max(0, regularVerticalRepetition)),
+      anchor_count: Math.min(10000, Math.max(0, anchors)),
+      interactive_count: Math.min(10000, Math.max(0, interactiveCount)),
+      visible_row_count: Math.min(10000, Math.max(0, rows.length)),
+      job_link_count: Math.min(10000, Math.max(0, jobLinks)),
+      detail_or_main: isMain,
+      header_nav_footer_global: isGlobal,
+      scrollable: scrollHeight > clientHeight + 8,
+    };
+  };
+  const rowDescriptor = (node, index) => {
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    const role = String(node.getAttribute && node.getAttribute('role') || '').toLowerCase();
+    const isAnchor = String(node.tagName || '').toLowerCase() === 'a';
+    const tabindex = node.hasAttribute && node.hasAttribute('tabindex') ? Number(node.getAttribute('tabindex')) : -1;
+    const hasDescendantAnchor = Boolean(node.querySelector && node.querySelector('a'));
+    const hasRoleButton = role === 'button';
+    const hasTabindex = Number.isFinite(tabindex) && tabindex >= 0;
+    const hasPointerCursor = style && style.cursor === 'pointer';
+    const interactiveCount = node.querySelectorAll ? Array.from(node.querySelectorAll(interactive)).filter((item) => visible(item.getBoundingClientRect())).length : 0;
+    const clickableCardGeometry = rect.width >= 180 && rect.height >= 36 && rect.height <= 360 && interactiveCount > 0;
+    const isVisible = visible(rect);
+    const isCandidate = isVisible && (isAnchor || hasDescendantAnchor || hasRoleButton || hasTabindex || hasPointerCursor || clickableCardGeometry);
+    return {
+      container_index: index,
+      x: Math.max(-100000, Math.trunc(rect.left)),
+      y: Math.max(-100000, Math.trunc(rect.top)),
+      width: Math.max(0, Math.trunc(rect.width)),
+      height: Math.max(0, Math.trunc(rect.height)),
+      anchor_count: Math.min(10000, Math.max(0, node.querySelectorAll ? node.querySelectorAll('a').length : 0)),
+      interactive_count: Math.min(10000, Math.max(0, interactiveCount)),
+      has_descendant_anchor: hasDescendantAnchor,
+      role_button: hasRoleButton,
+      tabindex: hasTabindex,
+      cursor_pointer: hasPointerCursor,
+      clickable_card_geometry: clickableCardGeometry,
+      visible: isVisible,
+      row_candidate: isCandidate,
+      href_fragment: safeHrefFragment(node),
+      allowlisted_attributes: safeAttributes(node),
+      structural_path: boundedPath(node),
+    };
+  };
+  const containers = nodes
+    .map((node, index) => descriptor(node, index))
+    .filter((item) => item.scrollable || item.row_candidate_count > 0)
+    .slice(0, 200);
+  const rows = nodes
+    .map((node, index) => rowDescriptor(node, index))
+    .filter((item) => item.row_candidate)
+    .slice(0, 500);
+  return {viewport_width: viewportWidth, viewport_height: viewportHeight, containers, rows};
+}
+"""
 _SCROLL_CONTAINER_PROBE_SCRIPT = """
 node => {
   const jobSignalCount = node.querySelectorAll(
@@ -427,6 +582,17 @@ class _SearchHydrationSample:
     client_height: int = 0
     scroll_top_before: int = 0
     scroll_top_after: int = 0
+    row_activation_count: int = 0
+    row_activation_success_count: int = 0
+    row_activation_no_change_count: int = 0
+    row_activation_no_job_id_count: int = 0
+    row_activation_duplicate_count: int = 0
+    row_activation_scroll_count: int = 0
+    selected_row_container_score: int = 0
+    row_candidate_count: int = 0
+    row_interactive_count: int = 0
+    row_job_ids_resolved: int = 0
+    row_activation_stop_reason: str = "none"
 
 
 @dataclass(frozen=True)
@@ -437,6 +603,63 @@ class _SearchScrollMetrics:
     scroll_top_before: int = 0
     scroll_top_after: int = 0
     job_signal_count: int = 0
+    selected_row_container_score: int = 0
+    row_candidate_count: int = 0
+    row_interactive_count: int = 0
+    row_repetition: int = 0
+    visible_row_count: int = 0
+
+
+@dataclass(frozen=True)
+class LinkedInDetailIdentity:
+    """Bounded identity signals used to verify a row activated the panel."""
+
+    job_id: str = ""
+    canonical_detail_href: str = ""
+    allowlisted_attributes: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class LinkedInRowActivationOutcome:
+    outcome: str
+    signature: tuple[object, ...]
+    job_id: str = ""
+    canonical_detail_href: str = ""
+
+
+@dataclass(frozen=True)
+class LinkedInRowDiscoveryResult:
+    records: list[LinkedInVacancyRecord]
+    outcomes: list[LinkedInRowActivationOutcome]
+    scroll_count: int = 0
+    structural_rows_found: int = 0
+    stop_reason: str = "none"
+    selected_row_container_score: int = 0
+    row_interactive_count: int = 0
+
+    @property
+    def activation_count(self) -> int:
+        return len(self.outcomes)
+
+    @property
+    def success_count(self) -> int:
+        return sum(item.outcome == "row_activation_success" for item in self.outcomes)
+
+    @property
+    def no_change_count(self) -> int:
+        return sum(item.outcome == "row_activation_no_change" for item in self.outcomes)
+
+    @property
+    def no_job_id_count(self) -> int:
+        return sum(item.outcome == "row_activation_no_job_id" for item in self.outcomes)
+
+    @property
+    def duplicate_count(self) -> int:
+        return sum(item.outcome == "row_activation_duplicate" for item in self.outcomes)
+
+    @property
+    def job_ids_resolved(self) -> int:
+        return len({item.job_id for item in self.outcomes if item.job_id})
 
 
 class LinkedInSearchHydrationDiagnosticsCollector:
@@ -466,6 +689,17 @@ class LinkedInSearchHydrationDiagnosticsCollector:
         href_count: int = 0,
         empty_state_visible: bool = False,
         auth_checkpoint_visible: bool = False,
+        row_activation_count: int = 0,
+        row_activation_success_count: int = 0,
+        row_activation_no_change_count: int = 0,
+        row_activation_no_job_id_count: int = 0,
+        row_activation_duplicate_count: int = 0,
+        row_activation_scroll_count: int = 0,
+        selected_row_container_score: int = 0,
+        row_candidate_count: int = 0,
+        row_interactive_count: int = 0,
+        row_job_ids_resolved: int = 0,
+        row_activation_stop_reason: str = "none",
         outcome: str,
     ) -> None:
         sample = sample or _SearchHydrationSample(
@@ -475,6 +709,17 @@ class LinkedInSearchHydrationDiagnosticsCollector:
             auth_checkpoint_visible=auth_checkpoint_visible,
             unique_candidate_count=href_count,
             candidate_count_before_scroll=href_count,
+            row_activation_count=row_activation_count,
+            row_activation_success_count=row_activation_success_count,
+            row_activation_no_change_count=row_activation_no_change_count,
+            row_activation_no_job_id_count=row_activation_no_job_id_count,
+            row_activation_duplicate_count=row_activation_duplicate_count,
+            row_activation_scroll_count=row_activation_scroll_count,
+            selected_row_container_score=selected_row_container_score,
+            row_candidate_count=row_candidate_count,
+            row_interactive_count=row_interactive_count,
+            row_job_ids_resolved=row_job_ids_resolved,
+            row_activation_stop_reason=row_activation_stop_reason,
         )
         event_query = LinkedInSearchHydrationDiagnostic(
             query=query,
@@ -541,6 +786,32 @@ class LinkedInSearchHydrationDiagnosticsCollector:
             client_height=_bounded_text_length(sample.client_height),
             scroll_top_before=_bounded_text_length(sample.scroll_top_before),
             scroll_top_after=_bounded_text_length(sample.scroll_top_after),
+            row_activation_count=_bounded_hydration_count(sample.row_activation_count),
+            row_activation_success_count=_bounded_hydration_count(
+                sample.row_activation_success_count
+            ),
+            row_activation_no_change_count=_bounded_hydration_count(
+                sample.row_activation_no_change_count
+            ),
+            row_activation_no_job_id_count=_bounded_hydration_count(
+                sample.row_activation_no_job_id_count
+            ),
+            row_activation_duplicate_count=_bounded_hydration_count(
+                sample.row_activation_duplicate_count
+            ),
+            row_activation_scroll_count=min(3, _bounded_hydration_count(
+                sample.row_activation_scroll_count
+            )),
+            selected_row_container_score=_bounded_score(
+                sample.selected_row_container_score
+            ),
+            row_candidate_count=_bounded_hydration_count(sample.row_candidate_count),
+            row_interactive_count=_bounded_hydration_count(sample.row_interactive_count),
+            row_job_ids_resolved=_bounded_hydration_count(sample.row_job_ids_resolved),
+            row_activation_stop_reason=_safe_enum_label(
+                sample.row_activation_stop_reason,
+                max_length=80,
+            ),
             outcome=outcome,
         )
         if len(events) >= _MAX_SEARCH_HYDRATION_EVENTS_PER_QUERY:
@@ -889,6 +1160,18 @@ def _bounded_hydration_count(value: object) -> int:
         return 0
 
 
+def _safe_enum_label(value: object, *, max_length: int = 80) -> str:
+    label = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "none")).strip("_")
+    return label[:max_length] or "none"
+
+
+def _bounded_score(value: object) -> int:
+    try:
+        return min(20, max(-20, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _bounded_text_length(value: object) -> int:
     try:
         return min(_MAX_SEARCH_TEXT_LENGTH, max(0, int(value)))
@@ -932,6 +1215,17 @@ def _sample_with_scroll_progress(
         client_height=scroll_metrics.client_height,
         scroll_top_before=scroll_metrics.scroll_top_before,
         scroll_top_after=scroll_metrics.scroll_top_after,
+        row_activation_count=sample.row_activation_count,
+        row_activation_success_count=sample.row_activation_success_count,
+        row_activation_no_change_count=sample.row_activation_no_change_count,
+        row_activation_no_job_id_count=sample.row_activation_no_job_id_count,
+        row_activation_duplicate_count=sample.row_activation_duplicate_count,
+        row_activation_scroll_count=sample.row_activation_scroll_count,
+        selected_row_container_score=scroll_metrics.selected_row_container_score or sample.selected_row_container_score,
+        row_candidate_count=scroll_metrics.row_candidate_count or sample.row_candidate_count,
+        row_interactive_count=scroll_metrics.row_interactive_count or sample.row_interactive_count,
+        row_job_ids_resolved=sample.row_job_ids_resolved,
+        row_activation_stop_reason=sample.row_activation_stop_reason,
     )
 
 
@@ -992,6 +1286,705 @@ def _job_id_from_attribute_value(value: object) -> str:
         return urn_match.group(1)
     generic_match = _JOB_ID_PATTERN.search(text)
     return generic_match.group(1) if generic_match else ""
+
+
+def _safe_href_fragment(value: object) -> str:
+    """Return only the bounded path fragment used in an ephemeral row key."""
+    href = str(value or "").strip()
+    if not href:
+        return ""
+    try:
+        path = urlsplit(urljoin("https://www.linkedin.com", href)).path
+    except Exception:
+        return ""
+    match = re.search(r"/jobs/view/([^/?#]*)", path)
+    if not match:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_-]", "", match.group(1))[:80]
+
+
+def _safe_row_attributes(locator) -> tuple[tuple[str, str], ...]:
+    values: list[tuple[str, str]] = []
+    for name in _ROW_ALLOWLISTED_ATTRIBUTES:
+        try:
+            value = str(locator.get_attribute(name) or "").strip()
+        except Exception:
+            value = ""
+        if value:
+            values.append((name, value[:120]))
+    return tuple(values)
+
+
+def _row_container_index(locator) -> int:
+    try:
+        value = locator.evaluate(
+            "node => Array.from(document.querySelectorAll('body *')).indexOf(node)"
+        )
+        return max(0, min(100000, int(value)))
+    except Exception:
+        return 0
+
+
+def _row_signature(locator) -> tuple[object, ...]:
+    href = ""
+    try:
+        href = str(locator.locator("a[href*='/jobs/view/']").first.get_attribute("href") or "")
+    except Exception:
+        try:
+            href = str(locator.get_attribute("href") or "")
+        except Exception:
+            pass
+    bbox = (0, 0, 0, 0)
+    try:
+        box = locator.bounding_box()
+        if isinstance(box, dict):
+            bbox = tuple(
+                int(round(float(box.get(key, 0) or 0) / 10.0) * 10)
+                for key in ("x", "y", "width", "height")
+            )
+    except Exception:
+        pass
+    path: tuple[str, ...] = ()
+    try:
+        raw_path = locator.evaluate(
+            """node => {
+              const parts = [];
+              let current = node;
+              while (current && current !== document.body && parts.length < 6) {
+                const parent = current.parentElement;
+                if (!parent) break;
+                const same = Array.from(parent.children).filter(item => item.tagName === current.tagName);
+                parts.unshift(`${String(current.tagName || '').toLowerCase()}:${Math.max(0, same.indexOf(current))}`);
+                current = parent;
+              }
+              return parts;
+            }"""
+        )
+        if isinstance(raw_path, list):
+            path = tuple(str(item)[:40] for item in raw_path[:6])
+    except Exception:
+        pass
+    # The DOM index is only a re-resolution hint. Identity comparisons use the
+    # remaining ephemeral structural fields, so virtualization can move nodes.
+    return (_row_container_index(locator), _safe_href_fragment(href), _safe_row_attributes(locator), bbox, path)
+
+
+def _row_identity_key(signature: tuple[object, ...]) -> tuple[object, ...]:
+    return tuple(signature[1:]) if len(signature) >= 5 else tuple(signature[1:])
+
+
+def _descriptor_signature(descriptor: dict) -> tuple[object, ...]:
+    bbox = tuple(
+        int(round(_numeric_descriptor(descriptor.get(key)) / 10.0) * 10)
+        for key in ("x", "y", "width", "height")
+    )
+    attributes = descriptor.get("allowlisted_attributes")
+    if isinstance(attributes, dict):
+        attrs = tuple(sorted((str(key), str(value)[:120]) for key, value in attributes.items() if key in _ROW_ALLOWLISTED_ATTRIBUTES and value))
+    else:
+        attrs = tuple()
+    path = descriptor.get("structural_path")
+    bounded_path = tuple(str(item)[:40] for item in path[:6]) if isinstance(path, list) else tuple()
+    return (
+        _numeric_descriptor(descriptor.get("container_index")),
+        str(descriptor.get("href_fragment") or "")[:80],
+        attrs,
+        bbox,
+        bounded_path,
+    )
+
+
+def _row_descriptor_is_compatible(candidate: dict, selected: dict) -> bool:
+    candidate_y = _numeric_descriptor(candidate.get("y"))
+    selected_y = _numeric_descriptor(selected.get("y"))
+    candidate_h = max(1, _numeric_descriptor(candidate.get("height")))
+    selected_h = max(1, _numeric_descriptor(selected.get("height")))
+    candidate_x = _numeric_descriptor(candidate.get("x"))
+    selected_x = _numeric_descriptor(selected.get("x"))
+    vertical_overlap = min(candidate_y + candidate_h, selected_y + selected_h) - max(candidate_y, selected_y)
+    same_band = vertical_overlap >= max(10, min(candidate_h, selected_h) // 2)
+    width_compatible = (
+        min(_numeric_descriptor(candidate.get("width")), _numeric_descriptor(selected.get("width")))
+        >= max(120, int(max(_numeric_descriptor(candidate.get("width")), _numeric_descriptor(selected.get("width"))) * 0.55))
+    )
+    return same_band and width_compatible and abs(candidate_x - selected_x) <= max(40, min(candidate_h, selected_h))
+
+
+
+def _descriptor_is_safe_activation_row(
+    descriptor: dict,
+    *,
+    viewport_width: int = 0,
+) -> bool:
+    """Return True only for row-like targets inside the jobs results column.
+
+    This is intentionally stricter than diagnostic row discovery: diagnostics may
+    count broad structural candidates, but activation must not click global
+    navigation, feed, profile, or the right-side detail panel.
+    """
+    x = _numeric_descriptor(descriptor.get("x"))
+    y = _numeric_descriptor(descriptor.get("y"))
+    width = _numeric_descriptor(descriptor.get("width"))
+    height = _numeric_descriptor(descriptor.get("height"))
+    if y < 70 or width < 160 or height < 36 or height > 260:
+        return False
+    if viewport_width > 0:
+        if x >= int(viewport_width * 0.48):
+            return False
+        if width > int(viewport_width * 0.62):
+            return False
+    if descriptor.get("detail_or_main") or descriptor.get("header_nav_footer_global"):
+        return False
+    # A safe job href is always acceptable once geometry is in the left column.
+    if str(descriptor.get("href_fragment") or ""):
+        return True
+    # Rows without href are provisional only when they look like left-panel list
+    # cards, not giant layout wrappers or global navigation elements.
+    rowish_geometry = 160 <= width <= 760 and 36 <= height <= 180
+    interactive = any(
+        bool(descriptor.get(key))
+        for key in (
+            "role_button",
+            "tabindex",
+            "cursor_pointer",
+            "clickable_card_geometry",
+            "has_descendant_anchor",
+        )
+    )
+    return rowish_geometry and interactive
+
+def _dedupe_structural_rows(descriptors: list[dict]) -> list[dict]:
+    selected: list[dict] = []
+    seen: set[tuple[object, ...]] = set()
+    candidates = sorted(
+        (item for item in descriptors if isinstance(item, dict) and item.get("row_candidate", True)),
+        key=lambda item: (
+            _numeric_descriptor(item.get("y")),
+            _numeric_descriptor(item.get("x")),
+            _numeric_descriptor(item.get("width")) * _numeric_descriptor(item.get("height")),
+        ),
+    )
+    for candidate in candidates:
+        signature = _descriptor_signature(candidate)
+        identity = _row_identity_key(signature)
+        if identity in seen:
+            continue
+        contained = False
+        replace_indexes: list[int] = []
+        for index, current in enumerate(selected):
+            if _row_descriptor_is_compatible(candidate, current):
+                candidate_area = _numeric_descriptor(candidate.get("width")) * _numeric_descriptor(candidate.get("height"))
+                current_area = _numeric_descriptor(current.get("width")) * _numeric_descriptor(current.get("height"))
+                if candidate_area >= current_area:
+                    contained = True
+                    break
+                replace_indexes.append(index)
+        if contained:
+            continue
+        if replace_indexes:
+            selected = [item for index, item in enumerate(selected) if index not in replace_indexes]
+        selected.append(candidate)
+        seen.add(identity)
+    return selected
+
+
+def _is_visible_row(locator) -> bool:
+    try:
+        return bool(locator.is_visible(timeout=100))
+    except Exception:
+        try:
+            return bool(locator.is_visible())
+        except Exception:
+            return True
+
+
+def _enumerate_visible_job_rows(page) -> list[tuple[str, int, tuple[object, ...]]]:
+    """Enumerate visible structural rows; indices are only locator handles."""
+    try:
+        result = page.evaluate(_STRUCTURAL_DISCOVERY_SCRIPT)
+    except Exception:
+        result = None
+    if isinstance(result, dict) and isinstance(result.get("rows"), list):
+        viewport_width = _numeric_descriptor(result.get("viewport_width"))
+        structural_rows = _dedupe_structural_rows(
+            [item for item in result["rows"] if isinstance(item, dict)]
+        )
+        return [
+            ("body *", _numeric_descriptor(item.get("container_index")), _descriptor_signature(item))
+            for item in structural_rows
+            if item.get("visible", True)
+            and _descriptor_is_safe_activation_row(
+                item,
+                viewport_width=viewport_width,
+            )
+        ]
+    result: list[tuple[str, int, tuple[object, ...]]] = []
+    seen_signatures: set[tuple[object, ...]] = set()
+    for selector in _ROW_SELECTORS:
+        try:
+            matches = page.locator(selector)
+            count = min(_bounded_hydration_count(matches.count()), 1000)
+        except Exception:
+            continue
+        for index in range(count):
+            try:
+                locator = matches.nth(index)
+                if not _is_visible_row(locator):
+                    continue
+                signature = _row_signature(locator)
+            except Exception:
+                continue
+            if _row_identity_key(signature) in {_row_identity_key(item) for item in seen_signatures}:
+                continue
+            seen_signatures.add(signature)
+            result.append((selector, index, signature))
+    return result
+
+
+def _resolve_row_locator(page, signature: tuple[object, ...]):
+    """Re-enumerate and resolve a row immediately before its click."""
+    for selector, index, current_signature in _enumerate_visible_job_rows(page):
+        if _row_identity_key(current_signature) != _row_identity_key(signature):
+            continue
+        try:
+            locator = page.locator(selector).nth(index)
+            return locator if _is_visible_row(locator) else None
+        except Exception:
+            return None
+    return None
+
+
+
+def _posted_at_from_row_locator(locator) -> tuple[str, datetime | None, str, bool]:
+    """Extract only a safe relative date from the visible row text."""
+    try:
+        raw_text = str(
+            locator.evaluate(
+                r"""
+                node => {
+                  const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+                  const patterns = [
+                    /\bhace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
+                    /\b(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
+                    /\b(?:hoy|today)\b/i,
+                    /\b\d+\s*(?:시간|분|일)\s*전\b/i,
+                    /\b\d+\s*(?:時間|分|日)前\b/i,
+                  ];
+                  for (const pattern of patterns) {
+                    const match = text.match(pattern);
+                    if (match && match[0]) return match[0].slice(0, 80);
+                  }
+                  return '';
+                }
+                """
+            )
+            or ""
+        )
+    except Exception:
+        raw_text = ""
+    posted_text = _clean_posted_at_text(raw_text)
+    published_at, confidence, within_24h = parse_linkedin_relative_time(
+        posted_text
+    )
+    return posted_text, published_at, confidence, within_24h
+
+
+def _canonical_detail_href(job_id: str) -> str:
+    return f"https://www.linkedin.com/jobs/view/{job_id}"
+
+
+
+def _collect_visible_detail_job_links(page) -> tuple[set[str], set[str]]:
+    """Collect safe job IDs from visible right-panel detail links.
+
+    LinkedIn can obfuscate detail containers, but the active detail often still
+    exposes a canonical /jobs/view/ link. Keep this fallback geometry-scoped so
+    left-list cards and global navigation do not become the active identity.
+    """
+    job_ids: set[str] = set()
+    hrefs: set[str] = set()
+    try:
+        viewport_width = int(page.evaluate("() => Math.max(0, Math.trunc(window.innerWidth || 0))") or 0)
+    except Exception:
+        viewport_width = 0
+    try:
+        links = page.locator("a[href*='/jobs/view/']")
+        count = min(_bounded_hydration_count(links.count()), 50)
+    except Exception:
+        return job_ids, hrefs
+    for index in range(count):
+        try:
+            locator = links.nth(index)
+            href = str(locator.get_attribute("href") or "").strip()
+        except Exception:
+            continue
+        if not href or "/apply" in href:
+            continue
+        try:
+            box = locator.bounding_box()
+        except Exception:
+            box = None
+        if not isinstance(box, dict):
+            continue
+        x = _numeric_descriptor(box.get("x"))
+        y = _numeric_descriptor(box.get("y"))
+        width = _numeric_descriptor(box.get("width"))
+        height = _numeric_descriptor(box.get("height"))
+        if width <= 0 or height <= 0 or y < 70:
+            continue
+        if viewport_width > 0 and x < int(viewport_width * 0.38):
+            continue
+        try:
+            canonical = canonicalize_linkedin_job_url(
+                urljoin("https://www.linkedin.com", href)
+            )
+        except ValueError:
+            continue
+        detail_id = linkedin_job_id_from_url(canonical)
+        if detail_id:
+            job_ids.add(detail_id)
+            hrefs.add(canonical)
+    return job_ids, hrefs
+
+def _detail_identity_from_page(page) -> LinkedInDetailIdentity:
+    job_ids: set[str] = set()
+    hrefs: set[str] = set()
+    attributes: set[tuple[str, str]] = set()
+
+    def collect(locator) -> None:
+        for name in _ROW_ALLOWLISTED_ATTRIBUTES:
+            try:
+                value = str(locator.get_attribute(name) or "").strip()
+            except Exception:
+                value = ""
+            if value:
+                attributes.add((name, value[:120]))
+                job_id = _job_id_from_attribute_value(value)
+                if job_id:
+                    job_ids.add(job_id)
+        try:
+            links = locator.locator("a[href*='/jobs/view/']")
+            for index in range(min(_bounded_hydration_count(links.count()), 20)):
+                href = str(links.nth(index).get_attribute("href") or "").strip()
+                if not href:
+                    continue
+                try:
+                    canonical = canonicalize_linkedin_job_url(
+                        urljoin("https://www.linkedin.com", href)
+                    )
+                except ValueError:
+                    continue
+                detail_id = linkedin_job_id_from_url(canonical)
+                if detail_id:
+                    job_ids.add(detail_id)
+                    hrefs.add(canonical)
+        except Exception:
+            return
+
+    for selector in _DETAIL_IDENTITY_SELECTORS:
+        try:
+            matches = page.locator(selector)
+            for index in range(min(_bounded_hydration_count(matches.count()), 4)):
+                collect(matches.nth(index))
+        except Exception:
+            continue
+
+    visible_detail_job_ids, visible_detail_hrefs = _collect_visible_detail_job_links(page)
+    job_ids.update(visible_detail_job_ids)
+    hrefs.update(visible_detail_hrefs)
+
+    try:
+        current_url = str(getattr(page, "url", "") or "")
+        canonical = canonicalize_linkedin_job_url(current_url)
+        current_id = linkedin_job_id_from_url(canonical)
+        if current_id:
+            job_ids.add(current_id)
+            hrefs.add(canonical)
+    except ValueError:
+        pass
+
+    job_id = sorted(job_ids, key=lambda item: (len(item), item))[-1] if job_ids else ""
+    canonical_href = _canonical_detail_href(job_id) if job_id else ""
+    if hrefs:
+        matching = sorted(hrefs)
+        canonical_href = next(
+            (href for href in matching if linkedin_job_id_from_url(href) == job_id),
+            canonical_href,
+        )
+    return LinkedInDetailIdentity(
+        job_id=job_id,
+        canonical_detail_href=canonical_href,
+        allowlisted_attributes=tuple(sorted(attributes)),
+    )
+
+
+def _detail_identity_changed(
+    before: LinkedInDetailIdentity,
+    after: LinkedInDetailIdentity,
+) -> bool:
+    return any(
+        (
+            before.job_id != after.job_id,
+            before.canonical_detail_href != after.canonical_detail_href,
+            before.allowlisted_attributes != after.allowlisted_attributes,
+        )
+    )
+
+
+def _wait_for_changed_detail_identity(
+    page,
+    before: LinkedInDetailIdentity,
+    *,
+    max_wait_ms: int = ROW_ACTIVATION_WAIT_MS,
+) -> tuple[LinkedInDetailIdentity, bool]:
+    elapsed_ms = 0
+    while True:
+        after = _detail_identity_from_page(page)
+        if _detail_identity_changed(before, after):
+            return after, True
+        if elapsed_ms >= max_wait_ms:
+            return after, False
+        wait_ms = min(ROW_ACTIVATION_POLL_MS, max_wait_ms - elapsed_ms)
+        _safe_page_pause(page, wait_ms)
+        elapsed_ms += wait_ms
+
+
+def _scroll_results_panel_for_rows(page) -> bool:
+    structural = _structural_panel_metrics(page)
+    if structural is not None:
+        locator, _metrics = structural
+        try:
+            metrics = locator.evaluate(_SCROLL_CONTAINER_SCROLL_SCRIPT)
+        except Exception:
+            return False
+        return isinstance(metrics, dict) and _numeric_descriptor(metrics.get("scrollTopAfter")) != _numeric_descriptor(
+            metrics.get("scrollTopBefore")
+        )
+    selected = None
+    for selector in _RESULTS_PANEL_SCROLL_SELECTORS:
+        try:
+            matches = page.locator(selector)
+            for index in range(min(_bounded_hydration_count(matches.count()), 8)):
+                locator = matches.nth(index)
+                metrics = locator.evaluate(_SCROLL_CONTAINER_PROBE_SCRIPT)
+                if isinstance(metrics, dict) and metrics.get("scrollable"):
+                    selected = locator
+                    break
+        except Exception:
+            continue
+        if selected is not None:
+            break
+    if selected is None:
+        return False
+    try:
+        metrics = selected.evaluate(_SCROLL_CONTAINER_SCROLL_SCRIPT)
+    except Exception:
+        return False
+    return isinstance(metrics, dict) and int(metrics.get("scrollTopAfter", 0) or 0) != int(
+        metrics.get("scrollTopBefore", 0) or 0
+    )
+
+
+def discover_job_rows_via_activation(
+    page,
+    *,
+    source_url: str,
+    existing_job_ids: set[str] | None = None,
+    max_activations: int = MAX_ROW_ACTIVATIONS_PER_QUERY,
+    max_scrolls: int = MAX_DISCOVERY_SCROLLS,
+    max_wait_ms: int = ROW_ACTIVATION_WAIT_MS,
+    diagnostic_capture: Callable[[object, str], None] | None = None,
+    diagnostic_detail_capture: Callable[[object, str], None] | None = None,
+    diagnostic_scroll: Callable[[object, int], None] | None = None,
+) -> LinkedInRowDiscoveryResult:
+    """Discover IDs hidden behind virtualized rows using bounded read-only clicks."""
+    validated_source_url = validate_linkedin_jobs_url(source_url)
+    existing = set(existing_job_ids or ())
+    outcomes: list[LinkedInRowActivationOutcome] = []
+    records: list[LinkedInVacancyRecord] = []
+    processed_signatures: set[tuple[object, ...]] = set()
+    discovered_ids = set(existing)
+    scroll_count = 0
+    structural_rows_found = 0
+    consecutive_scrolls_without_new_ids = 0
+    stop_reason = "none"
+    activation_limit = min(MAX_ROW_ACTIVATIONS_PER_QUERY, max(0, max_activations))
+    selected_panel = _structural_panel_metrics(page)
+    selected_panel_metrics = selected_panel[1] if selected_panel is not None else _SearchScrollMetrics()
+
+    while len(outcomes) < activation_limit:
+        rows = _enumerate_visible_job_rows(page)
+        structural_rows_found = max(structural_rows_found, len(rows))
+        if not rows:
+            stop_reason = "no_structural_rows"
+            break
+        progressed = False
+        ids_before_rows = len(discovered_ids)
+        for _selector, _index, signature in rows:
+            if len(outcomes) >= activation_limit:
+                break
+            if signature in processed_signatures:
+                continue
+            processed_signatures.add(signature)
+            locator = _resolve_row_locator(page, signature)
+            if locator is None:
+                continue
+            progressed = True
+            before = _detail_identity_from_page(page)
+            (
+                row_posted_text,
+                row_published_at,
+                row_freshness_confidence,
+                row_within_24h,
+            ) = _posted_at_from_row_locator(locator)
+            if diagnostic_detail_capture is not None:
+                try:
+                    diagnostic_detail_capture(page, "before_click")
+                except Exception:
+                    pass
+            try:
+                locator.click(timeout=5000)
+            except Exception:
+                outcome = "row_activation_no_change"
+                outcomes.append(LinkedInRowActivationOutcome(outcome, signature))
+                if diagnostic_capture is not None:
+                    try:
+                        diagnostic_capture(page, outcome)
+                    except Exception:
+                        pass
+                continue
+            after, changed = _wait_for_changed_detail_identity(
+                page, before, max_wait_ms=max_wait_ms
+            )
+            if not changed:
+                outcome = "row_activation_no_change"
+            elif not after.job_id:
+                outcome = "row_activation_no_job_id"
+            elif after.job_id in discovered_ids:
+                outcome = "row_activation_duplicate"
+            else:
+                outcome = "row_activation_success"
+                discovered_ids.add(after.job_id)
+                records.append(
+                    LinkedInVacancyRecord(
+                        linkedin_job_id=after.job_id,
+                        posted_at_text=row_posted_text,
+                        published_at=row_published_at,
+                        freshness_confidence=(
+                            row_freshness_confidence
+                            if row_published_at is not None
+                            else "low"
+                        ),
+                        is_within_24_hours=(
+                            row_within_24h if row_published_at is not None else False
+                        ),
+                        canonical_url=after.canonical_detail_href
+                        or _canonical_detail_href(after.job_id),
+                        source_url=validated_source_url,
+                        discovery_sources=["row_activation"],
+                        candidate_metadata_incomplete=True,
+                    )
+                )
+            outcomes.append(
+                LinkedInRowActivationOutcome(
+                    outcome=outcome,
+                    signature=signature,
+                    job_id=after.job_id,
+                    canonical_detail_href=after.canonical_detail_href,
+                )
+            )
+            if diagnostic_detail_capture is not None:
+                try:
+                    diagnostic_detail_capture(page, "after_click")
+                except Exception:
+                    pass
+            if diagnostic_capture is not None:
+                try:
+                    diagnostic_capture(page, outcome)
+                except Exception:
+                    # Diagnostics must never affect read-only discovery.
+                    pass
+        if len(outcomes) >= activation_limit:
+            stop_reason = "activation_cap"
+            break
+        if scroll_count >= min(MAX_DISCOVERY_SCROLLS, max(0, max_scrolls)):
+            stop_reason = "scroll_cap"
+            break
+        if not _scroll_results_panel_for_rows(page):
+            stop_reason = "no_scroll_progress"
+            break
+        scroll_count += 1
+        _safe_page_pause(page, min(DISCOVERY_SCROLL_WAIT_MS, max_wait_ms))
+        if diagnostic_scroll is not None:
+            try:
+                diagnostic_scroll(page, scroll_count)
+            except Exception:
+                pass
+        if len(discovered_ids) == ids_before_rows:
+            consecutive_scrolls_without_new_ids += 1
+        else:
+            consecutive_scrolls_without_new_ids = 0
+        if consecutive_scrolls_without_new_ids >= 2:
+            stop_reason = "two_scrolls_without_new_job_ids"
+            break
+        if not progressed and not _enumerate_visible_job_rows(page):
+            stop_reason = "no_new_structural_rows"
+            break
+    if stop_reason == "none":
+        stop_reason = "structural_rows_found_but_unresolved" if structural_rows_found and not records else "exhausted"
+    return LinkedInRowDiscoveryResult(
+        records,
+        outcomes,
+        scroll_count,
+        structural_rows_found,
+        stop_reason,
+        selected_panel_metrics.selected_row_container_score,
+        selected_panel_metrics.row_interactive_count,
+    )
+
+
+def merge_row_activation_records(
+    dom_records: list[LinkedInVacancyRecord],
+    row_records: list[LinkedInVacancyRecord],
+) -> tuple[list[LinkedInVacancyRecord], bool, bool]:
+    """Merge sources by job ID before global same-run detail deduplication."""
+    merged: list[LinkedInVacancyRecord] = []
+    by_id: dict[str, int] = {}
+    dom_contributed = False
+    row_contributed = False
+    for record, is_row in [*( (item, False) for item in dom_records), *((item, True) for item in row_records)]:
+        job_id = _job_id_from_attribute_value(getattr(record, "linkedin_job_id", ""))
+        if not job_id:
+            continue
+        if is_row:
+            row_contributed = True
+        else:
+            dom_contributed = True
+        index = by_id.get(job_id)
+        if index is None:
+            by_id[job_id] = len(merged)
+            merged.append(record.model_copy(update={"linkedin_job_id": job_id}))
+            continue
+        current = merged[index]
+        sources = sorted(set(current.discovery_sources) | set(record.discovery_sources))
+        merged[index] = current.model_copy(update={"discovery_sources": sources})
+    return merged, dom_contributed, row_contributed
+
+
+def discovery_mode_for_sources(
+    *,
+    dom_contributed: bool,
+    row_contributed: bool,
+    structural_rows_found: bool = False,
+    row_job_ids_resolved: int = 0,
+) -> str:
+    if structural_rows_found and row_job_ids_resolved == 0:
+        return "structural_rows_found_but_unresolved"
+    if dom_contributed and row_contributed:
+        return "multi_source_with_row_activation"
+    if row_contributed:
+        return "row_activation"
+    return "standard"
 
 
 def _add_job_ids_from_attribute(
@@ -1100,6 +2093,9 @@ def _sample_search_hydration(page) -> _SearchHydrationSample:
         _locator_has_signal(page, selector)
         for selector in _BLOCK_SIGNAL_SELECTORS
     )
+    panel = _structural_panel_metrics(page)
+    panel_metrics = panel[1] if panel is not None else _SearchScrollMetrics()
+    structural_rows = _enumerate_visible_job_rows(page)
     return _SearchHydrationSample(
         card_count=card_count,
         href_count=len(semantic_job_ids),
@@ -1119,6 +2115,9 @@ def _sample_search_hydration(page) -> _SearchHydrationSample:
         frame_count=_safe_frame_count(page),
         raw_signal_count=raw_signal_count,
         unique_candidate_count=len(broad_job_ids),
+        selected_row_container_score=panel_metrics.selected_row_container_score,
+        row_candidate_count=max(panel_metrics.row_candidate_count, len(structural_rows)),
+        row_interactive_count=panel_metrics.row_interactive_count,
     )
 
 
@@ -1162,8 +2161,137 @@ def _scroll_container_priority(container: str) -> int:
     }.get(container, 0)
 
 
+def _numeric_descriptor(value: object, *, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalised_score(value: int, maximum: int, weight: int) -> int:
+    if maximum <= 0 or value <= 0:
+        return 0
+    return min(weight, max(0, round(weight * value / maximum)))
+
+
+def _score_results_panel_descriptor(
+    descriptor: dict,
+    *,
+    max_row_candidates: int,
+    max_repetition: int,
+    max_interactive: int,
+    viewport_width: int,
+) -> int:
+    rows = _numeric_descriptor(descriptor.get("row_candidate_count", descriptor.get("row_count", 0)))
+    repetition = _numeric_descriptor(
+        descriptor.get("row_repetition", descriptor.get("vertical_repetition", descriptor.get("regular_vertical_repetition", 0)))
+    )
+    interactive = _numeric_descriptor(
+        descriptor.get("interactive_count", descriptor.get("visible_interactive_count", 0))
+    )
+    scroll_height = _numeric_descriptor(descriptor.get("scrollHeight"))
+    client_height = _numeric_descriptor(descriptor.get("clientHeight"))
+    x = _numeric_descriptor(descriptor.get("x"))
+    useful_scroll = scroll_height > client_height + max(80, client_height // 4)
+    left_proximity = 2 if viewport_width <= 0 else max(0, min(2, round(2 * (1 - min(1, x / viewport_width)))))
+    score = (
+        _normalised_score(rows, max_row_candidates, 4)
+        + _normalised_score(repetition, max_repetition, 3)
+        + (2 if useful_scroll else 0)
+        + _normalised_score(interactive, max_interactive, 2)
+        + left_proximity
+    )
+    if descriptor.get("detail_or_main"):
+        score -= 4
+    if descriptor.get("header_nav_footer_global"):
+        score -= 3
+    return score
+
+
+def _choose_structural_results_panel(
+    descriptors: list[dict],
+    *,
+    viewport_width: int = 0,
+) -> tuple[dict, int] | None:
+    if not descriptors:
+        return None
+    max_rows = max(_numeric_descriptor(item.get("row_candidate_count", item.get("row_count", 0))) for item in descriptors)
+    max_repetition = max(_numeric_descriptor(item.get("row_repetition", item.get("vertical_repetition", item.get("regular_vertical_repetition", 0)))) for item in descriptors)
+    max_interactive = max(_numeric_descriptor(item.get("interactive_count", item.get("visible_interactive_count", 0))) for item in descriptors)
+    scored = []
+    for item in descriptors:
+        score = _score_results_panel_descriptor(
+            item,
+            max_row_candidates=max_rows,
+            max_repetition=max_repetition,
+            max_interactive=max_interactive,
+            viewport_width=viewport_width,
+        )
+        scored.append((
+            score,
+            _numeric_descriptor(item.get("row_repetition", item.get("vertical_repetition", item.get("regular_vertical_repetition", 0)))),
+            -_numeric_descriptor(item.get("x")),
+            -_numeric_descriptor(item.get("width")),
+            _numeric_descriptor(item.get("visible_row_count", item.get("row_count", 0))),
+            item,
+        ))
+    selected = max(scored, key=lambda item: item[:-1])
+    return selected[-1], selected[0]
+
+
+def _structural_discovery(page) -> tuple[dict, list[dict]]:
+    try:
+        result = page.evaluate(_STRUCTURAL_DISCOVERY_SCRIPT)
+    except Exception:
+        return {}, []
+    if not isinstance(result, dict):
+        return {}, []
+    containers = [item for item in result.get("containers", []) if isinstance(item, dict)]
+    rows = [item for item in result.get("rows", []) if isinstance(item, dict)]
+    return result, rows
+
+
+def _structural_panel_metrics(page) -> tuple[object, _SearchScrollMetrics] | None:
+    try:
+        result = page.evaluate(_STRUCTURAL_DISCOVERY_SCRIPT)
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    containers = [item for item in result.get("containers", []) if isinstance(item, dict)]
+    selected = _choose_structural_results_panel(
+        containers,
+        viewport_width=_numeric_descriptor(result.get("viewport_width")),
+    )
+    if selected is None:
+        return None
+    descriptor, score = selected
+    container_index = _numeric_descriptor(descriptor.get("container_index"))
+    try:
+        locator = page.locator("body *").nth(container_index)
+    except Exception:
+        return None
+    return locator, _SearchScrollMetrics(
+        selected_scroll_container="results_panel",
+        scroll_height=_numeric_descriptor(descriptor.get("scrollHeight")),
+        client_height=_numeric_descriptor(descriptor.get("clientHeight")),
+        scroll_top_before=_numeric_descriptor(descriptor.get("scrollTop")),
+        scroll_top_after=_numeric_descriptor(descriptor.get("scrollTop")),
+        job_signal_count=_numeric_descriptor(descriptor.get("row_candidate_count", descriptor.get("row_count", 0))),
+        selected_row_container_score=score,
+        row_candidate_count=_numeric_descriptor(descriptor.get("row_candidate_count", descriptor.get("row_count", 0))),
+        row_interactive_count=_numeric_descriptor(descriptor.get("interactive_count", descriptor.get("visible_interactive_count", 0))),
+        row_repetition=_numeric_descriptor(descriptor.get("row_repetition", descriptor.get("vertical_repetition", descriptor.get("regular_vertical_repetition", 0)))),
+        visible_row_count=_numeric_descriptor(descriptor.get("visible_row_count", descriptor.get("row_count", 0))),
+    )
+
+
 def _candidate_scroll_containers(page) -> list[tuple[object, _SearchScrollMetrics]]:
     candidates: list[tuple[object, _SearchScrollMetrics]] = []
+    structural = _structural_panel_metrics(page)
+    if structural is not None:
+        candidates.append(structural)
+        return candidates
     for label, selectors in (
         ("results_panel", _RESULTS_PANEL_SCROLL_SELECTORS),
         ("main", ("main",)),
@@ -1218,6 +2346,7 @@ def _choose_scroll_container(
     return max(
         candidates,
         key=lambda item: (
+            item[1].selected_row_container_score,
             item[1].job_signal_count,
             _scroll_container_priority(item[1].selected_scroll_container),
             item[1].scroll_height - item[1].client_height,
@@ -1292,6 +2421,11 @@ def _scroll_search_results_incrementally(page) -> _SearchScrollMetrics:
         scroll_top_before=_safe_int_from_mapping(metrics, "scrollTopBefore"),
         scroll_top_after=_safe_int_from_mapping(metrics, "scrollTopAfter"),
         job_signal_count=selected_metrics.job_signal_count,
+        selected_row_container_score=selected_metrics.selected_row_container_score,
+        row_candidate_count=selected_metrics.row_candidate_count,
+        row_interactive_count=selected_metrics.row_interactive_count,
+        row_repetition=selected_metrics.row_repetition,
+        visible_row_count=selected_metrics.visible_row_count,
     )
 
 

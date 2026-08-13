@@ -103,6 +103,17 @@ class LinkedInParseDiagnostics(BaseModel):
     duplicate_candidate_count: int = Field(default=0, ge=0)
     discovery_degraded: bool = False
     discovery_mode: str = Field(default="standard", max_length=40)
+    row_activation_count: int = Field(default=0, ge=0, le=20)
+    row_activation_success_count: int = Field(default=0, ge=0, le=20)
+    row_activation_no_change_count: int = Field(default=0, ge=0, le=20)
+    row_activation_no_job_id_count: int = Field(default=0, ge=0, le=20)
+    row_activation_duplicate_count: int = Field(default=0, ge=0, le=20)
+    row_activation_scroll_count: int = Field(default=0, ge=0, le=3)
+    selected_row_container_score: int = Field(default=0, ge=-20, le=20)
+    row_candidate_count: int = Field(default=0, ge=0, le=10000)
+    row_interactive_count: int = Field(default=0, ge=0, le=10000)
+    row_job_ids_resolved: int = Field(default=0, ge=0, le=20)
+    row_activation_stop_reason: str = Field(default="none", max_length=80)
 
 
 class LinkedInQueryTiming(BaseModel):
@@ -149,6 +160,10 @@ DetailDiagnosticOutcome = Literal[
     "extracted",
     "rejected",
     "failed",
+    "row_activation_success",
+    "row_activation_no_change",
+    "row_activation_no_job_id",
+    "row_activation_duplicate",
 ]
 DetailDiagnosticRejection = Literal[
     "none",
@@ -241,6 +256,17 @@ class LinkedInSearchHydrationDiagnostic(BaseModel):
     client_height: int = Field(default=0, ge=0, le=2_000_000)
     scroll_top_before: int = Field(default=0, ge=0, le=2_000_000)
     scroll_top_after: int = Field(default=0, ge=0, le=2_000_000)
+    row_activation_count: int = Field(default=0, ge=0, le=20)
+    row_activation_success_count: int = Field(default=0, ge=0, le=20)
+    row_activation_no_change_count: int = Field(default=0, ge=0, le=20)
+    row_activation_no_job_id_count: int = Field(default=0, ge=0, le=20)
+    row_activation_duplicate_count: int = Field(default=0, ge=0, le=20)
+    row_activation_scroll_count: int = Field(default=0, ge=0, le=3)
+    selected_row_container_score: int = Field(default=0, ge=-20, le=20)
+    row_candidate_count: int = Field(default=0, ge=0, le=10000)
+    row_interactive_count: int = Field(default=0, ge=0, le=10000)
+    row_job_ids_resolved: int = Field(default=0, ge=0, le=20)
+    row_activation_stop_reason: str = Field(default="none", max_length=80)
     empty_state_visible: bool = False
     auth_checkpoint_visible: bool = False
     outcome: SearchHydrationOutcome
