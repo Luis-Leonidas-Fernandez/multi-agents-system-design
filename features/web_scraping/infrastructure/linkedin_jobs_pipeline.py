@@ -7,6 +7,7 @@ import inspect
 import re
 import time
 from typing import TYPE_CHECKING, Any, Callable
+from urllib.parse import urljoin, urlparse, urlunparse, unquote_plus
 
 from features.web_scraping.infrastructure.linkedin_detail_diagnostics import (
     LinkedInDetailDiagnosticsCollector,
@@ -15,7 +16,10 @@ from features.web_scraping.infrastructure.linkedin_detail_diagnostics import (
 from features.web_scraping.infrastructure.linkedin_query_navigation import (
     LinkedInSearchHydrationDiagnosticsCollector,
     MIN_EXPECTED_DISCOVERY_CANDIDATES,
+    _wait_for_active_detail_metadata,
+    collect_visible_search_card_dates,
     discovery_mode_for_sources,
+    latest_active_detail_metadata_diagnostic,
     discover_job_rows_via_activation,
     merge_row_activation_records,
     get_active_search_hydration_diagnostics,
@@ -26,6 +30,10 @@ from features.web_scraping.infrastructure.linkedin_static_probe_diagnostics impo
 )
 from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
     get_active_visual_diagnostics,
+)
+
+from features.web_scraping.infrastructure.linkedin_url_policy import (
+    canonicalize_linkedin_url,
 )
 
 if TYPE_CHECKING:
@@ -108,6 +116,373 @@ def _candidate_metadata_complete(record: Any) -> bool:
     )
 
 
+def _safe_active_detail_date_label(value: str) -> str:
+    label = re.sub(r"\s+", "_", (value or "").strip())[:40]
+    label = re.sub(r"[^0-9A-Za-z_가-힣一-龯áéíóúÁÉÍÓÚüÜñÑ-]", "", label)
+    return label or "none"
+
+
+def _active_detail_metadata_warning(record: Any) -> str:
+    job_id = _safe_candidate_identity(record) or "unknown"
+    diagnostic = latest_active_detail_metadata_diagnostic()
+    count = max(0, min(100, int(diagnostic.get("date_candidate_count", 0) or 0)))
+    score = max(0, min(100000, int(diagnostic.get("selected_score", 0) or 0)))
+    selected = _safe_active_detail_date_label(str(diagnostic.get("selected_date", "") or ""))
+    if bool(diagnostic.get("date_verified", False)):
+        status = (
+            "within_24_hours"
+            if bool(diagnostic.get("date_within_24_hours", False))
+            else "outside_24_hours"
+        )
+    elif bool(diagnostic.get("date_detected", False)):
+        status = "unparseable"
+    else:
+        status = "missing"
+    return (
+        f"active_detail_date_selected:{job_id}:{status}:"
+        f"date_{selected}:candidates_{count}:score_{score}"
+    )
+
+
+def _normalize_top_card_identity_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+    return re.sub(r"[^0-9a-z가-힣一-龯]+", " ", text).strip()
+
+
+def _active_detail_top_card_date_identity_status(
+    record: Any,
+    active_title: str,
+) -> tuple[bool, str]:
+    """Validate active-detail date evidence against the visible top-card title.
+
+    This intentionally does not use page URL, global hrefs, or left-list signals:
+    those were proven to produce false positives when LinkedIn kept another
+    detail panel active.
+    """
+    expected_title = _normalize_top_card_identity_text(
+        getattr(record, "title", "")
+    )
+    visible_title = _normalize_top_card_identity_text(active_title)
+    if not expected_title:
+        return False, "candidate_title_missing"
+    if not visible_title:
+        return False, "top_card_title_missing"
+    if expected_title == visible_title:
+        return True, "top_card_title_match"
+
+    expected_tokens = set(expected_title.split())
+    visible_tokens = set(visible_title.split())
+    if (
+        len(expected_tokens) >= 4
+        and expected_tokens.issubset(visible_tokens)
+    ) or (
+        len(visible_tokens) >= 4
+        and visible_tokens.issubset(expected_tokens)
+    ):
+        return True, "top_card_title_compatible"
+
+    # LinkedIn often expands concise card titles in the detail top-card, e.g.
+    # "Machine Learning Engineer" -> "Machine Learning Engineer - AI (Remote)".
+    # Accept that only for a bounded, ordered prefix with enough signal; this
+    # keeps very short/generic titles from matching unrelated roles.
+    expected_sequence = expected_title.split()
+    visible_sequence = visible_title.split()
+    if (
+        len(expected_sequence) >= 3
+        and len(visible_sequence) > len(expected_sequence)
+        and visible_sequence[: len(expected_sequence)] == expected_sequence
+    ):
+        return True, "top_card_title_prefix_compatible"
+
+    return False, "top_card_title_mismatch"
+
+
+def _merge_active_detail_metadata(
+    record: Any,
+    page: Any,
+    *,
+    warnings: list[str] | None = None,
+) -> Any:
+    try:
+        title, posted_text, published_at, confidence, within_24h = (
+            _wait_for_active_detail_metadata(
+                page,
+                require_date=getattr(record, "published_at", None) is None,
+            )
+        )
+    except Exception:
+        return record
+    if warnings is not None:
+        warnings.append(_active_detail_metadata_warning(record))
+    updates: dict[str, Any] = {}
+    if not str(getattr(record, "title", "") or "").strip() and title:
+        updates["title"] = title
+    if getattr(record, "published_at", None) is None and published_at is not None:
+        identity_matches, identity_reason = _active_detail_top_card_date_identity_status(
+            record,
+            title,
+        )
+        if warnings is not None:
+            warnings.append(
+                "active_detail_top_card_identity:"
+                f"{_safe_candidate_identity(record) or 'unknown'}:"
+                f"{identity_reason}"
+            )
+        if identity_matches:
+            updates.update(
+                {
+                    "posted_at_text": posted_text,
+                    "published_at": published_at,
+                    "freshness_confidence": confidence,
+                    "is_within_24_hours": within_24h,
+                }
+            )
+    return record.model_copy(update=updates) if updates else record
+
+
+
+
+def _activate_visible_search_card_date_evidence(
+    page: Any,
+    record: Any,
+    *,
+    warnings: list[str] | None = None,
+) -> Any:
+    """Activate the visible search card for one job and read verified date.
+
+    This is intentionally isolated/removable. It only merges date evidence when
+    the active detail top-card title is compatible with the candidate title.
+    """
+    job_id = _safe_candidate_identity(record)
+    if not job_id:
+        return record
+    selectors = (
+        f'[data-job-id$="{job_id}"]',
+        f'[data-occludable-job-id$="{job_id}"]',
+        f'a[href*="/jobs/view/{job_id}"]',
+        f'a[href*="-{job_id}"]',
+    )
+    clicked = False
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if not locator.count():
+                continue
+            try:
+                locator.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+            locator.click(timeout=5000)
+            clicked = True
+            break
+        except Exception:
+            continue
+    if not clicked:
+        if warnings is not None:
+            warnings.append(f"card_activation_date_failed:{job_id}:card_not_found")
+        return record
+    try:
+        title, posted_text, published_at, confidence, within_24h = (
+            _wait_for_active_detail_metadata(page, require_date=True)
+        )
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"card_activation_date_failed:{job_id}:metadata_error")
+        return record
+    if warnings is not None:
+        warnings.append(_active_detail_metadata_warning(record))
+    identity_matches, identity_reason = _active_detail_top_card_date_identity_status(
+        record,
+        title,
+    )
+    if warnings is not None:
+        warnings.append(f"card_activation_date_identity:{job_id}:{identity_reason}")
+    if not identity_matches:
+        return record
+    if published_at is None:
+        if warnings is not None:
+            warnings.append(f"card_activation_date_failed:{job_id}:missing_date")
+        return record
+    if warnings is not None:
+        status = "within_24_hours" if within_24h else "outside_24_hours"
+        warnings.append(f"card_activation_date_verified:{job_id}:{status}")
+    return record.model_copy(
+        update={
+            "posted_at_text": posted_text,
+            "published_at": published_at,
+            "freshness_confidence": confidence,
+            "is_within_24_hours": within_24h,
+        }
+    )
+
+
+def _activate_visible_search_card_by_title_date_evidence(
+    page: Any,
+    record: Any,
+    *,
+    warnings: list[str] | None = None,
+) -> Any:
+    """Activate a visible search card by normalized title and read date evidence.
+
+    This helper is a removable fallback for cases where job-id selectors click
+    the wrong virtualized row. It does not persist or log row text, and it only
+    merges date evidence after active top-card title validation.
+    """
+    job_id = _safe_candidate_identity(record)
+    expected_title = _normalize_top_card_identity_text(getattr(record, "title", ""))
+    if not job_id or not expected_title:
+        if warnings is not None and job_id:
+            warnings.append(f"card_title_activation_failed:{job_id}:missing_title")
+        return record
+    row_selectors = (
+        'li[data-job-id], li[data-occludable-job-id], '
+        '[role="listitem"], [role="option"], '
+        '.job-card-container, .scaffold-layout__list-item'
+    )
+    clicked = False
+    try:
+        rows = page.locator(row_selectors)
+        count = min(max(0, int(rows.count() or 0)), 80)
+    except Exception:
+        count = 0
+    for index in range(count):
+        try:
+            row = rows.nth(index)
+            try:
+                text = row.inner_text(timeout=1000)
+            except Exception:
+                text = row.text_content(timeout=1000)
+            row_title = _normalize_top_card_identity_text(text)
+            if expected_title not in row_title:
+                continue
+            try:
+                row.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+            try:
+                link = row.locator('a[href*="/jobs/view/"]').first
+                if link.count():
+                    link.click(timeout=5000)
+                else:
+                    row.click(timeout=5000)
+            except Exception:
+                row.click(timeout=5000)
+            clicked = True
+            break
+        except Exception:
+            continue
+    if not clicked:
+        if warnings is not None:
+            warnings.append(f"card_title_activation_failed:{job_id}:row_not_found")
+        return record
+    try:
+        title, posted_text, published_at, confidence, within_24h = (
+            _wait_for_active_detail_metadata(page, require_date=True)
+        )
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"card_title_activation_failed:{job_id}:metadata_error")
+        return record
+    if warnings is not None:
+        warnings.append(_active_detail_metadata_warning(record))
+    identity_matches, identity_reason = _active_detail_top_card_date_identity_status(
+        record,
+        title,
+    )
+    if warnings is not None:
+        warnings.append(f"card_title_activation_identity:{job_id}:{identity_reason}")
+    if not identity_matches:
+        return record
+    if published_at is None:
+        if warnings is not None:
+            warnings.append(f"card_title_activation_failed:{job_id}:missing_date")
+        return record
+    if warnings is not None:
+        status = "within_24_hours" if within_24h else "outside_24_hours"
+        warnings.append(f"card_title_activation_verified:{job_id}:{status}")
+    return record.model_copy(
+        update={
+            "posted_at_text": posted_text,
+            "published_at": published_at,
+            "freshness_confidence": confidence,
+            "is_within_24_hours": within_24h,
+        }
+    )
+
+def _capture_unverified_date_visual_evidence(
+    visual_diagnostics: Any,
+    page: Any,
+    record: Any,
+    *,
+    warnings: list[str] | None = None,
+) -> None:
+    """Capture local-only screenshots for a candidate missing verified date.
+
+    This helper is intentionally isolated so the diagnostic hook can be removed
+    cleanly if it does not help. It never affects validation or acceptance.
+    """
+    if visual_diagnostics is None:
+        return
+    job_id = getattr(record, "linkedin_job_id", "") or _safe_candidate_identity(record)
+    if not job_id:
+        return
+    captured = False
+    if hasattr(visual_diagnostics, "capture_active_detail_date"):
+        try:
+            visual_diagnostics.capture_active_detail_date(
+                page,
+                job_id=job_id,
+                reason="unverified_posted_date",
+            )
+            captured = True
+        except Exception:
+            pass
+    if hasattr(visual_diagnostics, "capture_rejected_candidate_card"):
+        try:
+            visual_diagnostics.capture_rejected_candidate_card(
+                page,
+                job_id=job_id,
+                reason="unverified_posted_date",
+            )
+            captured = True
+        except Exception:
+            pass
+    if captured and warnings is not None:
+        warnings.append(f"unverified_date_visual_debug:{job_id}")
+
+
+def _merge_candidate_discovery_evidence(current: Any, incoming: Any) -> Any:
+    updates: dict[str, Any] = {}
+    for field_name in (
+        "title",
+        "company_name",
+        "location",
+        "workplace_type",
+        "posted_at_text",
+        "published_at",
+        "freshness_confidence",
+        "is_within_24_hours",
+    ):
+        current_value = getattr(current, field_name, None)
+        incoming_value = getattr(incoming, field_name, None)
+        if field_name in {"freshness_confidence", "is_within_24_hours"}:
+            if getattr(current, "published_at", None) is None and getattr(incoming, "published_at", None) is not None:
+                updates[field_name] = incoming_value
+            continue
+        if not current_value and incoming_value:
+            updates[field_name] = incoming_value
+    current_sources = set(getattr(current, "discovery_sources", None) or [])
+    incoming_sources = set(getattr(incoming, "discovery_sources", None) or [])
+    merged_sources = sorted(current_sources | incoming_sources)
+    if merged_sources and merged_sources != list(getattr(current, "discovery_sources", None) or []):
+        updates["discovery_sources"] = merged_sources
+    if getattr(current, "candidate_metadata_incomplete", False) and _candidate_metadata_complete(
+        current.model_copy(update=updates) if updates else current
+    ):
+        updates["candidate_metadata_incomplete"] = False
+    return current.model_copy(update=updates) if updates else current
+
+
 def _refresh_candidate_discovery_state(record: Any) -> Any:
     updates: dict[str, Any] = {}
     if getattr(record, "candidate_metadata_incomplete", False) and _candidate_metadata_complete(record):
@@ -142,8 +517,12 @@ def _mark_diagnostics_after_query_dedupe(diagnostics: Any, *, new_count: int) ->
         }
     )
 
+def _normalize_location_marker_text(value: Any) -> str:
+    return unquote_plus(str(value or "")).casefold()
+
+
 def _has_any_marker(value: str, markers: tuple[str, ...]) -> bool:
-    normalized = (value or "").casefold()
+    normalized = _normalize_location_marker_text(value)
     return any(marker in normalized for marker in markers)
 
 
@@ -155,6 +534,8 @@ def _record_country_signal_text(record: Any) -> str:
             getattr(record, "company_name", ""),
             getattr(record, "description_excerpt", ""),
             getattr(record, "description_full_text", ""),
+            getattr(record, "canonical_url", ""),
+            getattr(record, "source_url", ""),
         )
     )
 
@@ -206,6 +587,604 @@ def _dedupe_rejected_records(
     return deduped, warnings
 
 
+
+
+_KOREA_REMOTE_ROLE_EVIDENCE_MARKERS = (
+    "south korea",
+    "corea del sur",
+    "korea office",
+    "korean office",
+    "korea team",
+    "korean team",
+    "korea market",
+    "korean market",
+    "based in korea",
+    "based in seoul",
+    "located in korea",
+    "located in seoul",
+    "work from korea",
+    "working from korea",
+    "seoul office",
+    "대한민국",
+    "서울",
+)
+_JAPAN_REMOTE_ROLE_EVIDENCE_MARKERS = (
+    "japan",
+    "japón",
+    "japan office",
+    "japanese office",
+    "japan team",
+    "japanese team",
+    "japan market",
+    "japanese market",
+    "based in japan",
+    "based in tokyo",
+    "located in japan",
+    "located in tokyo",
+    "work from japan",
+    "working from japan",
+    "tokyo office",
+    "日本",
+    "東京",
+)
+
+
+def _strip_linkedin_search_location_evidence(value: str) -> str:
+    """Remove search-query location hints so APAC/remote needs role evidence."""
+    return re.sub(
+        r"(?:[?&]|^)location=[^&#\s]+",
+        " ",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+
+
+def _remote_or_hybrid_location_matches_requested_country(
+    visible_location: str,
+    requested_location: str,
+    country_signal_text: str = "",
+) -> bool | None:
+    """Resolve regional/remote spillover with bounded role/employer evidence.
+
+    Return None when the location is not a regional/remote ambiguity. A LinkedIn
+    search URL location is not enough proof: APAC/remote roles must mention the
+    requested country in the role, employer, card, or detail evidence.
+    """
+    visible = _normalize_location_marker_text(visible_location)
+    if not _has_any_marker(visible, _REGIONAL_REMOTE_LOCATION_MARKERS):
+        return None
+
+    requested = _normalize_location_marker_text(requested_location)
+    signal_text = _normalize_location_marker_text(
+        _strip_linkedin_search_location_evidence(country_signal_text)
+    )
+    if _has_any_marker(requested, _KOREA_LOCATION_MARKERS):
+        return _has_any_marker(signal_text, _KOREA_REMOTE_ROLE_EVIDENCE_MARKERS)
+    if _has_any_marker(requested, _JAPAN_LOCATION_MARKERS):
+        return _has_any_marker(signal_text, _JAPAN_REMOTE_ROLE_EVIDENCE_MARKERS)
+    return None
+
+
+
+
+
+
+
+
+
+def _safe_linkedin_profile_url_from_href(href: Any) -> str:
+    try:
+        parsed = urlparse(urljoin("https://www.linkedin.com", str(href or "")))
+    except Exception:
+        return ""
+    if parsed.scheme.lower() != "https":
+        return ""
+    if (parsed.hostname or "").lower() not in {"linkedin.com", "www.linkedin.com"}:
+        return ""
+    if parsed.username or parsed.password:
+        return ""
+    parts = [part for part in (parsed.path or "").split("/") if part]
+    if len(parts) < 2 or parts[0] != "in":
+        return ""
+    slug = parts[1].strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", slug):
+        return ""
+    return urlunparse(("https", "www.linkedin.com", f"/in/{slug}", "", "", ""))
+
+
+def _safe_recruiter_profile_url_from_active_detail(page: Any) -> str:
+    try:
+        hrefs = page.evaluate(
+            """
+            () => {
+              const values = [];
+              const seen = new Set();
+              const pushLinks = (root) => {
+                if (!root || seen.size >= 40) return;
+                for (const link of Array.from(root.querySelectorAll('a[href*="/in/"]')).slice(0, 10)) {
+                  const href = String(link.href || link.getAttribute('href') || '');
+                  if (!href || seen.has(href)) continue;
+                  seen.add(href);
+                  values.push(href);
+                }
+              };
+              const classRoots = Array.from(document.querySelectorAll(
+                '[class*=hiring], [class*=recruiter], [class*=hirer], [class*=poster]'
+              )).slice(0, 20);
+              for (const root of classRoots) pushLinks(root);
+
+              const markerPattern = /equipo de contrataci[oó]n|conoce al equipo de contrataci[oó]n|hiring team|recruiter|contratador|publicado por|published by/i;
+              const textRoots = Array.from(document.querySelectorAll(
+                'section, aside, div, li, article'
+              )).slice(0, 500).filter((node) => {
+                const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!text || text.length > 700) return false;
+                if (!markerPattern.test(text)) return false;
+                return Boolean(node.querySelector('a[href*="/in/"]'));
+              }).slice(0, 20);
+              for (const root of textRoots) pushLinks(root);
+
+              return values.slice(0, 40);
+            }
+            """
+        )
+    except Exception:
+        return ""
+    if isinstance(hrefs, str):
+        hrefs = [hrefs]
+    if not isinstance(hrefs, list):
+        return ""
+    for href in hrefs:
+        profile_url = _safe_linkedin_profile_url_from_href(href)
+        if profile_url:
+            return profile_url
+    return ""
+
+
+def _recruiter_location_country_signal(profile_snapshot: Any) -> str:
+    if not isinstance(profile_snapshot, dict):
+        return ""
+    if bool(profile_snapshot.get("has_korea")):
+        return "korea office"
+    if bool(profile_snapshot.get("has_japan")):
+        return "japan office"
+    return ""
+
+
+def _recruiter_location_evidence_signal(
+    page: Any,
+    record: Any,
+    requested_location: str,
+    visual_diagnostics: Any = None,
+    *,
+    warnings: list[str] | None = None,
+) -> str:
+    """Open a visible recruiter profile read-only and return positive country evidence.
+
+    Recruiter evidence is additive only: missing or non-matching recruiter location
+    never blocks a company-positive APAC/remote candidate.
+    """
+    if page is None:
+        return ""
+    if not _has_any_marker(
+        str(getattr(record, "location", "") or ""),
+        _REGIONAL_REMOTE_LOCATION_MARKERS,
+    ):
+        return ""
+    job_id = getattr(record, "linkedin_job_id", "") or _safe_candidate_identity(record)
+    try:
+        active_title, *_ = _wait_for_active_detail_metadata(page, require_date=False)
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"recruiter_location_evidence:{job_id or 'unknown'}:metadata_error")
+        return ""
+    identity_matches, identity_reason = _active_detail_top_card_date_identity_status(
+        record,
+        active_title,
+    )
+    if not identity_matches:
+        if warnings is not None:
+            warnings.append(
+                "recruiter_location_evidence:"
+                f"{job_id or 'unknown'}:identity_{identity_reason}"
+            )
+        return ""
+    profile_url = _safe_recruiter_profile_url_from_active_detail(page)
+    if not profile_url:
+        if warnings is not None:
+            warnings.append(f"recruiter_location_evidence:{job_id or 'unknown'}:profile_url_missing")
+        return ""
+    recruiter_page = None
+    try:
+        recruiter_page = page.context.new_page()
+        recruiter_page.goto(profile_url, wait_until="domcontentloaded", timeout=15000)
+        try:
+            recruiter_page.wait_for_timeout(800)
+        except Exception:
+            pass
+        snapshot = recruiter_page.evaluate(
+            """
+            () => {
+              const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\s+/g, ' ').trim();
+              return {
+                has_korea: /south korea|corea del sur|republic of korea|seoul|대한민국|서울/i.test(text),
+                has_japan: /japan|japón|tokyo|日本|東京/i.test(text),
+                has_united_states: /united states|estados unidos|california|new york|menlo park|san francisco|usa|u\.s\./i.test(text),
+                text_length: text.length,
+              };
+            }
+            """
+        )
+        if visual_diagnostics is not None and hasattr(
+            visual_diagnostics,
+            "capture_recruiter_location",
+        ):
+            try:
+                visual_diagnostics.capture_recruiter_location(
+                    recruiter_page,
+                    job_id=job_id or "unknown",
+                    reason="remote_scope_review",
+                )
+            except Exception:
+                pass
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"recruiter_location_evidence:{job_id or 'unknown'}:profile_fetch_error")
+        return ""
+    finally:
+        if recruiter_page is not None:
+            try:
+                recruiter_page.close()
+            except Exception:
+                pass
+    signal = _recruiter_location_country_signal(snapshot)
+    if warnings is not None:
+        if signal == "korea office":
+            status = "recruiter_profile_korea"
+        elif signal == "japan office":
+            status = "recruiter_profile_japan"
+        elif isinstance(snapshot, dict) and bool(snapshot.get("has_united_states")):
+            status = "recruiter_profile_united_states"
+        else:
+            status = "recruiter_profile_no_country_match"
+        warnings.append(f"recruiter_location_evidence:{job_id or 'unknown'}:{status}")
+    requested = _normalize_location_marker_text(requested_location)
+    if signal == "korea office" and _has_any_marker(requested, _KOREA_LOCATION_MARKERS):
+        return signal
+    if signal == "japan office" and _has_any_marker(requested, _JAPAN_LOCATION_MARKERS):
+        return signal
+    return ""
+
+def _company_about_location_country_signal(about_snapshot: Any) -> str:
+    if not isinstance(about_snapshot, dict):
+        return ""
+    if bool(about_snapshot.get("has_korea")):
+        return "korea office"
+    if bool(about_snapshot.get("has_japan")):
+        return "japan office"
+    return ""
+
+
+def _safe_linkedin_company_slug_from_href(href: Any) -> str:
+    try:
+        parsed = urlparse(urljoin("https://www.linkedin.com", str(href or "")))
+    except Exception:
+        return ""
+    if parsed.scheme.lower() != "https":
+        return ""
+    if (parsed.hostname or "").lower() not in {"linkedin.com", "www.linkedin.com"}:
+        return ""
+    if parsed.username or parsed.password:
+        return ""
+    parts = [part for part in (parsed.path or "").split("/") if part]
+    if len(parts) < 2 or parts[0] != "company":
+        return ""
+    slug = parts[1].strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", slug):
+        return ""
+    return slug
+
+
+def _safe_company_about_url_from_slug(slug: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", str(slug or "")):
+        return ""
+    try:
+        return canonicalize_linkedin_url(
+            urlunparse(("https", "www.linkedin.com", f"/company/{slug}/about", "", "", ""))
+        )
+    except Exception:
+        return ""
+
+
+def _safe_company_about_url_from_active_detail(page: Any) -> str:
+    try:
+        hrefs = page.evaluate(
+            """
+            () => {
+              const selectors = [
+                '.job-details-jobs-unified-top-card a[href*="/company/"]',
+                '.jobs-unified-top-card a[href*="/company/"]',
+                'main a[href*="/company/"]',
+                'a[href*="/company/"]'
+              ];
+              const seen = new Set();
+              const values = [];
+              for (const selector of selectors) {
+                for (const link of Array.from(document.querySelectorAll(selector)).slice(0, 20)) {
+                  const href = String(link.href || link.getAttribute('href') || '');
+                  if (!href || seen.has(href)) continue;
+                  seen.add(href);
+                  values.push(href);
+                }
+              }
+              return values.slice(0, 20);
+            }
+            """
+        )
+    except Exception:
+        return ""
+    if isinstance(hrefs, str):
+        hrefs = [hrefs]
+    if not isinstance(hrefs, list):
+        return ""
+    for href in hrefs:
+        slug = _safe_linkedin_company_slug_from_href(href)
+        about_url = _safe_company_about_url_from_slug(slug) if slug else ""
+        if about_url:
+            return about_url
+    return ""
+
+
+def _company_about_location_evidence_signal(
+    page: Any,
+    record: Any,
+    requested_location: str,
+    visual_diagnostics: Any = None,
+    *,
+    warnings: list[str] | None = None,
+) -> str:
+    """Open the active company About page read-only and return country evidence.
+
+    This is intentionally removable. It only runs for APAC/remote candidates and
+    only after active-detail title identity matches the candidate.
+    """
+    if page is None:
+        return ""
+    if not _has_any_marker(
+        str(getattr(record, "location", "") or ""),
+        _REGIONAL_REMOTE_LOCATION_MARKERS,
+    ):
+        return ""
+    job_id = getattr(record, "linkedin_job_id", "") or _safe_candidate_identity(record)
+    try:
+        active_title, *_ = _wait_for_active_detail_metadata(page, require_date=False)
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"company_about_location_evidence:{job_id or 'unknown'}:metadata_error")
+        return ""
+    identity_matches, identity_reason = _active_detail_top_card_date_identity_status(
+        record,
+        active_title,
+    )
+    if not identity_matches:
+        if warnings is not None:
+            warnings.append(
+                "company_about_location_evidence:"
+                f"{job_id or 'unknown'}:identity_{identity_reason}"
+            )
+        return ""
+    about_url = _safe_company_about_url_from_active_detail(page)
+    if not about_url:
+        if warnings is not None:
+            warnings.append(f"company_about_location_evidence:{job_id or 'unknown'}:company_url_missing")
+        return ""
+    company_page = None
+    try:
+        company_page = page.context.new_page()
+        company_page.goto(about_url, wait_until="domcontentloaded", timeout=15000)
+        try:
+            company_page.wait_for_timeout(800)
+        except Exception:
+            pass
+        snapshot = company_page.evaluate(
+            """
+            () => {
+              const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\\s+/g, ' ').trim();
+              const hasKorea = /south korea|corea del sur|republic of korea|seoul|대한민국|서울/i.test(text);
+              const hasJapan = /japan|japón|tokyo|日本|東京/i.test(text);
+              const hasUnitedStates = /united states|estados unidos|california|new york|menlo park|san francisco|usa|u\\.s\\./i.test(text);
+              return {
+                has_korea: hasKorea,
+                has_japan: hasJapan,
+                has_united_states: hasUnitedStates,
+                text_length: text.length,
+              };
+            }
+            """
+        )
+        if visual_diagnostics is not None and hasattr(
+            visual_diagnostics,
+            "capture_company_about_location",
+        ):
+            try:
+                visual_diagnostics.capture_company_about_location(
+                    company_page,
+                    job_id=job_id or "unknown",
+                    reason="remote_scope_review",
+                )
+            except Exception:
+                pass
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"company_about_location_evidence:{job_id or 'unknown'}:about_fetch_error")
+        return ""
+    finally:
+        if company_page is not None:
+            try:
+                company_page.close()
+            except Exception:
+                pass
+    signal = _company_about_location_country_signal(snapshot)
+    if warnings is not None:
+        if signal == "korea office":
+            status = "company_about_korea"
+        elif signal == "japan office":
+            status = "company_about_japan"
+        elif isinstance(snapshot, dict) and bool(snapshot.get("has_united_states")):
+            status = "company_about_united_states"
+        else:
+            status = "company_about_no_country_match"
+        warnings.append(f"company_about_location_evidence:{job_id or 'unknown'}:{status}")
+    requested = _normalize_location_marker_text(requested_location)
+    if signal == "korea office" and _has_any_marker(requested, _KOREA_LOCATION_MARKERS):
+        return signal
+    if signal == "japan office" and _has_any_marker(requested, _JAPAN_LOCATION_MARKERS):
+        return signal
+    return ""
+
+def _remote_scope_page_country_evidence_signal(
+    page: Any,
+    record: Any,
+    requested_location: str,
+    *,
+    warnings: list[str] | None = None,
+) -> str:
+    """Return a synthetic country marker when active company/recruiter evidence matches.
+
+    This is intentionally conservative: the active detail title must match the
+    candidate before any company/recruiter location evidence can affect scope.
+    """
+    if page is None:
+        return ""
+    if not _has_any_marker(
+        str(getattr(record, "location", "") or ""),
+        _REGIONAL_REMOTE_LOCATION_MARKERS,
+    ):
+        return ""
+    job_id = getattr(record, "linkedin_job_id", "") or _safe_candidate_identity(record)
+    try:
+        active_title, *_ = _wait_for_active_detail_metadata(page, require_date=False)
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"remote_scope_structured_evidence:{job_id or 'unknown'}:metadata_error")
+        return ""
+    identity_matches, identity_reason = _active_detail_top_card_date_identity_status(
+        record,
+        active_title,
+    )
+    if not identity_matches:
+        if warnings is not None:
+            warnings.append(
+                "remote_scope_structured_evidence:"
+                f"{job_id or 'unknown'}:identity_{identity_reason}"
+            )
+        return ""
+    try:
+        evidence = page.evaluate(
+            """
+            () => {
+              const normalize = (value) => String(value || '').toLowerCase();
+              const textOf = (node) => normalize(node && (node.innerText || node.textContent) || '');
+              const hasKorea = (text) => /south korea|corea del sur|korea office|korean office|korea team|korean team|korea market|korean market|based in korea|based in seoul|located in korea|located in seoul|work from korea|working from korea|seoul office|대한민국|서울/.test(text);
+              const hasJapan = (text) => /japan|japón|japan office|japanese office|japan team|japanese team|japan market|japanese market|based in japan|based in tokyo|located in japan|located in tokyo|work from japan|working from japan|tokyo office|日本|東京/.test(text);
+              const scan = (selector) => Array.from(document.querySelectorAll(selector))
+                .slice(0, 40)
+                .map(textOf)
+                .filter((text) => text && text.length <= 1200);
+              const companyTexts = scan('[class*=company], [class*=organization], a[href*="/company/"]');
+              const recruiterTexts = scan('[class*=hiring], [class*=recruiter], [class*=hirer], [class*=poster]');
+              const locationTexts = scan('[class*=location], [class*=primary-description], [class*=tertiary-description], [class*=top-card]');
+              const any = (texts, fn) => texts.some(fn);
+              return {
+                company_has_korea: any(companyTexts, hasKorea),
+                recruiter_has_korea: any(recruiterTexts, hasKorea),
+                location_has_korea: any(locationTexts, hasKorea),
+                company_has_japan: any(companyTexts, hasJapan),
+                recruiter_has_japan: any(recruiterTexts, hasJapan),
+                location_has_japan: any(locationTexts, hasJapan),
+                company_node_count: companyTexts.length,
+                recruiter_node_count: recruiterTexts.length,
+                location_node_count: locationTexts.length,
+              };
+            }
+            """
+        )
+    except Exception:
+        if warnings is not None:
+            warnings.append(f"remote_scope_structured_evidence:{job_id or 'unknown'}:evaluate_error")
+        return ""
+    requested = _normalize_location_marker_text(requested_location)
+    if _has_any_marker(requested, _KOREA_LOCATION_MARKERS):
+        source = ""
+        if bool(evidence.get("company_has_korea")):
+            source = "company_location_korea"
+        elif bool(evidence.get("recruiter_has_korea")):
+            source = "recruiter_location_korea"
+        elif bool(evidence.get("location_has_korea")):
+            source = "detail_location_korea"
+        if source:
+            if warnings is not None:
+                warnings.append(
+                    "remote_scope_structured_evidence:"
+                    f"{job_id or 'unknown'}:{source}"
+                )
+            return "korea office"
+    if _has_any_marker(requested, _JAPAN_LOCATION_MARKERS):
+        source = ""
+        if bool(evidence.get("company_has_japan")):
+            source = "company_location_japan"
+        elif bool(evidence.get("recruiter_has_japan")):
+            source = "recruiter_location_japan"
+        elif bool(evidence.get("location_has_japan")):
+            source = "detail_location_japan"
+        if source:
+            if warnings is not None:
+                warnings.append(
+                    "remote_scope_structured_evidence:"
+                    f"{job_id or 'unknown'}:{source}"
+                )
+            return "japan office"
+    if warnings is not None:
+        warnings.append(
+            "remote_scope_structured_evidence:"
+            f"{job_id or 'unknown'}:none:"
+            f"company_nodes_{int(evidence.get('company_node_count', 0) or 0)}:"
+            f"recruiter_nodes_{int(evidence.get('recruiter_node_count', 0) or 0)}"
+        )
+    return ""
+
+def _capture_remote_scope_visual_evidence(
+    visual_diagnostics: Any,
+    page: Any,
+    record: Any,
+    *,
+    reason: str = "remote_scope_review",
+    warnings: list[str] | None = None,
+) -> None:
+    """Capture opt-in local evidence for APAC/remote company/recruiter scope."""
+    if visual_diagnostics is None or page is None:
+        return
+    if not _has_any_marker(
+        str(getattr(record, "location", "") or ""),
+        _REGIONAL_REMOTE_LOCATION_MARKERS,
+    ):
+        return
+    if not hasattr(visual_diagnostics, "capture_company_recruiter_location"):
+        return
+    job_id = getattr(record, "linkedin_job_id", "") or _safe_candidate_identity(record)
+    if not job_id:
+        return
+    try:
+        visual_diagnostics.capture_company_recruiter_location(
+            page,
+            job_id=job_id,
+            reason=reason,
+        )
+        if warnings is not None:
+            warnings.append(f"remote_scope_visual_debug:{job_id}:{reason}")
+    except Exception:
+        return
+
 def _visible_location_matches_requested_scope(
     visible_location: str,
     requested_location: str,
@@ -222,8 +1201,13 @@ def _visible_location_matches_requested_scope(
             return True
         if _has_any_marker(visible, _JAPAN_LOCATION_MARKERS):
             return False
-        if _has_any_marker(visible, _REGIONAL_REMOTE_LOCATION_MARKERS):
-            return _has_any_marker(country_signal_text, _KOREA_LOCATION_MARKERS)
+        remote_scope = _remote_or_hybrid_location_matches_requested_country(
+            visible,
+            requested,
+            country_signal_text,
+        )
+        if remote_scope is not None:
+            return remote_scope
         return True
 
     if _has_any_marker(requested, _JAPAN_LOCATION_MARKERS):
@@ -231,8 +1215,13 @@ def _visible_location_matches_requested_scope(
             return True
         if _has_any_marker(visible, _KOREA_LOCATION_MARKERS):
             return False
-        if _has_any_marker(visible, _REGIONAL_REMOTE_LOCATION_MARKERS):
-            return _has_any_marker(country_signal_text, _JAPAN_LOCATION_MARKERS)
+        remote_scope = _remote_or_hybrid_location_matches_requested_country(
+            visible,
+            requested,
+            country_signal_text,
+        )
+        if remote_scope is not None:
+            return remote_scope
         return True
 
     return True
@@ -268,6 +1257,144 @@ def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> boo
 def _search_hydration_outcome_for_row_activation(outcome: str) -> str:
     """Map row activation diagnostics to valid search hydration outcomes."""
     return "results" if outcome == "row_activation_success" else "failed"
+
+
+def _date_stage_status(record: Any) -> str:
+    if getattr(record, "published_at", None) is None:
+        return "missing"
+    return (
+        "within_24_hours"
+        if bool(getattr(record, "is_within_24_hours", False))
+        else "outside_24_hours"
+    )
+
+
+def _date_stage_source(record: Any) -> str:
+    sources = set(getattr(record, "discovery_sources", None) or [])
+    if "visible_card" in sources:
+        return "source_card"
+    if "row_activation" in sources:
+        return "source_row"
+    if getattr(record, "published_at", None) is None:
+        return "source_none"
+    if sources:
+        return "source_existing"
+    return "source_unknown"
+
+
+def _date_pipeline_stage_warning(record: Any, stage: str, *, reason: str = "") -> str:
+    job_id = _safe_candidate_identity(record) or "unknown"
+    safe_stage = re.sub(r"[^0-9A-Za-z_-]", "_", str(stage or "unknown"))[:40]
+    if reason:
+        safe_reason = re.sub(r"[^0-9A-Za-z_-]", "_", str(reason or "unknown"))[:50]
+        return (
+            f"date_pipeline_stage:{job_id}:{safe_stage}:"
+            f"{safe_reason}:{_date_stage_source(record)}"
+        )
+    return (
+        f"date_pipeline_stage:{job_id}:{safe_stage}:"
+        f"{_date_stage_status(record)}:{_date_stage_source(record)}"
+    )
+
+
+def _apply_visible_card_date_evidence(
+    record: Any,
+    identity: str,
+    visible_card_dates: dict[str, tuple[str, datetime, str, bool]],
+) -> tuple[Any, str]:
+    """Apply same-card visible date evidence without degrading accepted freshness.
+
+    The search card is the authoritative source for search-time freshness when it
+    is tied to the same job_id. It may fill a missing date or correct an existing
+    outside_24_hours value. It must not overwrite an already within_24_hours
+    candidate, because that could turn a valid candidate into a false reject.
+    """
+    if not identity or identity not in visible_card_dates:
+        return record, ""
+    if getattr(record, "published_at", None) is not None and bool(
+        getattr(record, "is_within_24_hours", False)
+    ):
+        return record, ""
+
+    previous_status = _date_stage_status(record)
+    posted_text, published_at, confidence, within_24h = visible_card_dates[identity]
+    updated = record.model_copy(
+        update={
+            "posted_at_text": posted_text,
+            "published_at": published_at,
+            "freshness_confidence": confidence,
+            "is_within_24_hours": within_24h,
+            "discovery_sources": sorted(
+                set(getattr(record, "discovery_sources", None) or [])
+                | {"visible_card"}
+            ),
+        }
+    )
+    next_status = "within_24_hours" if within_24h else "outside_24_hours"
+    return updated, f"{previous_status}_to_{next_status}"
+
+
+def _candidate_has_verified_fresh_date(record: Any) -> bool:
+    return getattr(record, "published_at", None) is not None and bool(
+        getattr(record, "is_within_24_hours", False)
+    )
+
+
+def _detail_priority_label(record: Any) -> str:
+    sources = set(getattr(record, "discovery_sources", None) or [])
+    if _candidate_has_verified_fresh_date(record) and "visible_card" in sources:
+        return "verified_card_date"
+    if _candidate_has_verified_fresh_date(record):
+        return "verified_date"
+    if str(getattr(record, "title", "") or "").strip() and getattr(
+        record,
+        "matched_terms",
+        None,
+    ):
+        return "strong_metadata_missing_date"
+    if str(getattr(record, "title", "") or "").strip():
+        return "title_missing_date"
+    return "incomplete_metadata"
+
+
+def _detail_priority_rank(record: Any) -> int:
+    return {
+        "verified_card_date": 0,
+        "verified_date": 1,
+        "strong_metadata_missing_date": 2,
+        "title_missing_date": 3,
+        "incomplete_metadata": 4,
+    }.get(_detail_priority_label(record), 9)
+
+
+def _prioritize_candidates_for_detail(candidates: list[Any]) -> list[Any]:
+    """Spend detail budget first on candidates most likely to pass validation."""
+    return [
+        record
+        for _rank, _index, record in sorted(
+            (
+                (_detail_priority_rank(record), index, record)
+                for index, record in enumerate(candidates)
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+    ]
+
+
+def _row_activation_date_warning(outcome: Any) -> str:
+    job_id = _normalized_numeric_job_id(getattr(outcome, "job_id", ""))
+    if not job_id:
+        return "row_date_unattributed"
+    if bool(getattr(outcome, "date_verified", False)):
+        freshness = (
+            "within_24_hours"
+            if bool(getattr(outcome, "date_within_24_hours", False))
+            else "outside_24_hours"
+        )
+        return f"row_date_verified:{job_id}:{freshness}"
+    if bool(getattr(outcome, "date_detected", False)):
+        return f"row_date_unparseable:{job_id}"
+    return f"row_date_missing:{job_id}"
 
 def _wait_for_search_results_hydration_with_diagnostics(
     callback: Callable[..., str],
@@ -527,7 +1654,8 @@ def _run_guarded_direct_detail_fallback(
         }
         if diagnostics and _callable_accepts_keyword(enrich_job_detail, "diagnostics"):
             enrichment_kwargs["diagnostics"] = diagnostics
-        return enrich_job_detail(page, direct_candidate, **enrichment_kwargs)
+        enriched = enrich_job_detail(page, direct_candidate, **enrichment_kwargs)
+        return _merge_active_detail_metadata(enriched, page, warnings=warnings)
     except Exception:
         if diagnostics:
             diagnostics.record(
@@ -777,6 +1905,7 @@ def scrape_linkedin_jobs_impl(
     records: list["LinkedInVacancyRecord"] = []
     candidates: list["LinkedInVacancyRecord"] = []
     seen_candidate_keys: set[str] = set()
+    seen_candidate_indexes: dict[str, int] = {}
     standalone_candidate_keys: set[str] = set()
     static_probe_candidate_keys: set[str] = set()
     rejected: list["LinkedInRejectedRecord"] = []
@@ -899,6 +2028,39 @@ def scrape_linkedin_jobs_impl(
                             **parser_kwargs,
                         )
                     )
+                    visible_card_dates = collect_visible_search_card_dates(page)
+                    if visible_card_dates:
+                        updated_discovered = []
+                        for record in discovered:
+                            identity = _safe_candidate_identity(record)
+                            record, card_date_transition = (
+                                _apply_visible_card_date_evidence(
+                                    record,
+                                    identity or "",
+                                    visible_card_dates,
+                                )
+                            )
+                            if card_date_transition:
+                                warnings.append(
+                                    "card_date_verified:"
+                                    f"{identity}:"
+                                    f"{_date_stage_status(record)}"
+                                )
+                                if card_date_transition.startswith(
+                                    "outside_24_hours_to_"
+                                ):
+                                    warnings.append(
+                                        "card_date_overrode_existing:"
+                                        f"{identity}:{card_date_transition}"
+                                    )
+                                warnings.append(
+                                    _date_pipeline_stage_warning(
+                                        record,
+                                        "visible_card",
+                                    )
+                                )
+                            updated_discovered.append(record)
+                        discovered = updated_discovered
                     normal_dom_records = list(discovered)
                     timeout_without_search_signals = (
                         _is_timeout_without_search_signals(
@@ -1117,6 +2279,14 @@ def scrape_linkedin_jobs_impl(
                                             outcome.outcome
                                         ),
                                     )
+                                if outcome.outcome in {
+                                    "row_activation_success",
+                                    "row_activation_duplicate",
+                                    "row_activation_no_job_id",
+                                }:
+                                    warnings.append(
+                                        _row_activation_date_warning(outcome)
+                                    )
                                 if outcome.outcome != "row_activation_success":
                                     warnings.append(outcome.outcome)
                     if visual_run is not None:
@@ -1150,21 +2320,28 @@ def scrape_linkedin_jobs_impl(
                         record = record.model_copy(
                             update={"linkedin_job_id": identity}
                         )
+                        warnings.append(_date_pipeline_stage_warning(record, "before_dedupe"))
                         dedupe_key = _record_key(record)
                         if dedupe_key in seen_candidate_keys:
-                            rejected.append(
-                                LinkedInRejectedRecord(
-                                    source_url=record.canonical_url,
-                                    title=record.title,
-                                    reason="duplicate_candidate_skipped_before_detail",
+                            existing_index = seen_candidate_indexes.get(dedupe_key)
+                            if existing_index is not None:
+                                candidates[existing_index] = _merge_candidate_discovery_evidence(
+                                    candidates[existing_index],
+                                    record,
                                 )
-                            )
+                                warnings.append(
+                                    _date_pipeline_stage_warning(
+                                        candidates[existing_index],
+                                        "after_dedupe_merge",
+                                    )
+                                )
                             warnings.append(
                                 "duplicate_candidate_skipped_before_detail:"
                                 f"{identity}"
                             )
                             continue
                         seen_candidate_keys.add(dedupe_key)
+                        seen_candidate_indexes[dedupe_key] = len(candidates)
                         queued_from_query += 1
                         if discovered_from_standalone_fallback:
                             standalone_candidate_keys.add(dedupe_key)
@@ -1173,6 +2350,7 @@ def scrape_linkedin_jobs_impl(
                             accepted_from_static_probe += 1
                         candidate_locations[dedupe_key] = query_location
                         candidates.append(record)
+                        warnings.append(_date_pipeline_stage_warning(record, "after_queue"))
                     queued_for_detail_by_source[search_url] = (
                         queued_for_detail_by_source.get(search_url, 0)
                         + queued_from_query
@@ -1277,19 +2455,19 @@ def scrape_linkedin_jobs_impl(
                                 )
                                 dedupe_key = _record_key(record)
                                 if dedupe_key in seen_candidate_keys:
-                                    rejected.append(
-                                        LinkedInRejectedRecord(
-                                            source_url=record.canonical_url,
-                                            title=record.title,
-                                            reason="duplicate_candidate_skipped_before_detail",
+                                    existing_index = seen_candidate_indexes.get(dedupe_key)
+                                    if existing_index is not None:
+                                        candidates[existing_index] = _merge_candidate_discovery_evidence(
+                                            candidates[existing_index],
+                                            record,
                                         )
-                                    )
                                     warnings.append(
                                         "duplicate_candidate_skipped_before_detail:"
                                         f"{identity}"
                                     )
                                     continue
                                 seen_candidate_keys.add(dedupe_key)
+                                seen_candidate_indexes[dedupe_key] = len(candidates)
                                 queued_from_query += 1
                                 candidate_locations[dedupe_key] = (
                                     query_location
@@ -1490,6 +2668,15 @@ def scrape_linkedin_jobs_impl(
             relevant_candidates,
             source_order=query_urls,
         )
+        if request.include_description:
+            shortlist = _prioritize_candidates_for_detail(shortlist)
+            for candidate in shortlist:
+                if _candidate_has_verified_fresh_date(candidate):
+                    warnings.append(
+                        "detail_priority_queue:"
+                        f"{_safe_candidate_identity(candidate) or 'unknown'}:"
+                        f"{_detail_priority_label(candidate)}"
+                    )
         last_detail_click_at: float | None = None
         detail_attempts = 0
         detail_attempts_by_location: dict[str, int] = {}
@@ -1602,6 +2789,7 @@ def scrape_linkedin_jobs_impl(
                         include_description=request.include_description,
                         is_incomplete_detail_body=_is_incomplete_detail_body,
                     )
+                    warnings.append(_date_pipeline_stage_warning(verified, "after_static_probe"))
                     if _static_detail_probe_preserves_body_but_misses_date(
                         static_detail_probe,
                         verified,
@@ -1629,6 +2817,11 @@ def scrape_linkedin_jobs_impl(
                     or location_detail_attempts >= detail_quota_per_location
                 ):
                     detail_reason = "detail_budget_exhausted"
+                    if _candidate_has_verified_fresh_date(verified):
+                        warnings.append(
+                            "detail_budget_deferred_verified_candidate:"
+                            f"{verified.linkedin_job_id or 'unknown'}"
+                        )
                 elif is_direct_url_candidate:
                     if not direct_detail_fallback:
                         warning_prefix = (
@@ -2111,6 +3304,7 @@ def scrape_linkedin_jobs_impl(
                         include_description=request.include_description,
                         is_incomplete_detail_body=_is_incomplete_detail_body,
                     )
+                    warnings.append(_date_pipeline_stage_warning(verified, "after_static_probe"))
                     if _static_detail_probe_preserves_body_but_misses_date(
                         static_detail_probe,
                         verified,
@@ -2135,6 +3329,77 @@ def scrape_linkedin_jobs_impl(
                         "detail_upstream_failure",
                     }:
                         detail_reason = "detail_fetch_failed"
+
+            if (
+                direct_detail_fallback
+                and getattr(verified, "published_at", None) is None
+                and bool(str(getattr(verified, "description_full_text", "") or "").strip())
+                and candidate_key not in direct_detail_fallback_attempted_candidates
+                and candidate_location not in direct_detail_fallback_disabled_locations
+                and detail_attempts < detail_budget
+                and detail_attempts_by_location.get(candidate_location, 0)
+                < detail_quota_per_location
+            ):
+                direct_detail_fallback_attempted_candidates.add(candidate_key)
+                detail_attempts += 1
+                detail_attempts_by_location[candidate_location] = (
+                    detail_attempts_by_location.get(candidate_location, 0) + 1
+                )
+                warnings.append(
+                    "date_direct_detail_fallback_used:"
+                    f"{candidate.linkedin_job_id or 'unknown'}"
+                )
+                try:
+                    search_navigation_state.invalidate_source()
+                    detail_mode = "direct"
+                    direct_record = _run_guarded_direct_detail_fallback(
+                        page,
+                        verified,
+                        source_url=source_url,
+                        include_description=request.include_description,
+                        warnings=warnings,
+                        validate_jobs_url=validate_linkedin_jobs_url,
+                        validate_authenticated_page=_validate_authenticated_page,
+                        wait_for_search_results_hydration=_wait_for_search_results_hydration,
+                        enrich_job_detail=_enrich_job_detail,
+                        safe_error_label=_safe_error_label,
+                        terminal_error_types=(
+                            LinkedInAuthRequiredError,
+                            LinkedInBlockedError,
+                        ),
+                        diagnostics=detail_diagnostics,
+                    )
+                    verified = _merge_detail_evidence(
+                        verified,
+                        direct_record,
+                        include_description=request.include_description,
+                        is_incomplete_detail_body=_is_incomplete_detail_body,
+                    )
+                    warnings.append(_date_pipeline_stage_warning(verified, "after_direct_fallback"))
+                    if getattr(verified, "published_at", None) is not None:
+                        detail_reason = ""
+                        if (
+                            not bool(getattr(verified, "is_within_24_hours", False))
+                            and visual_diagnostics is not None
+                            and hasattr(visual_diagnostics, "capture_active_detail_date")
+                        ):
+                            try:
+                                visual_diagnostics.capture_active_detail_date(
+                                    page,
+                                    job_id=verified.linkedin_job_id
+                                    or _safe_candidate_identity(verified),
+                                    reason="outside_24_hours",
+                                )
+                            except Exception:
+                                pass
+                except (LinkedInAuthRequiredError, LinkedInBlockedError):
+                    raise
+                except Exception as exc:
+                    warnings.append(
+                        "date_direct_detail_fallback_failed:"
+                        f"{candidate.linkedin_job_id or 'unknown'}:"
+                        f"{_safe_error_label(exc)}"
+                    )
 
             verified = _refresh_candidate_discovery_state(verified)
 
@@ -2188,6 +3453,38 @@ def scrape_linkedin_jobs_impl(
                 continue
 
             if verified.published_at is None:
+                verified = _activate_visible_search_card_date_evidence(
+                    page,
+                    verified,
+                    warnings=warnings,
+                )
+                warnings.append(_date_pipeline_stage_warning(verified, "after_card_activation"))
+            if verified.published_at is None:
+                verified = _activate_visible_search_card_by_title_date_evidence(
+                    page,
+                    verified,
+                    warnings=warnings,
+                )
+                warnings.append(
+                    _date_pipeline_stage_warning(
+                        verified,
+                        "after_card_title_activation",
+                    )
+                )
+            if verified.published_at is None:
+                warnings.append(
+                    _date_pipeline_stage_warning(
+                        verified,
+                        "final",
+                        reason=detail_reason or "unverified_posted_date",
+                    )
+                )
+                _capture_unverified_date_visual_evidence(
+                    visual_diagnostics,
+                    page,
+                    verified,
+                    warnings=warnings,
+                )
                 rejected.append(
                     LinkedInRejectedRecord(
                         source_url=verified.canonical_url,
@@ -2202,6 +3499,25 @@ def scrape_linkedin_jobs_impl(
                 )
                 continue
             if not verified.is_within_24_hours:
+                warnings.append(
+                    _date_pipeline_stage_warning(
+                        verified,
+                        "final",
+                        reason="outside_24_hours",
+                    )
+                )
+                if visual_diagnostics is not None and hasattr(
+                    visual_diagnostics,
+                    "capture_rejected_candidate_card",
+                ):
+                    try:
+                        visual_diagnostics.capture_rejected_candidate_card(
+                            page,
+                            job_id=verified.linkedin_job_id or _safe_candidate_identity(verified),
+                            reason="outside_24_hours",
+                        )
+                    except Exception:
+                        pass
                 rejected.append(
                     LinkedInRejectedRecord(
                         source_url=verified.canonical_url,
@@ -2211,10 +3527,40 @@ def scrape_linkedin_jobs_impl(
                 )
                 record_detail_rejection(verified, "outside_24_hours", detail_mode)
                 continue
+            _capture_remote_scope_visual_evidence(
+                visual_diagnostics,
+                page,
+                verified,
+                warnings=warnings,
+            )
+            company_about_signal = _company_about_location_evidence_signal(
+                page,
+                verified,
+                candidate_location,
+                visual_diagnostics,
+                warnings=warnings,
+            )
+            recruiter_location_signal = _recruiter_location_evidence_signal(
+                page,
+                verified,
+                candidate_location,
+                visual_diagnostics,
+                warnings=warnings,
+            )
+            remote_scope_page_signal = _remote_scope_page_country_evidence_signal(
+                page,
+                verified,
+                candidate_location,
+                warnings=warnings,
+            )
+            country_signal_text = _record_country_signal_text(verified)
+            for scope_signal in (company_about_signal, recruiter_location_signal, remote_scope_page_signal):
+                if scope_signal:
+                    country_signal_text = f"{country_signal_text}\n{scope_signal}"
             if not _visible_location_matches_requested_scope(
                 verified.location,
                 candidate_location,
-                _record_country_signal_text(verified),
+                country_signal_text,
             ):
                 rejected.append(
                     LinkedInRejectedRecord(
@@ -2237,6 +3583,7 @@ def scrape_linkedin_jobs_impl(
                     f"{verified.linkedin_job_id or 'unknown'}:"
                     f"{detail_reason}"
                 )
+            warnings.append(_date_pipeline_stage_warning(verified, "final", reason="accepted"))
             enriched_records.append(verified)
 
             if request.max_results > 0:

@@ -16,6 +16,10 @@ from urllib.parse import urlsplit, urlunsplit
 from features.web_scraping.domain.linkedin_models import (
     LinkedInVisualDiagnosticArtifact,
 )
+from features.web_scraping.infrastructure.linkedin_card_structure_debug import (
+    CARD_STRUCTURE_DEBUG_FILENAME,
+    capture_visible_linkedin_card_structure_debug,
+)
 
 
 _ENABLED_ENV = "LINKEDIN_SEARCH_VISUAL_DIAGNOSTICS"
@@ -33,6 +37,11 @@ MAX_SANITIZED_HTML_CHARS = 120_000
 HTML_DIAGNOSTICS_ENV = "LINKEDIN_HTML_DIAGNOSTICS"
 MAX_HTML_DIAGNOSTIC_ACTIVATIONS = 3
 MAX_HTML_DIAGNOSTIC_SCROLL_CAPTURES = 3
+MAX_REJECTED_CARD_VISUAL_CAPTURES = 12
+MAX_ACTIVE_DETAIL_DATE_VISUAL_CAPTURES = 12
+MAX_COMPANY_RECRUITER_LOCATION_VISUAL_CAPTURES = 12
+MAX_COMPANY_ABOUT_LOCATION_VISUAL_CAPTURES = 12
+MAX_RECRUITER_LOCATION_VISUAL_CAPTURES = 12
 _HTML_DROP_TAGS = {
     "script",
     "style",
@@ -134,6 +143,154 @@ _STRUCTURE_SCRIPT = """
 """
 
 
+_REJECTED_CARD_FOCUS_SCRIPT = r"""
+(jobId) => {
+  const safeJobId = String(jobId || '').replace(/\D+/g, '');
+  const patterns = [
+    /\bhace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
+    /\b(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
+    /\b(?:hoy|today)\b/i,
+    /\b\d+\s*(?:시간|분|일)\s*전\b/i,
+    /\b\d+\s*(?:時間|分|日)前\b/i,
+  ];
+  const textOf = (node) => String(node && (node.innerText || node.textContent) || '').replace(/\s+/g, ' ').trim();
+  const bbox = (node) => {
+    const rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+    return rect ? {
+      x: Math.round(rect.left || 0),
+      y: Math.round(rect.top || 0),
+      width: Math.round(rect.width || 0),
+      height: Math.round(rect.height || 0),
+    } : {x: 0, y: 0, width: 0, height: 0};
+  };
+  const dateTexts = (node) => {
+    const found = [];
+    const nodes = [node, ...Array.from(node && node.querySelectorAll ? node.querySelectorAll('*') : []).slice(0, 180)];
+    for (const item of nodes) {
+      const text = textOf(item);
+      if (!text || text.length > 360) continue;
+      for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match && match[0] && !found.includes(match[0])) found.push(match[0].slice(0, 80));
+      }
+      if (found.length >= 5) break;
+    }
+    return found;
+  };
+  const ancestorDescriptors = (node) => {
+    const chain = [];
+    let current = node;
+    for (let depth = 0; current && current !== document.body && depth < 7; depth += 1) {
+      chain.push({
+        depth,
+        tag: String(current.tagName || '').toLowerCase().slice(0, 32),
+        class_tokens: Array.from(current.classList || []).slice(0, 12).map((token) => String(token).slice(0, 80)),
+        has_href: Boolean(current.querySelector && current.querySelector('a[href*="/jobs/view/"]')),
+        has_data_job_id: Boolean(current.hasAttribute && current.hasAttribute('data-job-id')),
+        has_data_occludable_job_id: Boolean(current.hasAttribute && current.hasAttribute('data-occludable-job-id')),
+        bbox: bbox(current),
+        date_texts: dateTexts(current),
+        child_count: current.children ? current.children.length : 0,
+      });
+      current = current.parentElement;
+    }
+    return chain;
+  };
+  const hrefSelector = `a[href*="/jobs/view/${safeJobId}"], a[href*="-${safeJobId}"]`;
+  const attrSelector = `[data-job-id$="${safeJobId}"], [data-occludable-job-id$="${safeJobId}"], [data-entity-urn$="${safeJobId}"]`;
+  let node = document.querySelector(attrSelector);
+  let selector_kind = node ? 'attribute' : '';
+  if (!node) {
+    const link = document.querySelector(hrefSelector);
+    if (link) {
+      selector_kind = 'href';
+      node = link.closest('li, [role="listitem"], [role="option"], .scaffold-layout__list-item, .job-card-container') || link;
+    }
+  }
+  if (!node) {
+    return {found: false, job_id: safeJobId, selector_kind: 'none'};
+  }
+  try { node.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (_) {}
+  return {
+    found: true,
+    job_id: safeJobId,
+    selector_kind,
+    tag: String(node.tagName || '').toLowerCase().slice(0, 32),
+    class_tokens: Array.from(node.classList || []).slice(0, 12).map((token) => String(token).slice(0, 80)),
+    has_href: Boolean(node.querySelector && node.querySelector('a[href*="/jobs/view/"]')),
+    has_data_job_id: Boolean(node.hasAttribute && node.hasAttribute('data-job-id')),
+    has_data_occludable_job_id: Boolean(node.hasAttribute && node.hasAttribute('data-occludable-job-id')),
+    title_present: Boolean(node.querySelector && node.querySelector('a[href*="/jobs/view/"], .job-card-list__title, .job-card-container__link')),
+    date_texts: dateTexts(node),
+    bbox: bbox(node),
+    ancestor_chain: ancestorDescriptors(node),
+  };
+}
+"""
+
+
+_ACTIVE_DETAIL_DATE_FOCUS_SCRIPT = r"""
+() => {
+  const patterns = [
+    /\bhace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
+    /\b(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
+    /\b(?:hoy|today)\b/i,
+    /\b\d+\s*(?:시간|분|일)\s*전\b/i,
+    /\b\d+\s*(?:時間|分|日)前\b/i,
+  ];
+  const bbox = (node) => {
+    const rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+    return rect ? {
+      x: Math.round(rect.left || 0),
+      y: Math.round(rect.top || 0),
+      width: Math.round(rect.width || 0),
+      height: Math.round(rect.height || 0),
+    } : {x: 0, y: 0, width: 0, height: 0};
+  };
+  const visible = (node) => {
+    const rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+    return Boolean(rect && rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.right >= 0 && rect.top <= (window.innerHeight || 0));
+  };
+  const textOf = (node) => String(node && (node.innerText || node.textContent) || '').replace(/\s+/g, ' ').trim();
+  const matchDate = (text) => {
+    for (const pattern of patterns) {
+      const match = String(text || '').match(pattern);
+      if (match && match[0]) return match[0].slice(0, 80);
+    }
+    return "";
+  };
+  const main = document.querySelector('main') || document.body;
+  const heading = Array.from(document.querySelectorAll('main h1, h1')).find(visible) || null;
+  const detailRoot = heading ? (heading.closest('section, article, main, .jobs-search__job-details--container, .jobs-details') || main) : main;
+  const candidates = [];
+  const nodes = Array.from(detailRoot.querySelectorAll ? detailRoot.querySelectorAll('*') : []).slice(0, 900);
+  for (const node of nodes) {
+    if (!visible(node)) continue;
+    const text = textOf(node);
+    if (!text || text.length > 360) continue;
+    const date = matchDate(text);
+    if (!date) continue;
+    const rect = node.getBoundingClientRect();
+    candidates.push({
+      date_text: date,
+      tag: String(node.tagName || '').toLowerCase().slice(0, 32),
+      class_tokens: Array.from(node.classList || []).slice(0, 12).map((token) => String(token).slice(0, 80)),
+      bbox: bbox(node),
+      distance_from_title: heading ? Math.round(Math.abs(rect.top - heading.getBoundingClientRect().top)) : 0,
+    });
+    if (candidates.length >= 12) break;
+  }
+  return {
+    found: Boolean(detailRoot),
+    title_present: Boolean(heading),
+    title_bbox: heading ? bbox(heading) : {x: 0, y: 0, width: 0, height: 0},
+    detail_bbox: bbox(detailRoot),
+    date_candidates: candidates,
+  };
+}
+"""
+
+
 def visual_diagnostics_enabled() -> bool:
     return str(os.getenv(_ENABLED_ENV, "")).strip().casefold() in {
         "1",
@@ -170,6 +327,15 @@ def _safe_write_json(path: Path, payload: dict) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _safe_job_id(value: object) -> str:
+    match = re.search(r"(\d{3,})", str(value or ""))
+    return match.group(1).lstrip("0") if match else ""
+
+
+def _safe_reason_label(value: object) -> str:
+    return re.sub(r"[^0-9A-Za-z_-]", "_", str(value or "unknown"))[:50] or "unknown"
 
 
 class _SanitizedHTMLParser(HTMLParser):
@@ -468,6 +634,472 @@ def _sanitize_structure(value: object) -> dict:
             if isinstance(item, dict)
         ][:80],
     }
+
+
+def _sanitize_card_focus_snapshot(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {"schema_version": "1.0", "found": False, "capture_error": "invalid"}
+    safe: dict[str, object] = {
+        "schema_version": "1.0",
+        "found": bool(value.get("found")),
+        "job_id": _safe_job_id(value.get("job_id")),
+        "selector_kind": _safe_reason_label(value.get("selector_kind")),
+    }
+    for key in (
+        "tag",
+        "has_href",
+        "has_data_job_id",
+        "has_data_occludable_job_id",
+        "title_present",
+    ):
+        if key in value:
+            safe[key] = bool(value[key]) if key.startswith("has_") or key == "title_present" else str(value[key])[:32]
+    if isinstance(value.get("class_tokens"), list):
+        safe["class_tokens"] = [
+            str(token)[:80]
+            for token in value["class_tokens"][:12]
+            if _HTML_SAFE_TOKEN.fullmatch(str(token))
+        ]
+    if isinstance(value.get("date_texts"), list):
+        safe["date_texts"] = [
+            re.sub(r"[^0-9A-Za-z_ .:/()\-가-힣一-龯áéíóúÁÉÍÓÚüÜñÑ]", "", str(text or ""))[:80]
+            for text in value["date_texts"][:5]
+        ]
+    if isinstance(value.get("bbox"), dict):
+        safe["bbox"] = {
+            key: max(-100000, min(100000, int(value["bbox"].get(key, 0) or 0)))
+            for key in ("x", "y", "width", "height")
+        }
+    ancestors = []
+    for raw in value.get("ancestor_chain", []) if isinstance(value.get("ancestor_chain"), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        ancestors.append(
+            {
+                "depth": _bounded_int(raw.get("depth"), maximum=8),
+                "tag": str(raw.get("tag") or "")[:32],
+                "class_tokens": [
+                    str(token)[:80]
+                    for token in (raw.get("class_tokens") or [])[:12]
+                    if _HTML_SAFE_TOKEN.fullmatch(str(token))
+                ],
+                "has_href": bool(raw.get("has_href")),
+                "has_data_job_id": bool(raw.get("has_data_job_id")),
+                "has_data_occludable_job_id": bool(raw.get("has_data_occludable_job_id")),
+                "bbox": {
+                    key: max(-100000, min(100000, int((raw.get("bbox") or {}).get(key, 0) or 0)))
+                    for key in ("x", "y", "width", "height")
+                },
+                "date_texts": [
+                    re.sub(r"[^0-9A-Za-z_ .:/()\-가-힣一-龯áéíóúÁÉÍÓÚüÜñÑ]", "", str(text or ""))[:80]
+                    for text in (raw.get("date_texts") or [])[:5]
+                ],
+                "child_count": _bounded_int(raw.get("child_count"), maximum=500),
+            }
+        )
+    safe["ancestor_chain"] = ancestors[:7]
+    return safe
+
+
+def _safe_bbox(value: object) -> dict[str, int]:
+    raw = value if isinstance(value, dict) else {}
+    return {
+        key: max(-100000, min(100000, int(raw.get(key, 0) or 0)))
+        for key in ("x", "y", "width", "height")
+    }
+
+
+def _safe_date_text(value: object) -> str:
+    return re.sub(
+        r"[^0-9A-Za-z_ .:/()\-가-힣一-龯áéíóúÁÉÍÓÚüÜñÑ]",
+        "",
+        str(value or ""),
+    )[:80]
+
+
+def _sanitize_active_detail_date_snapshot(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {"schema_version": "1.0", "found": False, "capture_error": "invalid"}
+    candidates = []
+    for raw in value.get("date_candidates", []) if isinstance(value.get("date_candidates"), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        candidates.append(
+            {
+                "date_text": _safe_date_text(raw.get("date_text")),
+                "tag": str(raw.get("tag") or "")[:32],
+                "class_tokens": [
+                    str(token)[:80]
+                    for token in (raw.get("class_tokens") or [])[:12]
+                    if _HTML_SAFE_TOKEN.fullmatch(str(token))
+                ],
+                "bbox": _safe_bbox(raw.get("bbox")),
+                "distance_from_title": _bounded_int(
+                    raw.get("distance_from_title"),
+                    maximum=100_000,
+                ),
+            }
+        )
+    return {
+        "schema_version": "1.0",
+        "found": bool(value.get("found")),
+        "title_present": bool(value.get("title_present")),
+        "title_bbox": _safe_bbox(value.get("title_bbox")),
+        "detail_bbox": _safe_bbox(value.get("detail_bbox")),
+        "date_candidates": candidates[:12],
+    }
+
+
+def capture_rejected_job_card_visual_debug(
+    page,
+    output_dir: Path,
+    *,
+    job_id: object,
+    reason: object,
+) -> list[str]:
+    """Capture local-only visual evidence for one rejected search card.
+
+    This is diagnostics-only and intentionally removable: it writes a focused
+    screenshot plus a bounded structural JSON, with no HTML or full text.
+    """
+    safe_job_id = _safe_job_id(job_id)
+    if not safe_job_id:
+        return []
+    safe_reason = _safe_reason_label(reason)
+    prefix = f"rejected-card-{safe_job_id}-{safe_reason}"
+    created: list[str] = []
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        raw = page.evaluate(_REJECTED_CARD_FOCUS_SCRIPT, safe_job_id)
+        snapshot = _sanitize_card_focus_snapshot(raw)
+        json_path = output_dir / f"{prefix}.json"
+        _safe_write_json(json_path, snapshot)
+        created.append(json_path.name)
+        if not snapshot.get("found"):
+            return created
+        selectors = [
+            f'[data-job-id$="{safe_job_id}"]',
+            f'[data-occludable-job-id$="{safe_job_id}"]',
+            f'a[href*="/jobs/view/{safe_job_id}"]',
+            f'a[href*="-{safe_job_id}"]',
+        ]
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if not locator.count():
+                    continue
+                locator.screenshot(path=str(output_dir / f"{prefix}.png"))
+                created.append(f"{prefix}.png")
+                break
+            except Exception:
+                continue
+    except Exception:
+        return created
+    return created
+
+
+def capture_active_detail_date_visual_debug(
+    page,
+    output_dir: Path,
+    *,
+    job_id: object,
+    reason: object,
+) -> list[str]:
+    """Capture local-only evidence for the active detail date selection."""
+    safe_job_id = _safe_job_id(job_id)
+    if not safe_job_id:
+        return []
+    safe_reason = _safe_reason_label(reason)
+    prefix = f"active-detail-date-{safe_job_id}-{safe_reason}"
+    created: list[str] = []
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        raw = page.evaluate(_ACTIVE_DETAIL_DATE_FOCUS_SCRIPT)
+        snapshot = _sanitize_active_detail_date_snapshot(raw)
+        json_path = output_dir / f"{prefix}.json"
+        _safe_write_json(json_path, snapshot)
+        created.append(json_path.name)
+        try:
+            locator = page.locator("main").first
+            if locator.count():
+                locator.screenshot(path=str(output_dir / f"{prefix}.png"))
+                created.append(f"{prefix}.png")
+            else:
+                page.screenshot(path=str(output_dir / f"{prefix}.png"), full_page=True)
+                created.append(f"{prefix}.png")
+        except Exception:
+            return created
+    except Exception:
+        return created
+    return created
+
+
+_COMPANY_RECRUITER_LOCATION_SCRIPT = r"""
+() => {
+  const safeClasses = (node) => Array.from(node && node.classList || [])
+    .slice(0, 12)
+    .map((token) => String(token).slice(0, 80));
+  const bbox = (node) => {
+    const rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+    return rect ? {
+      x: Math.round(rect.left || 0),
+      y: Math.round(rect.top || 0),
+      width: Math.round(rect.width || 0),
+      height: Math.round(rect.height || 0),
+    } : {x: 0, y: 0, width: 0, height: 0};
+  };
+  const descriptor = (selector) => {
+    const node = document.querySelector(selector);
+    return node ? {
+      found: true,
+      tag: String(node.tagName || '').toLowerCase().slice(0, 32),
+      class_tokens: safeClasses(node),
+      bbox: bbox(node),
+      anchor_count: node.querySelectorAll ? node.querySelectorAll('a').length : 0,
+    } : {found: false};
+  };
+  const recruiterNodes = Array.from(document.querySelectorAll('[class*="hiring"], [class*="recruiter"], [class*="hirer"], [class*="poster"]')).slice(0, 12);
+  const locationNodes = Array.from(document.querySelectorAll('[class*="top-card"], [class*="primary-description"], [class*="tertiary-description"], [class*="location"]')).slice(0, 24);
+  return {
+    schema_version: '1.0',
+    top_card: descriptor('main, .jobs-search__job-details, .job-details-jobs-unified-top-card, .jobs-unified-top-card'),
+    company: descriptor('.job-details-jobs-unified-top-card__company-name, .jobs-unified-top-card__company-name, a[href*="/company/"]'),
+    recruiter_candidate_count: recruiterNodes.length,
+    recruiter_candidates: recruiterNodes.map((node) => ({
+      tag: String(node.tagName || '').toLowerCase().slice(0, 32),
+      class_tokens: safeClasses(node),
+      bbox: bbox(node),
+      anchor_count: node.querySelectorAll ? node.querySelectorAll('a').length : 0,
+    })),
+    location_candidate_count: locationNodes.length,
+    location_candidates: locationNodes.map((node) => ({
+      tag: String(node.tagName || '').toLowerCase().slice(0, 32),
+      class_tokens: safeClasses(node),
+      bbox: bbox(node),
+      anchor_count: node.querySelectorAll ? node.querySelectorAll('a').length : 0,
+    })),
+  };
+}
+"""
+
+
+def capture_company_recruiter_location_visual_debug(
+    page,
+    output_dir: Path,
+    *,
+    job_id: object,
+    reason: object,
+) -> list[str]:
+    """Capture local-only screenshots for company/location/recruiter evidence.
+
+    This is diagnostics-only and intentionally removable. Screenshots can contain
+    personal data, so artifacts stay local and are referenced only by relative
+    manifest paths.
+    """
+    safe_job_id = _safe_job_id(job_id)
+    if not safe_job_id:
+        return []
+    safe_reason = _safe_reason_label(reason)
+    prefix = f"company-recruiter-location-{safe_job_id}-{safe_reason}"
+    created: list[str] = []
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            snapshot = page.evaluate(_COMPANY_RECRUITER_LOCATION_SCRIPT)
+        except Exception:
+            snapshot = {"schema_version": "1.0", "evaluation_failed": True}
+        json_path = output_dir / f"{prefix}.json"
+        _safe_write_json(json_path, snapshot if isinstance(snapshot, dict) else {"schema_version": "1.0"})
+        created.append(json_path.name)
+        selectors = (
+            ("top-card", "main, .jobs-search__job-details, .job-details-jobs-unified-top-card, .jobs-unified-top-card"),
+            ("company", '.job-details-jobs-unified-top-card__company-name, .jobs-unified-top-card__company-name, a[href*="/company/"]'),
+            ("recruiter", '[class*="hiring"], [class*="recruiter"], [class*="hirer"], [class*="poster"]'),
+        )
+        captured_any = False
+        for label, selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if not locator.count():
+                    continue
+                locator.screenshot(path=str(output_dir / f"{prefix}-{label}.png"))
+                created.append(f"{prefix}-{label}.png")
+                captured_any = True
+            except Exception:
+                continue
+        try:
+            page.screenshot(path=str(output_dir / f"{prefix}-page.png"), full_page=False)
+            created.append(f"{prefix}-page.png")
+        except Exception:
+            pass
+    except Exception:
+        return created
+    return created
+
+
+_COMPANY_ABOUT_LOCATION_SCRIPT = r"""
+() => {
+  const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\s+/g, ' ').trim();
+  const korea = /south korea|corea del sur|republic of korea|seoul|대한민국|서울/i.test(text);
+  const japan = /japan|japón|tokyo|日本|東京/i.test(text);
+  const unitedStates = /united states|estados unidos|california|new york|menlo park|san francisco|usa|u\.s\./i.test(text);
+  const headquartersMatch = text.match(/(?:headquarters|sede(?: central)?|ubicaci[oó]n(?: principal)?|본사)[:\s]+(.{0,180})/i);
+  const locationMatch = text.match(/(?:menlo park|california|san francisco|new york|seoul|south korea|corea del sur|tokyo|japan|대한민국|서울|日本|東京).{0,120}/i);
+  return {
+    schema_version: '1.0',
+    page_path: window.location ? String(window.location.pathname || '').slice(0, 160) : '',
+    has_korea: korea,
+    has_japan: japan,
+    has_united_states: unitedStates,
+    headquarters_text: headquartersMatch && headquartersMatch[1] ? headquartersMatch[1].slice(0, 180) : '',
+    location_text: locationMatch && locationMatch[0] ? locationMatch[0].slice(0, 180) : '',
+    text_length: text.length,
+  };
+}
+"""
+
+
+def _sanitize_company_about_location_snapshot(value: object) -> dict[str, object]:
+    raw = value if isinstance(value, dict) else {}
+    return {
+        "schema_version": "1.0",
+        "page_path": re.sub(r"[^0-9A-Za-z_./-]", "", str(raw.get("page_path", "") or ""))[:160],
+        "has_korea": bool(raw.get("has_korea")),
+        "has_japan": bool(raw.get("has_japan")),
+        "has_united_states": bool(raw.get("has_united_states")),
+        "headquarters_text": re.sub(r"\s+", " ", str(raw.get("headquarters_text", "") or "")).strip()[:180],
+        "location_text": re.sub(r"\s+", " ", str(raw.get("location_text", "") or "")).strip()[:180],
+        "text_length": _bounded_int(raw.get("text_length"), maximum=1_000_000),
+    }
+
+
+def capture_company_about_location_visual_debug(
+    page,
+    output_dir: Path,
+    *,
+    job_id: object,
+    reason: object,
+) -> list[str]:
+    """Capture local-only evidence from a LinkedIn company About page."""
+    safe_job_id = _safe_job_id(job_id)
+    if not safe_job_id:
+        return []
+    safe_reason = _safe_reason_label(reason)
+    prefix = f"company-about-location-{safe_job_id}-{safe_reason}"
+    created: list[str] = []
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            snapshot = _sanitize_company_about_location_snapshot(
+                page.evaluate(_COMPANY_ABOUT_LOCATION_SCRIPT)
+            )
+        except Exception:
+            snapshot = {"schema_version": "1.0", "evaluation_failed": True}
+        json_path = output_dir / f"{prefix}.json"
+        _safe_write_json(json_path, snapshot)
+        created.append(json_path.name)
+        try:
+            page.screenshot(path=str(output_dir / f"{prefix}.png"), full_page=False)
+            created.append(f"{prefix}.png")
+        except Exception:
+            pass
+    except Exception:
+        return created
+    return created
+
+
+_RECRUITER_LOCATION_SCRIPT = r"""
+() => {
+  const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\s+/g, ' ').trim();
+  const korea = /south korea|corea del sur|republic of korea|seoul|대한민국|서울/i.test(text);
+  const japan = /japan|japón|tokyo|日本|東京/i.test(text);
+  const unitedStates = /united states|estados unidos|california|new york|menlo park|san francisco|usa|u\.s\./i.test(text);
+  const locationMatch = text.match(/(?:menlo park|california|san francisco|new york|seoul|south korea|corea del sur|tokyo|japan|대한민국|서울|日本|東京).{0,120}/i);
+  return {
+    schema_version: '1.0',
+    page_path: window.location ? String(window.location.pathname || '').slice(0, 160) : '',
+    has_korea: korea,
+    has_japan: japan,
+    has_united_states: unitedStates,
+    location_text: locationMatch && locationMatch[0] ? locationMatch[0].slice(0, 180) : '',
+    text_length: text.length,
+  };
+}
+"""
+
+
+def _sanitize_recruiter_location_snapshot(value: object) -> dict[str, object]:
+    raw = value if isinstance(value, dict) else {}
+    return {
+        "schema_version": "1.0",
+        "page_path": re.sub(r"[^0-9A-Za-z_./-]", "", str(raw.get("page_path", "") or ""))[:160],
+        "has_korea": bool(raw.get("has_korea")),
+        "has_japan": bool(raw.get("has_japan")),
+        "has_united_states": bool(raw.get("has_united_states")),
+        "location_text": re.sub(r"\s+", " ", str(raw.get("location_text", "") or "")).strip()[:180],
+        "text_length": _bounded_int(raw.get("text_length"), maximum=1_000_000),
+    }
+
+
+def capture_recruiter_location_visual_debug(
+    page,
+    output_dir: Path,
+    *,
+    job_id: object,
+    reason: object,
+) -> list[str]:
+    """Capture local-only evidence from a recruiter profile page."""
+    safe_job_id = _safe_job_id(job_id)
+    if not safe_job_id:
+        return []
+    safe_reason = _safe_reason_label(reason)
+    prefix = f"recruiter-location-{safe_job_id}-{safe_reason}"
+    created: list[str] = []
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            snapshot = _sanitize_recruiter_location_snapshot(
+                page.evaluate(_RECRUITER_LOCATION_SCRIPT)
+            )
+        except Exception:
+            snapshot = {"schema_version": "1.0", "evaluation_failed": True}
+        json_path = output_dir / f"{prefix}.json"
+        _safe_write_json(json_path, snapshot)
+        created.append(json_path.name)
+        try:
+            page.screenshot(path=str(output_dir / f"{prefix}.png"), full_page=False)
+            created.append(f"{prefix}.png")
+        except Exception:
+            pass
+    except Exception:
+        return created
+    return created
+
+
+def _append_manifest_artifacts(base_dir: Path, filenames: list[str]) -> None:
+    if not filenames:
+        return
+    manifest_path = base_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    for filename in filenames:
+        if re.fullmatch(
+            r"(?:rejected-card|active-detail-date|company-recruiter-location|company-about-location|recruiter-location)-[0-9]+-[0-9A-Za-z_-]+(?:-[0-9A-Za-z_-]+)?\.(?:json|png)",
+            filename,
+        ):
+            artifacts[filename] = filename
+    manifest["artifacts"] = artifacts
+    try:
+        _safe_write_json(manifest_path, manifest)
+    except Exception:
+        return
 
 
 @dataclass
@@ -781,6 +1413,8 @@ class _HTMLDiagnosticRun:
         self.before_rows: dict[str, object] | None = None
         self.last_rows: dict[str, object] | None = None
         self.reports: list[dict[str, object]] = []
+        self.rejected_card_captures = 0
+        self.active_detail_date_captures = 0
 
     @property
     def base_dir(self) -> Path:
@@ -828,6 +1462,7 @@ class _HTMLDiagnosticRun:
         if self.before_rows is not None:
             return
         self._content(page, "results-panel-before-scroll.html")
+        capture_visible_linkedin_card_structure_debug(page, self.base_dir)
         self.before_rows = self._rows(page)
         self.last_rows = self.before_rows
         self._write_rows("row-candidates-before.json", self.before_rows)
@@ -872,6 +1507,30 @@ class _HTMLDiagnosticRun:
         except Exception:
             return
 
+    def capture_rejected_candidate_card(self, page, *, job_id: object, reason: object) -> None:
+        if self.rejected_card_captures >= MAX_REJECTED_CARD_VISUAL_CAPTURES:
+            return
+        created = capture_rejected_job_card_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self.rejected_card_captures += 1
+
+    def capture_active_detail_date(self, page, *, job_id: object, reason: object) -> None:
+        if self.active_detail_date_captures >= MAX_ACTIVE_DETAIL_DATE_VISUAL_CAPTURES:
+            return
+        created = capture_active_detail_date_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self.active_detail_date_captures += 1
+
     def stop_trace(self, _page) -> None:
         """Keep the shared pipeline lifecycle compatible without tracing HTML mode."""
         return
@@ -887,12 +1546,25 @@ class _HTMLDiagnosticRun:
             *(f"results-panel-after-scroll-{index:02d}.html" for index in range(1, 4)),
             *(f"row-candidates-after-scroll-{index:02d}.json" for index in range(1, 4)),
             *(f"detail-after-click-{index:02d}.html" for index in range(1, 3)),
-            "row-candidates-before.json",
+            "row-candidates-before.json", CARD_STRUCTURE_DEBUG_FILENAME,
         }
         artifacts = {
             name: name for name in sorted(allowed_names)
             if (self.base_dir / name).is_file()
         }
+        artifacts.update(
+            {
+                path.name: path.name
+                for path in sorted(
+                    list(self.base_dir.glob("rejected-card-*"))
+                    + list(self.base_dir.glob("active-detail-date-*"))
+                    + list(self.base_dir.glob("company-recruiter-location-*"))
+                    + list(self.base_dir.glob("company-about-location-*"))
+                    + list(self.base_dir.glob("recruiter-location-*"))
+                )
+                if path.is_file()
+            }
+        )
         counts = {key: 0 for key in (
             "scripts_removed", "styles_removed", "event_attributes_removed", "attributes_removed",
             "urls_canonicalized", "query_strings_removed", "nodes_serialized",
@@ -923,6 +1595,11 @@ class LinkedInHTMLDiagnosticsCollector:
         self.base_dir = Path(output_root or Path("data/private/linkedin/diagnostics")) / self.job_uid
         self._events: list[LinkedInVisualDiagnosticArtifact] = []
         self._captured = False
+        self._rejected_card_captures = 0
+        self._active_detail_date_captures = 0
+        self._company_recruiter_location_captures = 0
+        self._company_about_location_captures = 0
+        self._recruiter_location_captures = 0
 
     @property
     def events(self) -> list[LinkedInVisualDiagnosticArtifact]:
@@ -940,6 +1617,71 @@ class LinkedInHTMLDiagnosticsCollector:
     def record(self, event: LinkedInVisualDiagnosticArtifact) -> None:
         self._events.append(event)
 
+    def capture_rejected_candidate_card(self, page, *, job_id: object, reason: object) -> None:
+        if self._rejected_card_captures >= MAX_REJECTED_CARD_VISUAL_CAPTURES:
+            return
+        created = capture_rejected_job_card_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._rejected_card_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_active_detail_date(self, page, *, job_id: object, reason: object) -> None:
+        if self._active_detail_date_captures >= MAX_ACTIVE_DETAIL_DATE_VISUAL_CAPTURES:
+            return
+        created = capture_active_detail_date_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._active_detail_date_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_company_recruiter_location(self, page, *, job_id: object, reason: object) -> None:
+        if self._company_recruiter_location_captures >= MAX_COMPANY_RECRUITER_LOCATION_VISUAL_CAPTURES:
+            return
+        created = capture_company_recruiter_location_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._company_recruiter_location_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_company_about_location(self, page, *, job_id: object, reason: object) -> None:
+        if self._company_about_location_captures >= MAX_COMPANY_ABOUT_LOCATION_VISUAL_CAPTURES:
+            return
+        created = capture_company_about_location_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._company_about_location_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_recruiter_location(self, page, *, job_id: object, reason: object) -> None:
+        if self._recruiter_location_captures >= MAX_RECRUITER_LOCATION_VISUAL_CAPTURES:
+            return
+        created = capture_recruiter_location_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._recruiter_location_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
 
 class LinkedInVisualDiagnosticsCollector:
     """Collect local-only visual diagnostic artifact references."""
@@ -949,6 +1691,11 @@ class LinkedInVisualDiagnosticsCollector:
         self.base_dir = self.audit_dir / _VISUAL_DIR
         self._events: list[LinkedInVisualDiagnosticArtifact] = []
         self._captured = False
+        self._rejected_card_captures = 0
+        self._active_detail_date_captures = 0
+        self._company_recruiter_location_captures = 0
+        self._company_about_location_captures = 0
+        self._recruiter_location_captures = 0
 
     @property
     def events(self) -> list[LinkedInVisualDiagnosticArtifact]:
@@ -968,6 +1715,71 @@ class LinkedInVisualDiagnosticsCollector:
 
     def record(self, event: LinkedInVisualDiagnosticArtifact) -> None:
         self._events.append(event)
+
+    def capture_rejected_candidate_card(self, page, *, job_id: object, reason: object) -> None:
+        if self._rejected_card_captures >= MAX_REJECTED_CARD_VISUAL_CAPTURES:
+            return
+        created = capture_rejected_job_card_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._rejected_card_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_active_detail_date(self, page, *, job_id: object, reason: object) -> None:
+        if self._active_detail_date_captures >= MAX_ACTIVE_DETAIL_DATE_VISUAL_CAPTURES:
+            return
+        created = capture_active_detail_date_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._active_detail_date_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_company_recruiter_location(self, page, *, job_id: object, reason: object) -> None:
+        if self._company_recruiter_location_captures >= MAX_COMPANY_RECRUITER_LOCATION_VISUAL_CAPTURES:
+            return
+        created = capture_company_recruiter_location_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._company_recruiter_location_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_company_about_location(self, page, *, job_id: object, reason: object) -> None:
+        if self._company_about_location_captures >= MAX_COMPANY_ABOUT_LOCATION_VISUAL_CAPTURES:
+            return
+        created = capture_company_about_location_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._company_about_location_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
+
+    def capture_recruiter_location(self, page, *, job_id: object, reason: object) -> None:
+        if self._recruiter_location_captures >= MAX_RECRUITER_LOCATION_VISUAL_CAPTURES:
+            return
+        created = capture_recruiter_location_visual_debug(
+            page,
+            self.base_dir,
+            job_id=job_id,
+            reason=reason,
+        )
+        if created:
+            self._recruiter_location_captures += 1
+            _append_manifest_artifacts(self.base_dir, created)
 
 
 _ACTIVE_VISUAL_DIAGNOSTICS: ContextVar[
@@ -1008,6 +1820,11 @@ __all__ = [
     "MAX_PANEL_HTML_CAPTURES",
     "MAX_VISUAL_DIAGNOSTIC_QUERIES",
     "LinkedInVisualDiagnosticsCollector",
+    "MAX_REJECTED_CARD_VISUAL_CAPTURES",
+    "capture_rejected_job_card_visual_debug",
+    "capture_company_recruiter_location_visual_debug",
+    "capture_company_about_location_visual_debug",
+    "capture_recruiter_location_visual_debug",
     "get_active_visual_diagnostics",
     "sanitize_linkedin_html",
     "visual_diagnostics_context",

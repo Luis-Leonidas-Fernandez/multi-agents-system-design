@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from application.services.request_runtime import get_request_runtime_config
+from features.web_scraping.application.session_retention import enforce_recent_session_retention
 from features.web_scraping.domain.linkedin_models import (
     LinkedInAuditMeta,
     LinkedInAuditSnapshot,
@@ -69,6 +70,7 @@ def _audit_paths(job_uid: str, session_id: str, request_id: str) -> LinkedInAudi
         / "audit"
     )
     audit_dir.mkdir(parents=True, exist_ok=True)
+    enforce_recent_session_retention()
     return LinkedInAuditPaths(
         job_uid=job_uid,
         audit_dir=audit_dir,
@@ -89,6 +91,7 @@ def current_linkedin_audit_dir() -> Path:
         / "audit"
     )
     audit_dir.mkdir(parents=True, exist_ok=True)
+    enforce_recent_session_retention()
     return audit_dir
 
 

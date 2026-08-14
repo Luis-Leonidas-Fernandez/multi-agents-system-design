@@ -548,6 +548,10 @@ def _parse_linkedin_jobs_html_with_diagnostics(
                 (".job-card-container__listed-time", ".job-search-card__listdate"),
             )
             posted_text = _clean_posted_at_text(posted_text)
+            if not posted_text and time_node is None:
+                posted_text = _clean_posted_at_text(
+                    bucket.node.get_text(" ", strip=True)
+                )
             structured = str(time_node.get("datetime") or "") if time_node is not None else ""
             published_at, confidence, within_24h = parse_linkedin_relative_time(
                 posted_text,

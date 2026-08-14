@@ -247,6 +247,8 @@ MAX_ROW_ACTIVATIONS_PER_QUERY = 20
 DISCOVERY_SCROLL_WAIT_MS = 300
 ROW_ACTIVATION_WAIT_MS = 1200
 ROW_ACTIVATION_POLL_MS = 100
+ROW_METADATA_WAIT_MS = 1600
+ROW_METADATA_POLL_MS = 200
 _SEARCH_HYDRATION_MAX_SCROLLS = MAX_DISCOVERY_SCROLLS
 _QUERY_BACKOFF_BASE_MS = 1000
 _QUERY_BACKOFF_MAX_MS = 3000
@@ -259,6 +261,16 @@ _HARD_MAX_QUERIES_PER_LOCATION = len(CONSOLIDATED_QUERY_PLANS) + 1
 _MAX_SEARCH_HYDRATION_EVENTS_PER_QUERY = 40
 _MAX_SEARCH_HYDRATION_COUNT = 10000
 _MAX_SEARCH_TEXT_LENGTH = 2_000_000
+_ACTIVE_DETAIL_METADATA_DIAGNOSTIC: ContextVar[dict[str, object]] = ContextVar(
+    "linkedin_active_detail_metadata_diagnostic",
+    default={},
+)
+
+
+def latest_active_detail_metadata_diagnostic() -> dict[str, object]:
+    return dict(_ACTIVE_DETAIL_METADATA_DIAGNOSTIC.get({}))
+
+
 _JOB_ID_PATTERN = re.compile(r"\b(\d{1,20})\b")
 _JOB_POSTING_URN_PATTERN = re.compile(r"jobPosting:(\d{4,20})")
 _ROW_ALLOWLISTED_ATTRIBUTES = (
@@ -625,6 +637,9 @@ class LinkedInRowActivationOutcome:
     signature: tuple[object, ...]
     job_id: str = ""
     canonical_detail_href: str = ""
+    date_detected: bool = False
+    date_verified: bool = False
+    date_within_24_hours: bool = False
 
 
 @dataclass(frozen=True)
@@ -1555,6 +1570,165 @@ def _resolve_row_locator(page, signature: tuple[object, ...]):
 
 
 
+
+def extract_card_local_posted_time_text(text: str) -> str:
+    """Extract a posted/reposted relative time from one local job card text.
+
+    This is intentionally independent and removable. It only receives text from
+    the candidate card/row context; callers must not pass whole-page text.
+    """
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if not normalized or len(normalized) > 1200:
+        return ""
+    patterns = (
+        r"\bpublicado\s+de\s+nuevo\s+hace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b",
+        r"\bpublicado\s+hace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b",
+        r"\breposted\s+(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b",
+        r"\bposted\s+(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b",
+        r"\bhace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b",
+        r"\b(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b",
+        r"\b(?:hoy|today)\b",
+        r"\b\d+\s*(?:시간|분|일)\s*전\b",
+        r"\b\d+\s*(?:時間|分|日)前\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match and match.group(0):
+            return match.group(0).strip()[:80]
+    return ""
+
+def collect_visible_search_card_dates(page) -> dict[str, tuple[str, datetime, str, bool]]:
+    """Collect safe relative dates from visible left-side search cards without clicking."""
+    try:
+        raw = page.evaluate(
+            r"""
+            () => {
+              const patterns = [
+                /\bpublicado\s+de\s+nuevo\s+hace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
+                /\bpublicado\s+hace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
+                /\breposted\s+(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
+                /\bposted\s+(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
+                /\bhace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
+                /\b(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
+                /\b(?:hoy|today)\b/i,
+                /\b\d+\s*(?:시간|분|일)\s*전\b/i,
+                /\b\d+\s*(?:時間|分|日)前\b/i,
+              ];
+              const viewportWidth = Math.max(0, Number(window.innerWidth || 0));
+              const textOf = (node) => String(
+                node && (node.innerText || node.textContent) || ''
+              ).replace(/\s+/g, ' ').trim();
+              const matchDateText = (text) => {
+                const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+                if (!normalized || normalized.length > 1200) return '';
+                for (const pattern of patterns) {
+                  const match = normalized.match(pattern);
+                  if (match && match[0]) return match[0].slice(0, 80);
+                }
+                return '';
+              };
+              const matchDate = (node) => matchDateText(textOf(node));
+              const findDateWithin = (node) => {
+                const direct = matchDate(node);
+                if (direct) return direct;
+                const descendants = Array.from(
+                  node && node.querySelectorAll ? node.querySelectorAll('*') : []
+                ).slice(0, 240);
+                for (const child of descendants) {
+                  const rect = child.getBoundingClientRect ? child.getBoundingClientRect() : null;
+                  if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+                  const text = textOf(child);
+                  if (!text || text.length > 320) continue;
+                  const matched = matchDateText(text);
+                  if (matched) return matched;
+                }
+                return '';
+              };
+              const jobIdFromHref = (href) => {
+                const match = String(href || '').match(/\/jobs\/view\/(?:[^/?#]*-)?(\d+)\/?(?:[?#]|$)/);
+                return match && match[1] ? match[1].replace(/^0+/, '') || '0' : '';
+              };
+              const output = {};
+              const rowLike = (node) => {
+                const rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+                if (!rect || rect.width <= 0 || rect.height <= 0 || rect.top < 70) return false;
+                const width = Number(rect.width || 0);
+                const height = Number(rect.height || 0);
+                const left = Number(rect.left || 0);
+                return (
+                  left < viewportWidth * 0.58 &&
+                  width >= 160 &&
+                  width <= Math.max(760, viewportWidth * 0.62) &&
+                  height >= 32 &&
+                  height <= 360
+                );
+              };
+              const jobIdFromNode = (node) => {
+                for (const attr of ['data-job-id', 'data-occludable-job-id']) {
+                  const value = node && node.getAttribute ? node.getAttribute(attr) : '';
+                  const match = String(value || '').match(/(\d{3,})$/);
+                  if (match && match[1]) return match[1].replace(/^0+/, '') || '0';
+                }
+                const link = node && node.querySelector ? node.querySelector('a[href*="/jobs/view/"]') : null;
+                return link ? jobIdFromHref(link.getAttribute('href') || '') : '';
+              };
+              const collectFromRow = (node) => {
+                if (!rowLike(node)) return;
+                const jobId = jobIdFromNode(node);
+                if (!jobId || output[jobId]) return;
+                const date = findDateWithin(node);
+                if (date) output[jobId] = date;
+              };
+              const rows = Array.from(document.querySelectorAll(
+                'li[data-job-id], li[data-occludable-job-id], [role="listitem"][data-job-id], [role="option"][data-job-id], [role="listitem"][data-occludable-job-id], [role="option"][data-occludable-job-id], .job-card-container, .scaffold-layout__list-item'
+              )).slice(0, 160);
+              for (const row of rows) collectFromRow(row);
+              const links = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]')).slice(0, 120);
+              for (const link of links) {
+                const rect = link.getBoundingClientRect ? link.getBoundingClientRect() : null;
+                if (!rect || rect.width <= 0 || rect.height <= 0 || rect.top < 70) continue;
+                if (viewportWidth > 0 && rect.left > viewportWidth * 0.58) continue;
+                const jobId = jobIdFromHref(link.getAttribute('href') || '');
+                if (!jobId || output[jobId]) continue;
+                let current = link;
+                let depth = 0;
+                while (current && current !== document.body && depth < 8) {
+                  if (rowLike(current)) {
+                    const date = findDateWithin(current);
+                    if (date) {
+                      output[jobId] = date;
+                      break;
+                    }
+                  }
+                  current = current.parentElement;
+                  depth += 1;
+                }
+              }
+              return output;
+            }
+            """
+        )
+    except Exception:
+        raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    results: dict[str, tuple[str, datetime, str, bool]] = {}
+    for job_id, raw_text in raw.items():
+        normalized_job_id = _job_id_from_attribute_value(str(job_id or ""))
+        if not normalized_job_id and re.fullmatch(r"\d{3,}", str(job_id or "").strip()):
+            normalized_job_id = str(job_id or "").strip().lstrip("0") or "0"
+        posted_text = extract_card_local_posted_time_text(str(raw_text or ""))
+        if not posted_text:
+            posted_text = _clean_posted_at_text(str(raw_text or ""))
+        if not normalized_job_id or not posted_text or len(posted_text) > 80:
+            continue
+        published_at, confidence, within_24h = parse_linkedin_relative_time(posted_text)
+        if published_at is None:
+            continue
+        results[normalized_job_id] = (posted_text, published_at, confidence, within_24h)
+    return results
+
+
 def _posted_at_from_row_locator(locator) -> tuple[str, datetime | None, str, bool]:
     """Extract only a safe relative date from the visible row text."""
     try:
@@ -1562,7 +1736,6 @@ def _posted_at_from_row_locator(locator) -> tuple[str, datetime | None, str, boo
             locator.evaluate(
                 r"""
                 node => {
-                  const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
                   const patterns = [
                     /\bhace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
                     /\b(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
@@ -1570,11 +1743,37 @@ def _posted_at_from_row_locator(locator) -> tuple[str, datetime | None, str, boo
                     /\b\d+\s*(?:시간|분|일)\s*전\b/i,
                     /\b\d+\s*(?:時間|分|日)前\b/i,
                   ];
-                  for (const pattern of patterns) {
-                    const match = text.match(pattern);
-                    if (match && match[0]) return match[0].slice(0, 80);
+                  const normalizedText = (candidate) => String(
+                    candidate && (candidate.innerText || candidate.textContent) || ''
+                  ).replace(/\s+/g, ' ').trim();
+                  const findDate = (candidate) => {
+                    const text = normalizedText(candidate);
+                    for (const pattern of patterns) {
+                      const match = text.match(pattern);
+                      if (match && match[0]) return match[0].slice(0, 80);
+                    }
+                    return '';
+                  };
+                  let current = node;
+                  let depth = 0;
+                  while (current && current !== document.body && depth < 7) {
+                    const rect = current.getBoundingClientRect ? current.getBoundingClientRect() : null;
+                    const width = rect ? Number(rect.width || 0) : 0;
+                    const height = rect ? Number(rect.height || 0) : 0;
+                    const left = rect ? Number(rect.left || 0) : 0;
+                    const rowLike = !rect || (
+                      width >= 120 && width <= Math.max(760, window.innerWidth * 0.62) &&
+                      height >= 24 && height <= 280 &&
+                      left < window.innerWidth * 0.55
+                    );
+                    if (rowLike) {
+                      const match = findDate(current);
+                      if (match) return match;
+                    }
+                    current = current.parentElement;
+                    depth += 1;
                   }
-                  return '';
+                  return findDate(node);
                 }
                 """
             )
@@ -1592,6 +1791,114 @@ def _posted_at_from_row_locator(locator) -> tuple[str, datetime | None, str, boo
 def _canonical_detail_href(job_id: str) -> str:
     return f"https://www.linkedin.com/jobs/view/{job_id}"
 
+
+def _active_detail_metadata_from_page(page) -> tuple[str, str, datetime | None, str, bool]:
+    """Extract safe title/date evidence from the currently active right detail."""
+    try:
+        raw = page.evaluate(
+            r"""
+            () => {
+              const viewportWidth = Math.max(0, Number(window.innerWidth || 0));
+              const patterns = [
+                /\bhace\s+(?:unos?\s+segundos?|un\s+momento|\d+\s+(?:minutos?|horas?|d[ií]as?))\b/i,
+                /\b(?:just now|moments ago|a few seconds ago|\d+\s+(?:minutes?|hours?|days?)\s+ago)\b/i,
+                /\b(?:hoy|today)\b/i,
+                /\b\d+\s*(?:시간|분|일)\s*전\b/i,
+                /\b\d+\s*(?:時間|分|日)前\b/i,
+              ];
+              const visibleRight = (node) => {
+                const rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+                return Boolean(rect && rect.width > 0 && rect.height > 0 && rect.left >= viewportWidth * 0.35);
+              };
+              const textOf = (node) => String(node && (node.innerText || node.textContent) || '').replace(/\s+/g, ' ').trim();
+              const matchDate = (text) => {
+                for (const pattern of patterns) {
+                  const match = String(text || '').match(pattern);
+                  if (match && match[0]) return match[0].slice(0, 80);
+                }
+                return '';
+              };
+              let title = '';
+              let titleRect = null;
+              let titleNode = null;
+              for (const candidate of Array.from(document.querySelectorAll('main h1, [role="main"] h1, h1')).slice(0, 20)) {
+                if (!visibleRight(candidate)) continue;
+                title = textOf(candidate).slice(0, 180);
+                if (title) {
+                  titleNode = candidate;
+                  titleRect = candidate.getBoundingClientRect();
+                  break;
+                }
+              }
+              let posted = '';
+              const dateCandidates = [];
+              const candidates = Array.from(document.querySelectorAll('main *, [role="main"] *, body *')).slice(0, 2500);
+              for (const candidate of candidates) {
+                if (!visibleRight(candidate)) continue;
+                const rect = candidate.getBoundingClientRect();
+                const text = textOf(candidate);
+                if (!text || text.length > 900) continue;
+                const matched = matchDate(text);
+                if (!matched) continue;
+                const titleDistance = titleRect ? Math.abs(rect.top - titleRect.bottom) : 10000;
+                const leftDistance = titleRect ? Math.abs(rect.left - titleRect.left) : 10000;
+                const abovePenalty = titleRect && rect.bottom < titleRect.top ? 1000 : 0;
+                const broadContainerPenalty = rect.height > 220 || text.length > 500 ? 300 : 0;
+                dateCandidates.push({
+                  date: matched,
+                  score: titleDistance + (leftDistance / 4) + abovePenalty + broadContainerPenalty,
+                });
+              }
+              dateCandidates.sort((left, right) => left.score - right.score);
+              posted = dateCandidates.length ? dateCandidates[0].date : '';
+              const selectedScore = dateCandidates.length ? Math.max(0, Math.round(dateCandidates[0].score)) : 0;
+              return {
+                title,
+                posted,
+                date_candidate_count: Math.min(100, dateCandidates.length),
+                selected_score: selectedScore,
+              };
+            }
+            """
+        )
+    except Exception:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    title = re.sub(r"\s+", " ", str(raw.get("title") or "")).strip()[:180]
+    posted_text = _clean_posted_at_text(str(raw.get("posted") or ""))
+    published_at, confidence, within_24h = parse_linkedin_relative_time(posted_text)
+    _ACTIVE_DETAIL_METADATA_DIAGNOSTIC.set(
+        {
+            "title_present": bool(title),
+            "date_detected": bool(posted_text),
+            "date_verified": published_at is not None,
+            "date_within_24_hours": within_24h if published_at is not None else False,
+            "date_candidate_count": max(0, min(100, _numeric_descriptor(raw.get("date_candidate_count")))),
+            "selected_score": max(0, min(100000, _numeric_descriptor(raw.get("selected_score")))),
+            "selected_date": posted_text[:80],
+        }
+    )
+    return title, posted_text, published_at, confidence, within_24h
+
+
+def _wait_for_active_detail_metadata(
+    page,
+    *,
+    require_date: bool = True,
+) -> tuple[str, str, datetime | None, str, bool]:
+    elapsed_ms = 0
+    latest: tuple[str, str, datetime | None, str, bool] = ("", "", None, "low", False)
+    while True:
+        latest = _active_detail_metadata_from_page(page)
+        title, _posted_text, published_at, _confidence, _within_24h = latest
+        if title and (not require_date or published_at is not None):
+            return latest
+        if elapsed_ms >= ROW_METADATA_WAIT_MS:
+            return latest
+        wait_ms = min(ROW_METADATA_POLL_MS, ROW_METADATA_WAIT_MS - elapsed_ms)
+        _safe_page_pause(page, wait_ms)
+        elapsed_ms += wait_ms
 
 
 def _collect_visible_detail_job_links(page) -> tuple[set[str], set[str]]:
@@ -1856,6 +2163,23 @@ def discover_job_rows_via_activation(
             after, changed = _wait_for_changed_detail_identity(
                 page, before, max_wait_ms=max_wait_ms
             )
+            detail_title = ""
+            if changed and after.job_id:
+                (
+                    detail_title,
+                    detail_posted_text,
+                    detail_published_at,
+                    detail_freshness_confidence,
+                    detail_within_24h,
+                ) = _wait_for_active_detail_metadata(
+                    page,
+                    require_date=row_published_at is None,
+                )
+                if row_published_at is None and detail_published_at is not None:
+                    row_posted_text = detail_posted_text
+                    row_published_at = detail_published_at
+                    row_freshness_confidence = detail_freshness_confidence
+                    row_within_24h = detail_within_24h
             if not changed:
                 outcome = "row_activation_no_change"
             elif not after.job_id:
@@ -1868,6 +2192,7 @@ def discover_job_rows_via_activation(
                 records.append(
                     LinkedInVacancyRecord(
                         linkedin_job_id=after.job_id,
+                        title=detail_title,
                         posted_at_text=row_posted_text,
                         published_at=row_published_at,
                         freshness_confidence=(
@@ -1891,6 +2216,11 @@ def discover_job_rows_via_activation(
                     signature=signature,
                     job_id=after.job_id,
                     canonical_detail_href=after.canonical_detail_href,
+                    date_detected=bool(row_posted_text),
+                    date_verified=row_published_at is not None,
+                    date_within_24_hours=(
+                        row_within_24h if row_published_at is not None else False
+                    ),
                 )
             )
             if diagnostic_detail_capture is not None:
@@ -1967,7 +2297,26 @@ def merge_row_activation_records(
             continue
         current = merged[index]
         sources = sorted(set(current.discovery_sources) | set(record.discovery_sources))
-        merged[index] = current.model_copy(update={"discovery_sources": sources})
+        updates: dict[str, object] = {"discovery_sources": sources}
+        for field_name in (
+            "title",
+            "company_name",
+            "location",
+            "workplace_type",
+            "posted_at_text",
+            "published_at",
+            "freshness_confidence",
+            "is_within_24_hours",
+        ):
+            current_value = getattr(current, field_name, None)
+            incoming_value = getattr(record, field_name, None)
+            if field_name in {"freshness_confidence", "is_within_24_hours"}:
+                if current.published_at is None and record.published_at is not None:
+                    updates[field_name] = incoming_value
+                continue
+            if not current_value and incoming_value:
+                updates[field_name] = incoming_value
+        merged[index] = current.model_copy(update=updates)
     return merged, dom_contributed, row_contributed
 
 

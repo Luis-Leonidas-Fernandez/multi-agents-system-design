@@ -12,7 +12,7 @@ _JOB_PATH_RE = re.compile(
     r"^/jobs/(?:$|search(?:-results)?/?$|view/(?:\d+|[^/?#]+)/?$)"
 )
 _LINKEDIN_ENTITY_PATH_RE = re.compile(
-    r"^(?:/jobs/view/(?:\d+|[^/?#]+)/?|/company/[^/?#]+/?|/jobs/apply(?:/[^/?#]+)*/?)$"
+    r"^(?:/jobs/view/(?:\d+|[^/?#]+)/?|/company/[^/?#]+(?:/about)?/?|/jobs/apply(?:/[^/?#]+)*/?)$"
 )
 _ALLOWED_SEARCH_QUERY_KEYS = {
     "currentJobId",

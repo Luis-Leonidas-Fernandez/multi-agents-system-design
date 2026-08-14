@@ -885,6 +885,9 @@ def test_linkedin_entity_url_canonicalization_strips_query_and_fragment():
     assert canonicalize_linkedin_url(
         "https://linkedin.com/company/openai#about"
     ) == "https://linkedin.com/company/openai"
+    assert canonicalize_linkedin_url(
+        "https://www.linkedin.com/company/hire-feed/about/?trk=public_jobs"
+    ) == "https://www.linkedin.com/company/hire-feed/about"
     assert {
         linkedin_job_id_from_url(url)
         for url in (
@@ -1054,6 +1057,39 @@ def test_linkedin_html_parser_and_dedupe_use_local_fixture():
             source_url="https://evil.example/jobs/search/",
             now=datetime(2026, 7, 28, 14, 0, tzinfo=timezone.utc),
         )
+
+
+def test_linkedin_parser_extracts_plain_text_card_date_without_losing_fallback():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.infrastructure.linkedin_scraper import (
+        parse_linkedin_jobs_html,
+    )
+
+    html = """
+    <ul class="jobs-search-results-list">
+      <li data-occludable-job-id="4426794001">
+        <a class="job-card-list__title--link" href="/jobs/view/4426794001/">
+          Machine Learning Engineer (AdTech/MarTech)
+        </a>
+        <div class="job-card-container__primary-description">MUSINSA 무신사</div>
+        <div class="job-card-container__metadata-item">Seúl, Corea del Sur (Presencial)</div>
+        <span>Visto · Adelántate a solicitar el empleo · Hace 9 horas · Solicitud sencilla</span>
+      </li>
+    </ul>
+    """
+
+    records = parse_linkedin_jobs_html(
+        html,
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI&f_TPR=r86400",
+        now=datetime(2026, 8, 13, 18, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(records) == 1
+    assert records[0].linkedin_job_id == "4426794001"
+    assert records[0].posted_at_text == "Hace 9 horas"
+    assert records[0].published_at == datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc)
+    assert records[0].is_within_24_hours is True
 
 
 def test_linkedin_parser_handles_authenticated_dom_relative_hrefs_and_wrappers():
@@ -2799,7 +2835,67 @@ def test_linkedin_direct_detail_fallback_uses_exact_url_and_restores_search():
     assert direct_calls == ["https://www.linkedin.com/jobs/view/ai-engineer-111"]
     assert page.navigations == [source_url]
     assert page.url == source_url
-    assert warnings == ["direct_detail_fallback_used:111"]
+    assert warnings == [
+        "direct_detail_fallback_used:111",
+        "active_detail_date_selected:111:missing:date_none:candidates_0:score_0",
+    ]
+
+
+def test_linkedin_direct_detail_fallback_merges_active_detail_metadata(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure import linkedin_jobs_pipeline as pipeline
+    from features.web_scraping.infrastructure.linkedin_url_policy import (
+        validate_linkedin_jobs_url,
+    )
+
+    source_url = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    candidate = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url=source_url,
+        matched_terms=["ai"],
+    )
+    published = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+
+    class FakePage:
+        url = source_url
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda *_args, **_kwargs: (
+            "Machine Learning Engineer",
+            "hace 11 horas",
+            published,
+            "medium",
+            True,
+        ),
+    )
+    result = pipeline._run_guarded_direct_detail_fallback(
+        FakePage(),
+        candidate,
+        source_url=source_url,
+        include_description=False,
+        warnings=[],
+        validate_jobs_url=validate_linkedin_jobs_url,
+        validate_authenticated_page=lambda _page: None,
+        wait_for_search_results_hydration=lambda _page: "results",
+        enrich_job_detail=lambda _page, record, **_kwargs: record,
+        safe_error_label=lambda exc: type(exc).__name__,
+        terminal_error_types=(),
+    )
+
+    assert result.linkedin_job_id == "4453249078"
+    assert result.posted_at_text == "hace 11 horas"
+    assert result.published_at == published
+    assert result.freshness_confidence == "medium"
+    assert result.is_within_24_hours is True
 
 
 def test_linkedin_direct_detail_fallback_reports_search_restore_failure():
@@ -2838,6 +2934,7 @@ def test_linkedin_direct_detail_fallback_reports_search_restore_failure():
 
     assert warnings == [
         "direct_detail_fallback_used:111",
+        "active_detail_date_selected:111:missing:date_none:candidates_0:score_0",
         "list_not_hydrated:111",
         "search_restore_failed:111:list_not_hydrated",
     ]
@@ -3341,6 +3438,38 @@ def test_linkedin_full_description_is_audited_and_drives_inference(
     assert "Python Kubernetes TOPIK" in rendered
     assert marker not in audit_summary
 
+
+
+def test_linkedin_extracts_card_local_reposted_time_text():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        extract_card_local_posted_time_text,
+    )
+    from features.web_scraping.infrastructure.linkedin_parser import (
+        parse_linkedin_relative_time,
+    )
+
+    posted = extract_card_local_posted_time_text(
+        "Machine Learning Engineer GOWARD Seoul Publicado de nuevo hace 23 minutos Visto"
+    )
+
+    assert posted == "Publicado de nuevo hace 23 minutos"
+    published_at, confidence, within_24h = parse_linkedin_relative_time(posted)
+    assert published_at is not None
+    assert confidence == "medium"
+    assert within_24h is True
+
+
+def test_linkedin_extracts_card_local_reposted_time_text_english():
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        extract_card_local_posted_time_text,
+    )
+
+    assert (
+        extract_card_local_posted_time_text(
+            "AI Architect Company Seoul Reposted 2 hours ago Viewed"
+        )
+        == "Reposted 2 hours ago"
+    )
 
 def test_linkedin_title_and_posted_date_cleanup_only_remove_verified_ui_noise():
     from features.web_scraping.infrastructure.linkedin_scraper import (
@@ -4672,10 +4801,7 @@ def test_linkedin_scraper_dedupes_before_applying_result_limit():
         )
 
     assert [item.linkedin_job_id for item in records] == ["111", "222"]
-    assert [item.reason for item in rejected] == [
-        "duplicate_candidate_skipped_before_detail",
-        "selector_drift/card_missing",
-    ]
+    assert [item.reason for item in rejected] == ["selector_drift/card_missing"]
 
 
 def test_linkedin_scraper_enriches_inline_once_and_never_gotos_job_detail(
@@ -4790,7 +4916,7 @@ def test_linkedin_scraper_enriches_inline_once_and_never_gotos_job_detail(
         )
 
     assert [record.linkedin_job_id for record in records] == ["111"]
-    assert [item.reason for item in rejected] == ["duplicate_candidate_skipped_before_detail"]
+    assert rejected == []
     assert panel_detail.call_count == 1
     direct_detail.assert_not_called()
     assert not any("/jobs/view/" in url for url in navigations)
@@ -4923,7 +5049,7 @@ def test_linkedin_direct_detail_fallback_fetches_deduped_candidate_once(
         )
 
     assert [record.linkedin_job_id for record in records] == ["111"]
-    assert [item.reason for item in rejected] == ["duplicate_candidate_skipped_before_detail"]
+    assert rejected == []
     assert direct_detail.call_count == 1
     assert warnings.count("direct_detail_fallback_used:111") == 1
     assert any("selector_drift/card_missing" in warning for warning in warnings)
@@ -5801,6 +5927,16 @@ def test_linkedin_country_scope_filter_handles_regional_remote_spillover():
     )
     assert not _visible_location_matches_requested_scope(
         "Asia-Pacífico",
+        "South Korea",
+        "https://www.linkedin.com/jobs/search?keywords=Machine+Learning&location=South+Korea",
+    )
+    assert _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
+        "South Korea",
+        "Remote role for the Korea market, working with the Seoul office.",
+    )
+    assert not _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
         "Japan",
         "Build AI systems remotely for customers across APAC.",
     )
@@ -5810,6 +5946,58 @@ def test_linkedin_country_scope_filter_handles_regional_remote_spillover():
         "Generative AI role supporting Tokyo and Japan customers.",
     )
 
+
+
+def test_linkedin_country_signal_text_requires_role_evidence_for_remote_apac():
+    from types import SimpleNamespace
+
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _record_country_signal_text,
+        _visible_location_matches_requested_scope,
+    )
+
+    record = SimpleNamespace(
+        title="Machine Learning Engineer - AI (Remote)",
+        company_name="",
+        description_excerpt="Build remote AI products for APAC customers.",
+        description_full_text="",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?keywords=Machine+Learning&location=South+Korea",
+    )
+
+    signal_text = _record_country_signal_text(record)
+
+    assert not _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
+        "South Korea",
+        signal_text,
+    )
+
+
+def test_linkedin_country_signal_text_accepts_remote_apac_with_korea_role_evidence():
+    from types import SimpleNamespace
+
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _record_country_signal_text,
+        _visible_location_matches_requested_scope,
+    )
+
+    record = SimpleNamespace(
+        title="Machine Learning Engineer - AI (Remote)",
+        company_name="",
+        description_excerpt="Remote role supporting the Korea market from the Seoul office.",
+        description_full_text="",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?keywords=Machine+Learning&location=South+Korea",
+    )
+
+    signal_text = _record_country_signal_text(record)
+
+    assert _visible_location_matches_requested_scope(
+        "Asia-Pacífico",
+        "South Korea",
+        signal_text,
+    )
 
 def test_linkedin_stale_detail_panel_retries_same_candidate_once(monkeypatch):
     from features.web_scraping.domain.linkedin_models import (
@@ -6335,13 +6523,10 @@ def test_linkedin_scraper_detail_budget_stops_queries_and_classifies_dates(
 
     assert [record.linkedin_job_id for record in records] == ["111"]
     assert [item.reason for item in rejected] == [
-        "duplicate_candidate_skipped_before_detail",
         "outside_24_hours",
         "unverified_posted_date",
     ]
-    assert any(
-        warning.startswith("rejected_duplicate_dropped:") for warning in warnings
-    )
+    assert "duplicate_candidate_skipped_before_detail:111" in warnings
     assert len(queries) == 2
     assert len(timings) == 2
     assert parse_html.call_count == 2
@@ -9781,7 +9966,7 @@ def test_linkedin_pipeline_dedupes_same_run_before_detail_and_marks_retained(mon
     assert timings[0].diagnostics.duplicate_candidate_count == 0
     assert timings[1].diagnostics.new_candidate_count == 0
     assert timings[1].diagnostics.duplicate_candidate_count == 1
-    assert [item.reason for item in rejected] == ["duplicate_candidate_skipped_before_detail"]
+    assert rejected == []
     assert "duplicate_candidate_skipped_before_detail:123" in warnings
 
 
@@ -9871,6 +10056,433 @@ def test_linkedin_detail_identity_falls_back_to_visible_right_panel_job_link():
 
     assert identity.job_id == "222"
     assert identity.canonical_detail_href == "https://www.linkedin.com/jobs/view/222"
+
+
+
+
+def test_linkedin_duplicate_candidate_merges_date_evidence_before_detail():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _merge_candidate_discovery_evidence,
+    )
+
+    current = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        discovery_sources=["job_href"],
+        candidate_metadata_incomplete=True,
+    )
+    published = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    duplicate = current.model_copy(
+        update={
+            "company_name": "MUSINSA 무신사",
+            "location": "Seúl, Seúl, Corea del Sur",
+            "posted_at_text": "hace 11 horas",
+            "published_at": published,
+            "freshness_confidence": "medium",
+            "is_within_24_hours": True,
+            "discovery_sources": ["row_activation"],
+        }
+    )
+
+    merged = _merge_candidate_discovery_evidence(current, duplicate)
+
+    assert merged.linkedin_job_id == "4453249078"
+    assert merged.title == "Machine Learning Engineer"
+    assert merged.company_name == "MUSINSA 무신사"
+    assert merged.location == "Seúl, Seúl, Corea del Sur"
+    assert merged.posted_at_text == "hace 11 horas"
+    assert merged.published_at == published
+    assert merged.freshness_confidence == "medium"
+    assert merged.is_within_24_hours is True
+    assert merged.discovery_sources == ["job_href", "row_activation"]
+    assert merged.candidate_metadata_incomplete is False
+
+
+def test_linkedin_row_activation_date_warnings_are_safe_per_job():
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _row_activation_date_warning,
+    )
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        LinkedInRowActivationOutcome,
+    )
+
+    assert _row_activation_date_warning(
+        LinkedInRowActivationOutcome(
+            "row_activation_success",
+            (),
+            job_id="4450481657",
+            date_detected=True,
+            date_verified=True,
+            date_within_24_hours=True,
+        )
+    ) == "row_date_verified:4450481657:within_24_hours"
+    assert _row_activation_date_warning(
+        LinkedInRowActivationOutcome(
+            "row_activation_duplicate",
+            (),
+            job_id="4450481657",
+            date_detected=True,
+            date_verified=True,
+            date_within_24_hours=False,
+        )
+    ) == "row_date_verified:4450481657:outside_24_hours"
+    assert _row_activation_date_warning(
+        LinkedInRowActivationOutcome(
+            "row_activation_success",
+            (),
+            job_id="4450481657",
+            date_detected=False,
+            date_verified=False,
+        )
+    ) == "row_date_missing:4450481657"
+    assert _row_activation_date_warning(
+        LinkedInRowActivationOutcome(
+            "row_activation_no_job_id",
+            (),
+            date_detected=True,
+            date_verified=False,
+        )
+    ) == "row_date_unattributed"
+
+def test_linkedin_visible_card_date_collector_parses_left_card_dates(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.infrastructure import linkedin_query_navigation as navigation
+
+    class Page:
+        def evaluate(self, script):
+            assert "data-occludable-job-id" in script
+            assert "jobIdFromNode" in script
+            assert "findDateWithin" in script
+            return {"4426794001": "Visto · Hace 9 horas · Solicitud sencilla"}
+
+    monkeypatch.setattr(
+        navigation,
+        "parse_linkedin_relative_time",
+        lambda text: (datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc), "medium", True),
+    )
+
+    dates = navigation.collect_visible_search_card_dates(Page())
+
+    assert dates == {
+        "4426794001": (
+            "Hace 9 horas",
+            datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc),
+            "medium",
+            True,
+        )
+    }
+
+
+def test_linkedin_visible_card_date_evidence_overrides_existing_outside_date():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _apply_visible_card_date_evidence,
+    )
+
+    stale = datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc)
+    visible = datetime(2026, 8, 13, 23, 0, tzinfo=timezone.utc)
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4426794001",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4426794001",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        posted_at_text="hace 2 días",
+        published_at=stale,
+        freshness_confidence="low",
+        is_within_24_hours=False,
+        discovery_sources=["job_href"],
+    )
+
+    updated, transition = _apply_visible_card_date_evidence(
+        record,
+        "4426794001",
+        {
+            "4426794001": (
+                "Hace 10 horas",
+                visible,
+                "medium",
+                True,
+            )
+        },
+    )
+
+    assert transition == "outside_24_hours_to_within_24_hours"
+    assert updated.posted_at_text == "Hace 10 horas"
+    assert updated.published_at == visible
+    assert updated.freshness_confidence == "medium"
+    assert updated.is_within_24_hours is True
+    assert updated.discovery_sources == ["job_href", "visible_card"]
+
+
+def test_linkedin_visible_card_date_evidence_never_degrades_existing_within_date():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _apply_visible_card_date_evidence,
+    )
+
+    current = datetime(2026, 8, 13, 22, 0, tzinfo=timezone.utc)
+    outside = datetime(2026, 8, 11, 22, 0, tzinfo=timezone.utc)
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453503447",
+        title="Artificial Intelligence Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453503447",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        posted_at_text="hace 41 minutos",
+        published_at=current,
+        freshness_confidence="medium",
+        is_within_24_hours=True,
+        discovery_sources=["job_href"],
+    )
+
+    updated, transition = _apply_visible_card_date_evidence(
+        record,
+        "4453503447",
+        {
+            "4453503447": (
+                "Hace 2 días",
+                outside,
+                "medium",
+                False,
+            )
+        },
+    )
+
+    assert transition == ""
+    assert updated is record
+    assert updated.posted_at_text == "hace 41 minutos"
+    assert updated.published_at == current
+    assert updated.is_within_24_hours is True
+    assert updated.discovery_sources == ["job_href"]
+
+
+def test_linkedin_detail_priority_spends_budget_on_verified_card_dates_first():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _detail_priority_label,
+        _prioritize_candidates_for_detail,
+    )
+
+    source = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    missing_date = LinkedInVacancyRecord(
+        linkedin_job_id="111",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/111",
+        source_url=source,
+        matched_terms=["machine learning"],
+        discovery_sources=["job_href"],
+    )
+    verified_card = LinkedInVacancyRecord(
+        linkedin_job_id="222",
+        title="AI Product Team Leader",
+        canonical_url="https://www.linkedin.com/jobs/view/222",
+        source_url=source,
+        matched_terms=["ai"],
+        posted_at_text="Hace 10 horas",
+        published_at=datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc),
+        freshness_confidence="medium",
+        is_within_24_hours=True,
+        discovery_sources=["job_href", "visible_card"],
+    )
+    verified_other = LinkedInVacancyRecord(
+        linkedin_job_id="333",
+        title="Deep Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/333",
+        source_url=source,
+        matched_terms=["deep learning"],
+        posted_at_text="hace 15 horas",
+        published_at=datetime(2026, 8, 13, 7, 0, tzinfo=timezone.utc),
+        freshness_confidence="medium",
+        is_within_24_hours=True,
+        discovery_sources=["row_activation"],
+    )
+
+    prioritized = _prioritize_candidates_for_detail(
+        [missing_date, verified_other, verified_card]
+    )
+
+    assert [record.linkedin_job_id for record in prioritized] == ["222", "333", "111"]
+    assert _detail_priority_label(prioritized[0]) == "verified_card_date"
+    assert _detail_priority_label(prioritized[1]) == "verified_date"
+    assert _detail_priority_label(prioritized[2]) == "strong_metadata_missing_date"
+
+
+def test_linkedin_active_detail_date_requires_matching_top_card_title(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure import linkedin_jobs_pipeline as pipeline
+
+    published = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        description_full_text="A real full job description with enough detail for validation.",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda *_args, **_kwargs: (
+            "Data Scientist (Remote)",
+            "hace 2 días",
+            published,
+            "medium",
+            False,
+        ),
+    )
+    warnings: list[str] = []
+
+    merged = pipeline._merge_active_detail_metadata(
+        record,
+        object(),
+        warnings=warnings,
+    )
+
+    assert merged.published_at is None
+    assert merged.posted_at_text == ""
+    assert merged.is_within_24_hours is False
+    assert warnings[-1] == (
+        "active_detail_top_card_identity:"
+        "4453249078:top_card_title_mismatch"
+    )
+
+
+def test_linkedin_active_detail_date_applies_when_top_card_title_matches(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure import linkedin_jobs_pipeline as pipeline
+
+    published = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        description_full_text="A real full job description with enough detail for validation.",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda *_args, **_kwargs: (
+            "Machine Learning Engineer",
+            "hace 8 horas",
+            published,
+            "medium",
+            True,
+        ),
+    )
+    warnings: list[str] = []
+
+    merged = pipeline._merge_active_detail_metadata(
+        record,
+        object(),
+        warnings=warnings,
+    )
+
+    assert merged.published_at == published
+    assert merged.posted_at_text == "hace 8 horas"
+    assert merged.is_within_24_hours is True
+    assert warnings[-1] == (
+        "active_detail_top_card_identity:"
+        "4453249078:top_card_title_match"
+    )
+
+
+def test_linkedin_row_date_extractor_walks_to_row_ancestor():
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class TitleOnlyLocator:
+        def evaluate(self, script):
+            assert "parentElement" in script
+            assert "rowLike" in script
+            return "Visto · Adelántate a solicitar el empleo · hace 22 horas"
+
+    posted_text, published_at, confidence, within_24h = (
+        navigation._posted_at_from_row_locator(TitleOnlyLocator())
+    )
+
+    assert posted_text == "hace 22 horas"
+    assert published_at is not None
+    assert confidence == "medium"
+    assert within_24h is True
+
+
+def test_linkedin_active_detail_metadata_extracts_safe_title_and_date():
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    class Page:
+        def evaluate(self, script):
+            assert "visibleRight" in script
+            assert "main h1" in script
+            assert "body *" in script
+            assert "dateCandidates" in script
+            assert "titleDistance" in script
+            assert "matchDate" in script
+            return {
+                "title": "Forward Deployed Engineer 글로벌 AI 유니콘 한국 초기 멤버",
+                "posted": "Compartido hace 22 horas",
+            }
+
+    title, posted_text, published_at, confidence, within_24h = (
+        navigation._active_detail_metadata_from_page(Page())
+    )
+
+    assert title == "Forward Deployed Engineer 글로벌 AI 유니콘 한국 초기 멤버"
+    assert posted_text == "hace 22 horas"
+    assert published_at is not None
+    assert confidence == "medium"
+    assert within_24h is True
+
+
+def test_linkedin_row_activation_falls_back_to_active_detail_date_and_title(monkeypatch):
+    from datetime import datetime, timezone
+
+    import features.web_scraping.infrastructure.linkedin_query_navigation as navigation
+
+    published = datetime(2026, 8, 13, 1, 0, tzinfo=timezone.utc)
+
+    class Row:
+        def evaluate(self, _script):
+            return ""
+
+        def click(self, **_kwargs):
+            return None
+
+    signature = (4, "job", (("data-job-id", "111"),))
+    monkeypatch.setattr(navigation, "_enumerate_visible_job_rows", lambda _page: [("rows", 0, signature)])
+    monkeypatch.setattr(navigation, "_resolve_row_locator", lambda _page, _signature: Row())
+    monkeypatch.setattr(navigation, "_detail_identity_from_page", lambda _page: navigation.LinkedInDetailIdentity(job_id="111", canonical_detail_href="https://www.linkedin.com/jobs/view/111"))
+    monkeypatch.setattr(navigation, "_wait_for_changed_detail_identity", lambda *_args, **_kwargs: (navigation.LinkedInDetailIdentity(job_id="4304546006", canonical_detail_href="https://www.linkedin.com/jobs/view/4304546006"), True))
+    monkeypatch.setattr(navigation, "_wait_for_active_detail_metadata", lambda *_args, **_kwargs: ("Forward Deployed Engineer", "hace 22 horas", published, "medium", True))
+    monkeypatch.setattr(navigation, "_scroll_results_panel_for_rows", lambda _page: False)
+
+    result = navigation.discover_job_rows_via_activation(
+        object(),
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+        max_activations=1,
+    )
+
+    assert result.success_count == 1
+    assert result.records[0].linkedin_job_id == "4304546006"
+    assert result.records[0].title == "Forward Deployed Engineer"
+    assert result.records[0].posted_at_text == "hace 22 horas"
+    assert result.records[0].published_at == published
+    assert result.records[0].is_within_24_hours is True
+    assert result.outcomes[0].date_verified is True
 
 
 def test_linkedin_row_activation_preserves_visible_row_posted_date(monkeypatch):
@@ -10034,6 +10646,47 @@ def test_linkedin_row_ids_merge_before_detail_and_mark_duplicate_source():
     assert row_contributed is True
 
 
+def test_linkedin_row_merge_preserves_verified_row_date_for_duplicate_dom_candidate():
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_query_navigation import (
+        merge_row_activation_records,
+    )
+
+    source = "https://www.linkedin.com/jobs/search/?keywords=AI"
+    published = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    dom = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url=source,
+        discovery_sources=["job_href"],
+    )
+    row = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        posted_at_text="hace 12 horas",
+        published_at=published,
+        freshness_confidence="medium",
+        is_within_24_hours=True,
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url=source,
+        discovery_sources=["row_activation"],
+    )
+
+    merged, dom_contributed, row_contributed = merge_row_activation_records([dom], [row])
+
+    assert len(merged) == 1
+    assert merged[0].posted_at_text == "hace 12 horas"
+    assert merged[0].published_at == published
+    assert merged[0].freshness_confidence == "medium"
+    assert merged[0].is_within_24_hours is True
+    assert merged[0].discovery_sources == ["job_href", "row_activation"]
+    assert dom_contributed is True
+    assert row_contributed is True
+
+
 def test_linkedin_discovery_modes_are_explicit():
     from features.web_scraping.infrastructure.linkedin_query_navigation import (
         discovery_mode_for_sources,
@@ -10062,6 +10715,1258 @@ def test_linkedin_visual_manifest_omits_missing_before_main_capture(tmp_path):
     assert manifest["artifacts"]["before_main"] is None
     assert manifest["artifacts"]["after_main"] == "after-main.png"
 
+
+def test_linkedin_rejected_card_visual_debug_writes_focused_artifacts(tmp_path):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        capture_rejected_job_card_visual_debug,
+    )
+
+    class Locator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1 if "4453249078" in self.selector else 0
+
+        def screenshot(self, *, path):
+            Path(path).write_bytes(b"png")
+
+    class Page:
+        def evaluate(self, script, job_id):
+            assert "innerText" in script
+            assert job_id == "4453249078"
+            return {
+                "found": True,
+                "job_id": "4453249078",
+                "selector_kind": "attribute",
+                "tag": "li",
+                "class_tokens": ["scaffold-layout__list-item"],
+                "has_href": False,
+                "has_data_job_id": False,
+                "has_data_occludable_job_id": True,
+                "title_present": False,
+                "date_texts": [],
+                "bbox": {"x": 112, "y": 1246, "width": 488, "height": 130},
+                "ancestor_chain": [],
+            }
+
+        def locator(self, selector):
+            return Locator(selector)
+
+    created = capture_rejected_job_card_visual_debug(
+        Page(),
+        tmp_path,
+        job_id="4453249078",
+        reason="outside_24_hours",
+    )
+
+    assert sorted(created) == [
+        "rejected-card-4453249078-outside_24_hours.json",
+        "rejected-card-4453249078-outside_24_hours.png",
+    ]
+    payload = json.loads(
+        (tmp_path / "rejected-card-4453249078-outside_24_hours.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["job_id"] == "4453249078"
+    assert payload["found"] is True
+    assert "innerText" not in json.dumps(payload)
+
+
+
+
+
+def test_linkedin_active_detail_identity_accepts_ordered_title_prefix():
+    from types import SimpleNamespace
+
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _active_detail_top_card_date_identity_status,
+    )
+
+    matched, reason = _active_detail_top_card_date_identity_status(
+        SimpleNamespace(title="Machine Learning Engineer"),
+        "Machine Learning Engineer - AI (Remote)",
+    )
+
+    assert matched is True
+    assert reason == "top_card_title_prefix_compatible"
+
+
+def test_linkedin_active_detail_identity_rejects_too_short_title_prefix():
+    from types import SimpleNamespace
+
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _active_detail_top_card_date_identity_status,
+    )
+
+    matched, reason = _active_detail_top_card_date_identity_status(
+        SimpleNamespace(title="AI Engineer"),
+        "AI Engineer Manager",
+    )
+
+    assert matched is False
+    assert reason == "top_card_title_mismatch"
+
+def test_linkedin_card_activation_date_evidence_merges_when_title_matches(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Locator:
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def scroll_into_view_if_needed(self, **_kwargs):
+            return None
+
+        def click(self, **_kwargs):
+            return None
+
+    class Page:
+        def locator(self, selector):
+            assert "4453249078" in selector
+            return Locator()
+
+    published_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=True: (
+            "Machine Learning Engineer",
+            "Publicado de nuevo hace 37 minutos",
+            published_at,
+            "medium",
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_active_detail_metadata_warning",
+        lambda record: f"active_detail_date_selected:{record.linkedin_job_id}:within_24_hours",
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+    warnings = []
+
+    updated = pipeline._activate_visible_search_card_date_evidence(
+        Page(),
+        record,
+        warnings=warnings,
+    )
+
+    assert updated.published_at == published_at
+    assert updated.posted_at_text == "Publicado de nuevo hace 37 minutos"
+    assert updated.is_within_24_hours is True
+    assert "card_activation_date_identity:4453249078:top_card_title_match" in warnings
+    assert "card_activation_date_verified:4453249078:within_24_hours" in warnings
+
+
+def test_linkedin_card_activation_date_evidence_rejects_mismatched_active_detail(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Locator:
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def scroll_into_view_if_needed(self, **_kwargs):
+            return None
+
+        def click(self, **_kwargs):
+            return None
+
+    class Page:
+        def locator(self, _selector):
+            return Locator()
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=True: (
+            "[Tech] AI Engineer - AI Agent 엔지니어",
+            "Publicado de nuevo hace 37 minutos",
+            datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc),
+            "medium",
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_active_detail_metadata_warning",
+        lambda record: f"active_detail_date_selected:{record.linkedin_job_id}:within_24_hours",
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+    warnings = []
+
+    updated = pipeline._activate_visible_search_card_date_evidence(
+        Page(),
+        record,
+        warnings=warnings,
+    )
+
+    assert updated is record
+    assert updated.published_at is None
+    assert "card_activation_date_identity:4453249078:top_card_title_mismatch" in warnings
+    assert not any(item.startswith("card_activation_date_verified:") for item in warnings)
+
+
+def test_linkedin_card_title_activation_date_evidence_merges_when_title_matches(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class LinkLocator:
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def click(self, **_kwargs):
+            return None
+
+    class RowLocator:
+        def __init__(self, text):
+            self.text = text
+
+        def inner_text(self, **_kwargs):
+            return self.text
+
+        def scroll_into_view_if_needed(self, **_kwargs):
+            return None
+
+        def locator(self, _selector):
+            return LinkLocator()
+
+        def click(self, **_kwargs):
+            return None
+
+    class RowsLocator:
+        def __init__(self):
+            self.rows = [
+                RowLocator("Other Job Company Seoul"),
+                RowLocator("Machine Learning Engineer GOWARD Seoul"),
+            ]
+
+        def count(self):
+            return len(self.rows)
+
+        def nth(self, index):
+            return self.rows[index]
+
+    class Page:
+        def locator(self, _selector):
+            return RowsLocator()
+
+    published_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=True: (
+            "Machine Learning Engineer",
+            "Publicado de nuevo hace 12 minutos",
+            published_at,
+            "medium",
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_active_detail_metadata_warning",
+        lambda record: f"active_detail_date_selected:{record.linkedin_job_id}:within_24_hours",
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+    warnings = []
+
+    updated = pipeline._activate_visible_search_card_by_title_date_evidence(
+        Page(),
+        record,
+        warnings=warnings,
+    )
+
+    assert updated.published_at == published_at
+    assert updated.posted_at_text == "Publicado de nuevo hace 12 minutos"
+    assert updated.is_within_24_hours is True
+    assert "card_title_activation_identity:4453249078:top_card_title_match" in warnings
+    assert "card_title_activation_verified:4453249078:within_24_hours" in warnings
+
+
+def test_linkedin_card_title_activation_date_evidence_skips_without_title():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Page:
+        def locator(self, _selector):
+            raise AssertionError("should not inspect rows without title")
+
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+    warnings = []
+
+    updated = pipeline._activate_visible_search_card_by_title_date_evidence(
+        Page(),
+        record,
+        warnings=warnings,
+    )
+
+    assert updated is record
+    assert warnings == ["card_title_activation_failed:4453249078:missing_title"]
+
+
+def test_linkedin_card_title_activation_date_evidence_rejects_wrong_active_title(monkeypatch):
+    from datetime import datetime, timezone
+
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class LinkLocator:
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def click(self, **_kwargs):
+            return None
+
+    class RowLocator:
+        def inner_text(self, **_kwargs):
+            return "Machine Learning Engineer GOWARD Seoul"
+
+        def scroll_into_view_if_needed(self, **_kwargs):
+            return None
+
+        def locator(self, _selector):
+            return LinkLocator()
+
+        def click(self, **_kwargs):
+            return None
+
+    class RowsLocator:
+        def count(self):
+            return 1
+
+        def nth(self, _index):
+            return RowLocator()
+
+    class Page:
+        def locator(self, _selector):
+            return RowsLocator()
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=True: (
+            "[Tech] AI Engineer - LLM 엔지니어",
+            "Publicado de nuevo hace 12 minutos",
+            datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc),
+            "medium",
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_active_detail_metadata_warning",
+        lambda record: f"active_detail_date_selected:{record.linkedin_job_id}:within_24_hours",
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453249078",
+        title="Machine Learning Engineer",
+        canonical_url="https://www.linkedin.com/jobs/view/4453249078",
+        source_url="https://www.linkedin.com/jobs/search/?keywords=AI",
+    )
+    warnings = []
+
+    updated = pipeline._activate_visible_search_card_by_title_date_evidence(
+        Page(),
+        record,
+        warnings=warnings,
+    )
+
+    assert updated is record
+    assert updated.published_at is None
+    assert "card_title_activation_identity:4453249078:top_card_title_mismatch" in warnings
+    assert not any(item.startswith("card_title_activation_verified:") for item in warnings)
+
+def test_linkedin_unverified_date_visual_evidence_captures_detail_and_card():
+    from types import SimpleNamespace
+
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _capture_unverified_date_visual_evidence,
+    )
+
+    class VisualDiagnostics:
+        def __init__(self):
+            self.calls = []
+
+        def capture_active_detail_date(self, page, *, job_id, reason):
+            self.calls.append(("active", page, job_id, reason))
+
+        def capture_rejected_candidate_card(self, page, *, job_id, reason):
+            self.calls.append(("card", page, job_id, reason))
+
+    visual = VisualDiagnostics()
+    page = object()
+    warnings = []
+
+    _capture_unverified_date_visual_evidence(
+        visual,
+        page,
+        SimpleNamespace(linkedin_job_id="4453249078"),
+        warnings=warnings,
+    )
+
+    assert visual.calls == [
+        ("active", page, "4453249078", "unverified_posted_date"),
+        ("card", page, "4453249078", "unverified_posted_date"),
+    ]
+    assert warnings == ["unverified_date_visual_debug:4453249078"]
+
+
+def test_linkedin_visual_diagnostics_caps_cover_current_unverified_batch():
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        MAX_ACTIVE_DETAIL_DATE_VISUAL_CAPTURES,
+        MAX_REJECTED_CARD_VISUAL_CAPTURES,
+    )
+
+    assert MAX_ACTIVE_DETAIL_DATE_VISUAL_CAPTURES >= 7
+    assert MAX_REJECTED_CARD_VISUAL_CAPTURES >= 7
+
+def test_linkedin_html_collector_adds_rejected_card_artifacts_to_manifest(tmp_path):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        LinkedInHTMLDiagnosticsCollector,
+    )
+
+    class Locator:
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def screenshot(self, *, path):
+            Path(path).write_bytes(b"png")
+
+    class Page:
+        def evaluate(self, _script, job_id):
+            return {
+                "found": True,
+                "job_id": job_id,
+                "selector_kind": "attribute",
+                "tag": "li",
+                "bbox": {"x": 0, "y": 0, "width": 10, "height": 10},
+            }
+
+        def locator(self, _selector):
+            return Locator()
+
+    collector = LinkedInHTMLDiagnosticsCollector(tmp_path, job_uid="job-1")
+    collector.base_dir.mkdir(parents=True, exist_ok=True)
+    (collector.base_dir / "manifest.json").write_text(
+        json.dumps({"artifacts": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    collector.capture_rejected_candidate_card(
+        Page(),
+        job_id="4453249078",
+        reason="outside_24_hours",
+    )
+
+    manifest = json.loads(
+        (collector.base_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["artifacts"][
+        "rejected-card-4453249078-outside_24_hours.json"
+    ] == "rejected-card-4453249078-outside_24_hours.json"
+    assert manifest["artifacts"][
+        "rejected-card-4453249078-outside_24_hours.png"
+    ] == "rejected-card-4453249078-outside_24_hours.png"
+
+
+def test_linkedin_active_detail_date_visual_debug_writes_focused_artifacts(tmp_path):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        LinkedInHTMLDiagnosticsCollector,
+    )
+
+    class Locator:
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def screenshot(self, *, path):
+            Path(path).write_bytes(b"png")
+
+    class Page:
+        def evaluate(self, script):
+            assert "date_candidates" in script
+            return {
+                "found": True,
+                "title_present": True,
+                "title_bbox": {"x": 640, "y": 190, "width": 400, "height": 40},
+                "detail_bbox": {"x": 620, "y": 120, "width": 600, "height": 700},
+                "date_candidates": [
+                    {
+                        "date_text": "hace 3 días",
+                        "tag": "span",
+                        "class_tokens": ["tvm__text"],
+                        "bbox": {"x": 730, "y": 234, "width": 70, "height": 20},
+                        "distance_from_title": 44,
+                    }
+                ],
+            }
+
+        def locator(self, _selector):
+            return Locator()
+
+    collector = LinkedInHTMLDiagnosticsCollector(tmp_path, job_uid="job-1")
+    collector.base_dir.mkdir(parents=True, exist_ok=True)
+    (collector.base_dir / "manifest.json").write_text(
+        json.dumps({"artifacts": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    collector.capture_active_detail_date(
+        Page(),
+        job_id="4450481657",
+        reason="outside_24_hours",
+    )
+
+    manifest = json.loads(
+        (collector.base_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["artifacts"][
+        "active-detail-date-4450481657-outside_24_hours.json"
+    ] == "active-detail-date-4450481657-outside_24_hours.json"
+    assert manifest["artifacts"][
+        "active-detail-date-4450481657-outside_24_hours.png"
+    ] == "active-detail-date-4450481657-outside_24_hours.png"
+    payload = json.loads(
+        (
+            collector.base_dir
+            / "active-detail-date-4450481657-outside_24_hours.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert payload["date_candidates"][0]["date_text"] == "hace 3 días"
+    assert "body" not in json.dumps(payload).casefold()
+
+
+
+
+
+
+
+def test_linkedin_recruiter_profile_url_from_visible_recruiter_section():
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    assert pipeline._safe_linkedin_profile_url_from_href(
+        "https://www.linkedin.com/in/seoul-recruiter?miniProfileUrn=secret"
+    ) == "https://www.linkedin.com/in/seoul-recruiter"
+
+    class Page:
+        def evaluate(self, _script):
+            return [
+                "https://evil.example/in/bad",
+                "https://www.linkedin.com/in/seoul-recruiter?trackingId=secret",
+            ]
+
+    assert pipeline._safe_recruiter_profile_url_from_active_detail(Page()) == (
+        "https://www.linkedin.com/in/seoul-recruiter"
+    )
+
+
+
+def test_linkedin_recruiter_profile_url_from_hiring_team_text_block():
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Page:
+        def evaluate(self, script):
+            assert "equipo de contrataci" in script
+            return ["https://www.linkedin.com/in/seoul-recruiter?trk=jobs"]
+
+    assert pipeline._safe_recruiter_profile_url_from_active_detail(Page()) == (
+        "https://www.linkedin.com/in/seoul-recruiter"
+    )
+
+
+def test_linkedin_recruiter_location_evidence_accepts_korea(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class RecruiterPage:
+        def goto(self, url, **_kwargs):
+            assert url == "https://www.linkedin.com/in/seoul-recruiter"
+
+        def wait_for_timeout(self, _ms):
+            return None
+
+        def evaluate(self, _script):
+            return {"has_korea": True, "has_japan": False, "has_united_states": False}
+
+        def close(self):
+            return None
+
+    class Page:
+        context = SimpleNamespace(new_page=lambda: RecruiterPage())
+
+        def evaluate(self, _script):
+            return ["https://www.linkedin.com/in/seoul-recruiter?trk=job"]
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Machine Learning Engineer", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    warnings = []
+
+    signal = pipeline._recruiter_location_evidence_signal(
+        Page(),
+        record,
+        "South Korea",
+        None,
+        warnings=warnings,
+    )
+
+    assert signal == "korea office"
+    assert warnings == ["recruiter_location_evidence:4453510505:recruiter_profile_korea"]
+
+
+def test_linkedin_recruiter_negative_does_not_block_company_positive(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class RecruiterPage:
+        def goto(self, _url, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, _ms):
+            return None
+
+        def evaluate(self, _script):
+            return {"has_korea": False, "has_japan": False, "has_united_states": True}
+
+        def close(self):
+            return None
+
+    class Page:
+        context = SimpleNamespace(new_page=lambda: RecruiterPage())
+
+        def evaluate(self, _script):
+            return ["https://www.linkedin.com/in/us-recruiter"]
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Machine Learning Engineer", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    warnings = []
+
+    recruiter_signal = pipeline._recruiter_location_evidence_signal(
+        Page(),
+        record,
+        "South Korea",
+        None,
+        warnings=warnings,
+    )
+
+    country_signal_text = "korea office"
+    if recruiter_signal:
+        country_signal_text += f"\n{recruiter_signal}"
+
+    assert recruiter_signal == ""
+    assert pipeline._visible_location_matches_requested_scope(
+        record.location,
+        "South Korea",
+        country_signal_text,
+    )
+    assert warnings == [
+        "recruiter_location_evidence:4453510505:recruiter_profile_united_states"
+    ]
+
+
+def test_linkedin_recruiter_location_visual_debug_writes_artifacts(tmp_path):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        LinkedInHTMLDiagnosticsCollector,
+    )
+
+    class Page:
+        def evaluate(self, script):
+            assert "locationMatch" in script
+            return {
+                "page_path": "/in/seoul-recruiter/",
+                "has_korea": True,
+                "has_japan": False,
+                "has_united_states": False,
+                "location_text": "Seoul, South Korea",
+                "text_length": 800,
+            }
+
+        def screenshot(self, *, path, full_page):
+            assert full_page is False
+            Path(path).write_bytes(b"png")
+
+    collector = LinkedInHTMLDiagnosticsCollector(tmp_path, job_uid="job-1")
+    collector.base_dir.mkdir(parents=True, exist_ok=True)
+    (collector.base_dir / "manifest.json").write_text(
+        json.dumps({"artifacts": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    collector.capture_recruiter_location(
+        Page(),
+        job_id="4453510505",
+        reason="remote_scope_review",
+    )
+
+    manifest = json.loads(
+        (collector.base_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["artifacts"][
+        "recruiter-location-4453510505-remote_scope_review.json"
+    ] == "recruiter-location-4453510505-remote_scope_review.json"
+    assert manifest["artifacts"][
+        "recruiter-location-4453510505-remote_scope_review.png"
+    ] == "recruiter-location-4453510505-remote_scope_review.png"
+
+def test_linkedin_company_about_url_accepts_company_subpages():
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    assert pipeline._safe_linkedin_company_slug_from_href(
+        "/company/hire-feed/life/?trk=jobs"
+    ) == "hire-feed"
+    assert pipeline._safe_company_about_url_from_slug("hire-feed") == (
+        "https://www.linkedin.com/company/hire-feed/about"
+    )
+
+
+def test_linkedin_company_about_url_from_active_detail_uses_first_safe_company_link():
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Page:
+        def evaluate(self, _script):
+            return [
+                "https://evil.example/company/bad/life",
+                "https://www.linkedin.com/company/hire-feed/life/?trackingId=secret",
+            ]
+
+    assert pipeline._safe_company_about_url_from_active_detail(Page()) == (
+        "https://www.linkedin.com/company/hire-feed/about"
+    )
+
+def test_linkedin_company_about_location_evidence_accepts_korea(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class CompanyPage:
+        def __init__(self):
+            self.closed = False
+
+        def goto(self, url, **_kwargs):
+            assert url == "https://www.linkedin.com/company/example-ai/about"
+
+        def wait_for_timeout(self, _ms):
+            return None
+
+        def evaluate(self, _script):
+            return {
+                "has_korea": True,
+                "has_japan": False,
+                "has_united_states": False,
+                "text_length": 500,
+            }
+
+        def close(self):
+            self.closed = True
+
+    class Context:
+        def __init__(self):
+            self.company_page = CompanyPage()
+
+        def new_page(self):
+            return self.company_page
+
+    class Page:
+        def __init__(self):
+            self.context = Context()
+
+        def evaluate(self, _script):
+            return "https://www.linkedin.com/company/example-ai?trk=jobs"
+
+    class VisualDiagnostics:
+        def __init__(self):
+            self.calls = []
+
+        def capture_company_about_location(self, page, *, job_id, reason):
+            self.calls.append((page, job_id, reason))
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Machine Learning Engineer", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    page = Page()
+    visual = VisualDiagnostics()
+    warnings = []
+
+    signal = pipeline._company_about_location_evidence_signal(
+        page,
+        record,
+        "South Korea",
+        visual,
+        warnings=warnings,
+    )
+
+    assert signal == "korea office"
+    assert warnings == ["company_about_location_evidence:4453510505:company_about_korea"]
+    assert visual.calls == [(page.context.company_page, "4453510505", "remote_scope_review")]
+    assert page.context.company_page.closed is True
+
+
+def test_linkedin_company_about_location_evidence_rejects_united_states(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class CompanyPage:
+        def goto(self, url, **_kwargs):
+            assert url == "https://www.linkedin.com/company/hire-feed/about"
+
+        def wait_for_timeout(self, _ms):
+            return None
+
+        def evaluate(self, _script):
+            return {
+                "has_korea": False,
+                "has_japan": False,
+                "has_united_states": True,
+                "text_length": 800,
+            }
+
+        def close(self):
+            return None
+
+    class Page:
+        context = SimpleNamespace(new_page=lambda: CompanyPage())
+
+        def evaluate(self, _script):
+            return "/company/hire-feed/about/?trackingId=secret"
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Machine Learning Engineer - AI (Remote)", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    warnings = []
+
+    signal = pipeline._company_about_location_evidence_signal(
+        Page(),
+        record,
+        "South Korea",
+        None,
+        warnings=warnings,
+    )
+
+    assert signal == ""
+    assert warnings == [
+        "company_about_location_evidence:4453510505:company_about_united_states"
+    ]
+
+
+def test_linkedin_company_about_location_evidence_requires_active_identity(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Context:
+        def new_page(self):
+            raise AssertionError("should not open company page on identity mismatch")
+
+    class Page:
+        context = Context()
+
+        def evaluate(self, _script):
+            raise AssertionError("should not inspect company link on identity mismatch")
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Unrelated AI Engineer", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    warnings = []
+
+    signal = pipeline._company_about_location_evidence_signal(
+        Page(),
+        record,
+        "South Korea",
+        None,
+        warnings=warnings,
+    )
+
+    assert signal == ""
+    assert warnings == [
+        "company_about_location_evidence:4453510505:identity_top_card_title_mismatch"
+    ]
+
+
+def test_linkedin_company_about_location_visual_debug_writes_artifacts(tmp_path):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        LinkedInHTMLDiagnosticsCollector,
+    )
+
+    class Page:
+        def evaluate(self, script):
+            assert "headquarters" in script
+            return {
+                "page_path": "/company/hire-feed/about/",
+                "has_korea": False,
+                "has_japan": False,
+                "has_united_states": True,
+                "headquarters_text": "Menlo Park, California, United States",
+                "location_text": "Menlo Park, California",
+                "text_length": 1200,
+            }
+
+        def screenshot(self, *, path, full_page):
+            assert full_page is False
+            Path(path).write_bytes(b"png")
+
+    collector = LinkedInHTMLDiagnosticsCollector(tmp_path, job_uid="job-1")
+    collector.base_dir.mkdir(parents=True, exist_ok=True)
+    (collector.base_dir / "manifest.json").write_text(
+        json.dumps({"artifacts": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    collector.capture_company_about_location(
+        Page(),
+        job_id="4453510505",
+        reason="remote_scope_review",
+    )
+
+    manifest = json.loads(
+        (collector.base_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["artifacts"][
+        "company-about-location-4453510505-remote_scope_review.json"
+    ] == "company-about-location-4453510505-remote_scope_review.json"
+    assert manifest["artifacts"][
+        "company-about-location-4453510505-remote_scope_review.png"
+    ] == "company-about-location-4453510505-remote_scope_review.png"
+    payload = json.loads(
+        (
+            collector.base_dir
+            / "company-about-location-4453510505-remote_scope_review.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert payload["has_united_states"] is True
+    assert payload["location_text"] == "Menlo Park, California"
+    assert "trackingId" not in json.dumps(payload)
+
+def test_linkedin_remote_scope_page_evidence_accepts_company_korea_when_identity_matches(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Page:
+        def evaluate(self, _script):
+            return {
+                "company_has_korea": True,
+                "recruiter_has_korea": False,
+                "location_has_korea": False,
+                "company_has_japan": False,
+                "recruiter_has_japan": False,
+                "location_has_japan": False,
+                "company_node_count": 3,
+                "recruiter_node_count": 1,
+                "location_node_count": 4,
+            }
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Machine Learning Engineer - AI (Remote)", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    warnings = []
+
+    signal = pipeline._remote_scope_page_country_evidence_signal(
+        Page(),
+        record,
+        "South Korea",
+        warnings=warnings,
+    )
+
+    assert signal == "korea office"
+    assert "remote_scope_structured_evidence:4453510505:company_location_korea" in warnings
+    assert pipeline._visible_location_matches_requested_scope(
+        record.location,
+        "South Korea",
+        signal,
+    )
+
+
+def test_linkedin_remote_scope_page_evidence_rejects_when_identity_mismatches(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Page:
+        def evaluate(self, _script):
+            raise AssertionError("should not inspect page text after identity mismatch")
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Unrelated AI Engineer", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    warnings = []
+
+    signal = pipeline._remote_scope_page_country_evidence_signal(
+        Page(),
+        record,
+        "South Korea",
+        warnings=warnings,
+    )
+
+    assert signal == ""
+    assert warnings == [
+        "remote_scope_structured_evidence:4453510505:identity_top_card_title_mismatch"
+    ]
+
+
+def test_linkedin_remote_scope_page_evidence_accepts_recruiter_korea_when_identity_matches(monkeypatch):
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    import features.web_scraping.infrastructure.linkedin_jobs_pipeline as pipeline
+
+    class Page:
+        def evaluate(self, _script):
+            return {
+                "company_has_korea": False,
+                "recruiter_has_korea": True,
+                "location_has_korea": False,
+                "company_node_count": 1,
+                "recruiter_node_count": 2,
+                "location_node_count": 3,
+            }
+
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_active_detail_metadata",
+        lambda page, require_date=False: ("Machine Learning Engineer", "", None, "", False),
+    )
+    record = LinkedInVacancyRecord(
+        linkedin_job_id="4453510505",
+        title="Machine Learning Engineer",
+        location="Asia-Pacífico",
+        canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+        source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+    )
+    warnings = []
+
+    signal = pipeline._remote_scope_page_country_evidence_signal(
+        Page(),
+        record,
+        "South Korea",
+        warnings=warnings,
+    )
+
+    assert signal == "korea office"
+    assert "remote_scope_structured_evidence:4453510505:recruiter_location_korea" in warnings
+
+def test_linkedin_company_recruiter_location_visual_debug_writes_artifacts(tmp_path):
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        LinkedInHTMLDiagnosticsCollector,
+    )
+
+    class Locator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1 if "company" in self.selector or self.selector == "main, .jobs-search__job-details, .job-details-jobs-unified-top-card, .jobs-unified-top-card" else 0
+
+        def screenshot(self, *, path):
+            Path(path).write_bytes(b"png")
+
+    class Page:
+        def evaluate(self, script):
+            assert "recruiter_candidate_count" in script
+            return {
+                "schema_version": "1.0",
+                "top_card": {"found": True},
+                "company": {"found": True},
+                "recruiter_candidate_count": 0,
+                "location_candidate_count": 1,
+            }
+
+        def locator(self, selector):
+            return Locator(selector)
+
+    collector = LinkedInHTMLDiagnosticsCollector(tmp_path, job_uid="job-1")
+    collector.base_dir.mkdir(parents=True, exist_ok=True)
+    (collector.base_dir / "manifest.json").write_text(
+        json.dumps({"artifacts": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    collector.capture_company_recruiter_location(
+        Page(),
+        job_id="4453510505",
+        reason="remote_scope_review",
+    )
+
+    manifest = json.loads(
+        (collector.base_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["artifacts"][
+        "company-recruiter-location-4453510505-remote_scope_review.json"
+    ] == "company-recruiter-location-4453510505-remote_scope_review.json"
+    assert manifest["artifacts"][
+        "company-recruiter-location-4453510505-remote_scope_review-top-card.png"
+    ] == "company-recruiter-location-4453510505-remote_scope_review-top-card.png"
+    payload = json.loads(
+        (
+            collector.base_dir
+            / "company-recruiter-location-4453510505-remote_scope_review.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert payload["company"]["found"] is True
+    assert "innerText" not in json.dumps(payload)
+
+
+def test_linkedin_remote_scope_visual_evidence_only_for_regional_remote():
+    from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
+    from features.web_scraping.infrastructure.linkedin_jobs_pipeline import (
+        _capture_remote_scope_visual_evidence,
+    )
+
+    class VisualDiagnostics:
+        def __init__(self):
+            self.calls = []
+
+        def capture_company_recruiter_location(self, page, *, job_id, reason):
+            self.calls.append((page, job_id, reason))
+
+    visual = VisualDiagnostics()
+    page = object()
+    warnings = []
+
+    _capture_remote_scope_visual_evidence(
+        visual,
+        page,
+        LinkedInVacancyRecord(
+            linkedin_job_id="4453510505",
+            title="Machine Learning Engineer - AI (Remote)",
+            location="Asia-Pacífico",
+            canonical_url="https://www.linkedin.com/jobs/view/4453510505",
+            source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+        ),
+        warnings=warnings,
+    )
+    _capture_remote_scope_visual_evidence(
+        visual,
+        page,
+        LinkedInVacancyRecord(
+            linkedin_job_id="4394456615",
+            title="AI Engineer",
+            location="Seúl, Corea del Sur",
+            canonical_url="https://www.linkedin.com/jobs/view/4394456615",
+            source_url="https://www.linkedin.com/jobs/search?location=South+Korea",
+        ),
+        warnings=warnings,
+    )
+
+    assert visual.calls == [(page, "4453510505", "remote_scope_review")]
+    assert warnings == ["remote_scope_visual_debug:4453510505:remote_scope_review"]
 
 def test_linkedin_html_diagnostics_sanitize_text_and_sensitive_attributes():
     from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
@@ -10368,6 +12273,7 @@ def test_linkedin_row_activation_stops_after_two_moving_scrolls_without_new_ids(
     assert result.stop_reason == "two_scrolls_without_new_job_ids"
 
 
+
 def test_linkedin_row_ids_merge_one_dom_and_five_row_ids_into_five_unique_candidates():
     from features.web_scraping.domain.linkedin_models import LinkedInVacancyRecord
     from features.web_scraping.infrastructure.linkedin_query_navigation import merge_row_activation_records
@@ -10382,6 +12288,82 @@ def test_linkedin_row_ids_merge_one_dom_and_five_row_ids_into_five_unique_candid
     assert len(merged) == 5
 
 
+def test_linkedin_card_structure_debug_is_opt_in_and_sanitized(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.delenv("LINKEDIN_CARD_STRUCTURE_DEBUG", raising=False)
+
+    from features.web_scraping.infrastructure.linkedin_card_structure_debug import (
+        CARD_STRUCTURE_DEBUG_FILENAME,
+        capture_visible_linkedin_card_structure_debug,
+    )
+
+    class Page:
+        def evaluate(self, _script):
+            return {
+                "card_count": 1,
+                "viewport": {"width": 1280, "height": 720},
+                "cards": [
+                    {
+                        "card_index": 0,
+                        "resolved_job_id": "4426794001",
+                        "title_present": True,
+                        "date_texts": ["Hace 10 horas", "secret<script>"],
+                        "has_href": True,
+                        "has_data_job_id": False,
+                        "has_data_occludable_job_id": True,
+                        "bbox": {"x": 120, "y": 590, "width": 480, "height": 120},
+                        "ancestor_chain": [
+                            {
+                                "depth": 0,
+                                "tag": "li",
+                                "class_tokens": ["job-card", "token<script>"],
+                                "has_href": True,
+                                "has_data_job_id": False,
+                                "has_data_occludable_job_id": True,
+                                "bbox": {"x": 120, "y": 590, "width": 480, "height": 120},
+                                "date_texts": ["Hace 10 horas"],
+                                "child_count": 8,
+                            }
+                        ],
+                    }
+                ],
+            }
+
+    assert capture_visible_linkedin_card_structure_debug(Page(), tmp_path) is None
+
+    monkeypatch.setenv("LINKEDIN_CARD_STRUCTURE_DEBUG", "true")
+    path = capture_visible_linkedin_card_structure_debug(Page(), tmp_path)
+
+    assert path == tmp_path / CARD_STRUCTURE_DEBUG_FILENAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["cards"][0]["resolved_job_id"] == "4426794001"
+    assert payload["cards"][0]["date_texts"][0] == "Hace 10 horas"
+    assert "<script>" not in path.read_text(encoding="utf-8")
+
+
+def test_linkedin_html_diagnostics_manifest_includes_card_structure_debug(tmp_path, monkeypatch):
+    from features.web_scraping.infrastructure.linkedin_card_structure_debug import (
+        CARD_STRUCTURE_DEBUG_FILENAME,
+    )
+    from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
+        LinkedInHTMLDiagnosticsCollector,
+        _HTMLDiagnosticRun,
+    )
+
+    collector = LinkedInHTMLDiagnosticsCollector(tmp_path, job_uid="job-1")
+    run = _HTMLDiagnosticRun(collector, query="AI")
+    run.base_dir.mkdir(parents=True, exist_ok=True)
+    (run.base_dir / CARD_STRUCTURE_DEBUG_FILENAME).write_text(
+        '{"schema_version":"1.0","cards":[]}',
+        encoding="utf-8",
+    )
+
+    run.finalize()
+
+    assert CARD_STRUCTURE_DEBUG_FILENAME in (run.base_dir / "manifest.json").read_text(encoding="utf-8")
+
+
 def test_linkedin_html_diagnostics_new_bundle_is_local_bounded_and_manifest_safe(tmp_path, monkeypatch):
     from features.web_scraping.infrastructure.linkedin_visual_diagnostics import (
         MAX_HTML_DIAGNOSTIC_ACTIVATIONS,
@@ -10392,6 +12374,7 @@ def test_linkedin_html_diagnostics_new_bundle_is_local_bounded_and_manifest_safe
     )
 
     monkeypatch.setenv("LINKEDIN_HTML_DIAGNOSTICS", "true")
+    monkeypatch.delenv("LINKEDIN_CARD_STRUCTURE_DEBUG", raising=False)
     assert MAX_HTML_DIAGNOSTIC_ACTIVATIONS == 3
     assert MAX_ROW_ACTIVATIONS_PER_QUERY == 20
 
