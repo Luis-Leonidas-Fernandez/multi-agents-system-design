@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from application.services.request_runtime import get_request_runtime_config
+from features.web_scraping.application.session_retention import enforce_recent_session_retention
 from features.web_scraping.domain.moodle_models import MoodleAssignment, ValidatedMoodleAssignments
 
 
@@ -58,12 +59,14 @@ def get_moodle_artifact_dir() -> Path:
     config = get_request_runtime_config()
     session_id = _slug(config.session_id or "local")
     request_id = _slug(config.request_id or "manual")
-    return Path("data") / "sessions" / session_id / "moodle" / request_id
+    path = Path("data") / "sessions" / session_id / "moodle" / request_id
+    path.mkdir(parents=True, exist_ok=True)
+    enforce_recent_session_retention()
+    return path
 
 
 def _artifact_paths() -> MoodleArtifactPaths:
     base_dir = get_moodle_artifact_dir()
-    base_dir.mkdir(parents=True, exist_ok=True)
     return MoodleArtifactPaths(
         json_path=base_dir / "moodle_tasks.json",
         markdown_path=base_dir / "moodle_tasks.md",
